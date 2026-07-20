@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 
 import pytest
@@ -71,6 +72,26 @@ class Scheduler:
 
     async def aclose(self) -> None:
         self._events.append("scheduler_stop")
+
+
+def test_runtime_logging_suppresses_transport_queries_but_keeps_application_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from commerce_agent.runtime import _configure_logging
+
+    canary = "https://public.example.com/items?canary=must-not-appear"
+    with caplog.at_level(logging.INFO):
+        _configure_logging("INFO")
+        logging.getLogger("httpx").info("request %s", canary)
+        logging.getLogger("httpcore.connection").info("connect %s", canary)
+        logging.getLogger("lark_channel.ws").info("websocket %s", canary)
+        logging.getLogger("commerce_agent.runtime").info("application-ready")
+
+    assert "application-ready" in caplog.text
+    assert canary not in caplog.text
+    assert "?canary=" not in caplog.text
+    for logger_name in ("httpx", "httpcore", "lark_channel"):
+        assert logging.getLogger(logger_name).level == logging.WARNING
 
 
 def resources(
@@ -180,3 +201,28 @@ async def test_disabled_scheduler_is_neither_started_nor_stopped() -> None:
 
     assert "scheduler_start" not in events
     assert "scheduler_stop" not in events
+
+
+async def test_runtime_rejects_browser_mode_before_creating_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import runtime
+    from commerce_agent.config import ProductionConfigurationError
+
+    class BrowserSettings:
+        ingestion_browser_enabled = True
+        ingestion_scheduler_enabled = True
+
+    def forbidden_database(url: str) -> object:
+        del url
+        raise AssertionError("database must not be created")
+
+    async def forbidden_ingestion(settings: object, database: object) -> object:
+        del settings, database
+        raise AssertionError("ingestion resources must not be created")
+
+    monkeypatch.setattr(runtime, "Database", forbidden_database)
+    monkeypatch.setattr(runtime, "_build_ingestion", forbidden_ingestion)
+
+    with pytest.raises(ProductionConfigurationError, match="browser ingestion is unavailable"):
+        await runtime._run_configured(BrowserSettings())

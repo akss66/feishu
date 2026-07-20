@@ -8,11 +8,13 @@ from lark_channel import FeishuChannel, LogLevel, SecurityConfig
 from openai import AsyncOpenAI
 
 from commerce_agent.application import BotService
-from commerce_agent.config import Settings
+from commerce_agent.config import Settings, require_browser_ingestion_disabled
 from commerce_agent.integrations.deepseek import DeepSeekGateway
 from commerce_agent.integrations.feishu import FeishuAdapter
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.group_bindings import SqlAlchemyGroupBindingStore
+
+_TRANSPORT_LOGGERS = ("httpx", "httpcore", "lark_channel")
 
 
 class _AsyncCloser(Protocol):
@@ -31,10 +33,21 @@ class RuntimeResources:
 
 async def run() -> None:
     settings = Settings()
+    _configure_logging(settings.log_level)
+    await _run_configured(settings)
+
+
+def _configure_logging(log_level: str) -> None:
     logging.basicConfig(
-        level=getattr(logging, settings.log_level),
+        level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    for logger_name in _TRANSPORT_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+async def _run_configured(settings: Settings) -> None:
+    require_browser_ingestion_disabled(bool(getattr(settings, "ingestion_browser_enabled", False)))
     scheduler_enabled = bool(getattr(settings, "ingestion_scheduler_enabled", False))
     resources = RuntimeResources()
     try:
@@ -77,7 +90,6 @@ async def _build_ingestion(
         BrowserCollector,
         FeedCollector,
         HtmlCollector,
-        PlaywrightBrowserPort,
         SitemapCollector,
     )
     from commerce_agent.ingestion.compliance import CompliancePolicy
@@ -103,19 +115,14 @@ async def _build_ingestion(
         user_agent=settings.ingestion_user_agent,
     )
     try:
-        browser_port = (
-            PlaywrightBrowserPort(safety_policy=safety_policy)
-            if settings.ingestion_browser_enabled
-            else None
-        )
         collectors = {
             CollectorKind.RSS: FeedCollector(http_client),
             CollectorKind.SITEMAP: SitemapCollector(http_client),
             CollectorKind.HTML: HtmlCollector(http_client),
             CollectorKind.API: ApiCollector(http_client),
             CollectorKind.BROWSER: BrowserCollector(
-                enabled=settings.ingestion_browser_enabled,
-                browser_port=browser_port,
+                enabled=False,
+                browser_port=None,
                 timeout_seconds=settings.ingestion_http_timeout_seconds,
             ),
         }
