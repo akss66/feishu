@@ -133,6 +133,37 @@ def test_rejects_url_with_embedded_whitespace(tmp_path: Path) -> None:
         SourceRegistry.from_yaml(_write_registry(tmp_path, document))
 
 
+@pytest.mark.parametrize("field", ["entry_url", "terms_url", "robots_url"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "127.0.0.1",
+        "[::1]",
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.1",
+        "169.254.1.1",
+        "[fe80::1]",
+        "0.0.0.0",
+        "[::]",
+        "240.0.0.1",
+        "192.0.2.1",
+        "169.254.169.254",
+        "100.100.100.200",
+        "metadata.google.internal",
+        "metadata.goog",
+        "instance-data.ec2.internal",
+    ],
+)
+def test_rejects_non_public_and_metadata_hosts(tmp_path: Path, host: str, field: str) -> None:
+    document = _valid_document()
+    document["sources"][0][field] = f"http://{host}/news"  # type: ignore[index]
+
+    with pytest.raises(SourceRegistryError, match=rf"zeta-html.*{field}"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
 @pytest.mark.parametrize(
     "field",
     ["terms_url", "robots_url", "reviewed_at", "compliance_notes"],

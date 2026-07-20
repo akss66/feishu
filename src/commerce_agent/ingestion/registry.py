@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from datetime import date
+from ipaddress import ip_address
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeVar
@@ -65,6 +66,14 @@ _REQUIRED_CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
     CollectorKind.API: frozenset({"items_path", "url_field"}),
     CollectorKind.BROWSER: frozenset({"link_selector"}),
 }
+_METADATA_HOSTS = frozenset(
+    {
+        "instance-data.ec2.internal",
+        "metadata.google.internal",
+        "metadata.goog",
+    }
+)
+_METADATA_IPS = frozenset({"100.100.100.200", "169.254.169.254", "169.254.170.2"})
 
 
 class SourceRegistry:
@@ -255,6 +264,7 @@ def _require_url(value: object, field: str, context: str) -> str:
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname
         or any(character.isspace() for character in url)
+        or _is_forbidden_static_host(parsed.hostname)
         or parsed.username is not None
         or parsed.password is not None
         or port is not None
@@ -262,6 +272,24 @@ def _require_url(value: object, field: str, context: str) -> str:
     ):
         raise SourceRegistryError(f"{context}: {field} must be an absolute HTTP(S) URL")
     return url
+
+
+def _is_forbidden_static_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    if (
+        normalized == "localhost"
+        or normalized.endswith(".localhost")
+        or normalized in _METADATA_HOSTS
+        or normalized in _METADATA_IPS
+    ):
+        return True
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        return False
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return not address.is_global or address.is_multicast
 
 
 def _parse_platforms(value: object, context: str) -> tuple[Platform, ...]:
