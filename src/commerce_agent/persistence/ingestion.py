@@ -208,7 +208,6 @@ class SqlAlchemyIngestionRepository:
                 raise ValueError("run summary does not match the started fetch run")
 
             run.status = summary.status.value
-            run.started_at = summary.started_at
             run.finished_at = summary.finished_at
             run.discovered = summary.discovered
             run.created = summary.created
@@ -222,7 +221,11 @@ class SqlAlchemyIngestionRepository:
                 raise RuntimeError("fetch run references an unknown source")
             health = await session.get(SourceHealth, summary.source_id)
             if health is None:
-                health = SourceHealth(source_id=summary.source_id)
+                health = SourceHealth(
+                    source_id=summary.source_id,
+                    consecutive_failures=0,
+                    health_status="unknown",
+                )
                 session.add(health)
 
             health.last_attempt_at = summary.finished_at

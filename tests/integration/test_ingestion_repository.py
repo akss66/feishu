@@ -181,6 +181,101 @@ async def test_fetch_run_lifecycle_updates_health_aggregation(tmp_path) -> None:
         await database.dispose()
 
 
+async def test_first_failed_run_initializes_health_failure_count(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    started_at = datetime(2026, 7, 20, 4, tzinfo=UTC)
+    try:
+        await repository.sync_sources([_source()])
+        run_id = await repository.start_run(
+            "amazon-news", Trigger.SCHEDULED, started_at=started_at
+        )
+
+        await repository.finish_run(
+            run_id,
+            RunSummary(
+                source_id="amazon-news",
+                trigger=Trigger.SCHEDULED,
+                status=RunStatus.FAILED,
+                started_at=started_at,
+                finished_at=started_at + timedelta(seconds=10),
+                failed=1,
+                error_code="timeout",
+            ),
+        )
+
+        async with database.session() as session:
+            health = await session.get(SourceHealth, "amazon-news")
+
+        assert health is not None
+        assert health.consecutive_failures == 1
+        assert health.health_status == "error"
+    finally:
+        await database.dispose()
+
+
+async def test_first_partial_run_initializes_health_failure_count(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    started_at = datetime(2026, 7, 20, 5, tzinfo=UTC)
+    try:
+        await repository.sync_sources([_source()])
+        run_id = await repository.start_run(
+            "amazon-news", Trigger.MANUAL, started_at=started_at
+        )
+
+        await repository.finish_run(
+            run_id,
+            RunSummary(
+                source_id="amazon-news",
+                trigger=Trigger.MANUAL,
+                status=RunStatus.PARTIAL,
+                started_at=started_at,
+                finished_at=started_at + timedelta(seconds=20),
+                created=1,
+                failed=1,
+                error_code="extract_failed",
+            ),
+        )
+
+        async with database.session() as session:
+            health = await session.get(SourceHealth, "amazon-news")
+
+        assert health is not None
+        assert health.consecutive_failures == 1
+        assert health.health_status == "degraded"
+    finally:
+        await database.dispose()
+
+
+async def test_finish_run_preserves_the_started_at_recorded_by_start_run(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    persisted_started_at = datetime(2026, 7, 20, 6, tzinfo=UTC)
+    summary_started_at = persisted_started_at + timedelta(minutes=5)
+    try:
+        await repository.sync_sources([_source()])
+        run_id = await repository.start_run(
+            "amazon-news", Trigger.SCHEDULED, started_at=persisted_started_at
+        )
+
+        await repository.finish_run(
+            run_id,
+            RunSummary(
+                source_id="amazon-news",
+                trigger=Trigger.SCHEDULED,
+                status=RunStatus.SUCCESS,
+                started_at=summary_started_at,
+                finished_at=summary_started_at + timedelta(seconds=30),
+            ),
+        )
+
+        async with database.session() as session:
+            run = await session.get(FetchRun, run_id)
+
+        assert run is not None
+        assert run.started_at == persisted_started_at
+    finally:
+        await database.dispose()
+
+
 async def test_persist_version_enforces_identity_and_immutable_version_uniqueness(
     tmp_path,
 ) -> None:
