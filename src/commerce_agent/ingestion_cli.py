@@ -247,13 +247,21 @@ async def run_cli(
             errors.write("error: command failed\n")
             return 3
 
+    if arguments.command == "sources":
+        try:
+            _write_sources(registry_factory(), output)
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
+                raise
+            errors.write("error: command failed\n")
+            return 3
+        return 0
+
     application: CliApplication | None = None
     exit_code = 0
     try:
         application = await app_factory()
-        if arguments.command == "sources":
-            _write_sources(application.registry, output)
-        elif arguments.command == "health":
+        if arguments.command == "health":
             _write_health(await application.health(), output)
         else:
             summaries: tuple[RunSummary, ...]

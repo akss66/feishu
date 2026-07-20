@@ -154,7 +154,31 @@ async def test_sources_list_is_deterministic_and_includes_coverage_metadata() ->
     assert "authorization_required" in stdout
     assert "public_covered_seller_center_pending" in stdout
     assert "partial" in stdout
-    assert app.closed is True
+    assert app.closed is False
+
+
+async def test_sources_list_uses_only_registry_factory() -> None:
+    registry = SourceRegistry([source("amazon-news", platform="amazon")])
+    app_factory_calls: list[str] = []
+
+    async def broken_app_factory() -> FakeApplication:
+        app_factory_calls.append("built")
+        raise RuntimeError("application dependencies must not be initialized")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = await run_cli(
+        ["sources", "list"],
+        app_factory=broken_app_factory,
+        registry_factory=lambda: registry,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "amazon-news" in stdout.getvalue()
+    assert stderr.getvalue() == ""
+    assert app_factory_calls == []
 
 
 @pytest.mark.parametrize(
