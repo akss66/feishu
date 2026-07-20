@@ -34,6 +34,7 @@ from commerce_agent.ingestion.models import (
     Trigger,
     TrustTier,
 )
+from commerce_agent.ingestion.security import UrlSafetyPolicy
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "ingestion"
 
@@ -64,6 +65,16 @@ class FakeBrowserPort:
     async def render(self, request: BrowserRequest) -> RenderedPage:
         self.requests.append(request)
         return self.page
+
+
+class FakeResolver:
+    def __init__(self, addresses: dict[str, tuple[str, ...]]) -> None:
+        self.addresses = addresses
+        self.calls: list[str] = []
+
+    async def __call__(self, host: str) -> tuple[str, ...]:
+        self.calls.append(host)
+        return self.addresses[host]
 
 
 def source(
@@ -219,6 +230,53 @@ async def test_sitemap_collector_caps_unique_candidates() -> None:
         "https://docs.example.com/articles/alpha",
         "https://docs.example.com/articles/shared",
     ]
+
+
+@pytest.mark.asyncio
+async def test_sitemap_collector_stops_a_cycle_without_refetching() -> None:
+    root = "https://docs.example.com/sitemap.xml"
+    nested = "https://docs.example.com/nested.xml"
+    http = FakeHttpPort(
+        {
+            root: _sitemap_index(nested),
+            nested: _sitemap_index(root),
+        }
+    )
+    definition = source(CollectorKind.SITEMAP, entry_url=root, config={"item_limit": 10})
+
+    items = await collected(SitemapCollector(http), definition)
+
+    assert items == []
+    assert [request.url for request in http.requests] == [root, nested]
+
+
+@pytest.mark.asyncio
+async def test_sitemap_collector_rejects_more_than_256_sitemap_documents() -> None:
+    urls = [f"https://docs.example.com/sitemap-{index}.xml" for index in range(257)]
+    responses = {
+        url: _sitemap_index(urls[index + 1])
+        for index, url in enumerate(urls[:-1])
+    }
+    http = FakeHttpPort(responses)
+    definition = source(
+        CollectorKind.SITEMAP,
+        entry_url=urls[0],
+        config={"item_limit": 10},
+    )
+
+    with pytest.raises(CollectorError) as error:
+        await collected(SitemapCollector(http), definition)
+
+    assert error.value.code == "item_limit_exceeded"
+    assert len(http.requests) == 256
+
+
+def _sitemap_index(url: str) -> bytes:
+    return (
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"<sitemap><loc>{url}</loc></sitemap>"
+        "</sitemapindex>"
+    ).encode()
 
 
 @pytest.mark.asyncio
@@ -397,9 +455,14 @@ async def test_browser_collector_classifies_missing_playwright(
         entry_url="https://browser.example.com/list",
         config={"link_selector": "a"},
     )
+    resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
+    browser_port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
 
     with pytest.raises(CollectorError) as error:
-        await collected(BrowserCollector(enabled=True), definition)
+        await collected(
+            BrowserCollector(enabled=True, browser_port=browser_port),
+            definition,
+        )
 
     assert error.value.code == "renderer_unavailable"
 
@@ -417,12 +480,13 @@ class FakeRoute:
 
 
 class FakePage:
-    def __init__(self) -> None:
-        self.url = "https://browser.example.com/final/"
+    def __init__(self, final_url: str) -> None:
+        self.url = final_url
         self.route_handler: Any = None
         self.default_timeout: float | None = None
         self.navigation_timeout: float | None = None
         self.goto_call: tuple[str, dict[str, Any]] | None = None
+        self.content_calls = 0
 
     def set_default_timeout(self, timeout: float) -> None:
         self.default_timeout = timeout
@@ -438,12 +502,13 @@ class FakePage:
         self.goto_call = (url, kwargs)
 
     async def content(self) -> str:
+        self.content_calls += 1
         return '<a href="/rendered">Rendered</a>'
 
 
 class FakeContext:
-    def __init__(self) -> None:
-        self.page = FakePage()
+    def __init__(self, final_url: str) -> None:
+        self.page = FakePage(final_url)
         self.closed = False
 
     async def new_page(self) -> FakePage:
@@ -454,14 +519,16 @@ class FakeContext:
 
 
 class FakeBrowser:
-    def __init__(self) -> None:
+    def __init__(self, final_url: str) -> None:
+        self.final_url = final_url
         self.contexts: list[FakeContext] = []
         self.context_options: list[dict[str, Any]] = []
+        self.launch_options: dict[str, Any] = {}
         self.closed = False
 
     async def new_context(self, **kwargs: Any) -> FakeContext:
         self.context_options.append(kwargs)
-        context = FakeContext()
+        context = FakeContext(self.final_url)
         self.contexts.append(context)
         return context
 
@@ -470,15 +537,16 @@ class FakeBrowser:
 
 
 class FakePlaywrightManager:
-    def __init__(self, browsers: list[FakeBrowser]) -> None:
+    def __init__(self, browsers: list[FakeBrowser], final_url: str) -> None:
         self.browsers = browsers
+        self.final_url = final_url
 
     async def __aenter__(self):
-        browser = FakeBrowser()
+        browser = FakeBrowser(self.final_url)
         self.browsers.append(browser)
 
         async def launch(**kwargs: Any) -> FakeBrowser:
-            assert kwargs == {"headless": True}
+            browser.launch_options = kwargs
             return browser
 
         return SimpleNamespace(chromium=SimpleNamespace(launch=launch))
@@ -492,12 +560,16 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     browsers: list[FakeBrowser] = []
-    module = SimpleNamespace(async_playwright=lambda: FakePlaywrightManager(browsers))
+    final_url = "https://xn--bcher-kva.example/final/"
+    module = SimpleNamespace(
+        async_playwright=lambda: FakePlaywrightManager(browsers, final_url)
+    )
     monkeypatch.setattr(importlib, "import_module", lambda name: module)
-    port = PlaywrightBrowserPort()
+    resolver = FakeResolver({"xn--bcher-kva.example": ("1.1.1.1",)})
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
     request = BrowserRequest(
-        url="https://browser.example.com/list",
-        allowed_hosts=("browser.example.com",),
+        url="https://bücher.example/list#fragment",
+        allowed_hosts=("bücher.example",),
         timeout_seconds=2.5,
     )
 
@@ -505,9 +577,17 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
     second = await port.render(request)
 
     assert first.body == b'<a href="/rendered">Rendered</a>'
-    assert second.url == "https://browser.example.com/final/"
+    assert second.url == final_url
     assert len(browsers) == 2
     for browser in browsers:
+        assert browser.launch_options == {
+            "headless": True,
+            "args": [
+                "--disable-quic",
+                "--host-resolver-rules="
+                "MAP xn--bcher-kva.example 1.1.1.1, MAP * ^NOTFOUND",
+            ],
+        }
         assert browser.context_options == [
             {"accept_downloads": False, "service_workers": "block"}
         ]
@@ -517,7 +597,7 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
         assert page.default_timeout == 2500
         assert page.navigation_timeout == 2500
         assert page.goto_call == (
-            "https://browser.example.com/list",
+            "https://xn--bcher-kva.example/list",
             {"wait_until": "domcontentloaded", "timeout": 2500},
         )
 
@@ -525,6 +605,103 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
         await page.route_handler(blocked)
         assert blocked.action == "abort:blockedbyclient"
 
-        allowed = FakeRoute("https://browser.example.com/script.js")
+        allowed = FakeRoute("https://xn--bcher-kva.example/script.js")
         await page.route_handler(allowed)
         assert allowed.action == "continue"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "addresses"),
+    [
+        ("http://browser.example.com/list", ("1.1.1.1",)),
+        ("https://browser.example.com:8443/list", ("1.1.1.1",)),
+        ("https://browser.example.com/list", ("127.0.0.1",)),
+    ],
+)
+async def test_playwright_port_rejects_unsafe_entry_before_browser_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    addresses: tuple[str, ...],
+) -> None:
+    browsers: list[FakeBrowser] = []
+    module = SimpleNamespace(
+        async_playwright=lambda: FakePlaywrightManager(
+            browsers,
+            "https://browser.example.com/final/",
+        )
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: module)
+    resolver = FakeResolver({"browser.example.com": addresses})
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
+    request = BrowserRequest(
+        url=url,
+        allowed_hosts=("browser.example.com",),
+        timeout_seconds=2.5,
+    )
+
+    with pytest.raises(CollectorError) as error:
+        await port.render(request)
+
+    assert error.value.code == "renderer_security_rejected"
+    assert browsers == []
+
+
+@pytest.mark.asyncio
+async def test_playwright_port_revalidates_and_blocks_unsafe_subresources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browsers: list[FakeBrowser] = []
+    module = SimpleNamespace(
+        async_playwright=lambda: FakePlaywrightManager(
+            browsers,
+            "https://browser.example.com/final/",
+        )
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: module)
+    resolver = FakeResolver(
+        {
+            "browser.example.com": ("1.1.1.1",),
+            "cdn.example.com": ("8.8.8.8",),
+        }
+    )
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
+    request = BrowserRequest(
+        url="https://browser.example.com/list",
+        allowed_hosts=("browser.example.com", "cdn.example.com"),
+        timeout_seconds=2.5,
+    )
+
+    await port.render(request)
+    resolver.addresses["cdn.example.com"] = ("127.0.0.1",)
+    route = FakeRoute("https://cdn.example.com/script.js")
+    await browsers[0].contexts[0].page.route_handler(route)
+
+    assert route.action == "abort:blockedbyclient"
+
+
+@pytest.mark.asyncio
+async def test_playwright_port_rejects_unsafe_final_redirect_before_reading_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browsers: list[FakeBrowser] = []
+    module = SimpleNamespace(
+        async_playwright=lambda: FakePlaywrightManager(
+            browsers,
+            "https://redirected.example.com/private",
+        )
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: module)
+    resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
+    request = BrowserRequest(
+        url="https://browser.example.com/list",
+        allowed_hosts=("browser.example.com",),
+        timeout_seconds=2.5,
+    )
+
+    with pytest.raises(CollectorError) as error:
+        await port.render(request)
+
+    assert error.value.code == "renderer_security_rejected"
+    assert browsers[0].contexts[0].page.content_calls == 0
