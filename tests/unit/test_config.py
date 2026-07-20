@@ -130,6 +130,7 @@ async def test_runtime_composes_audited_websocket_and_releases_resources(
     assert channel_kwargs["app_id"] == "cli_test"
     assert channel_kwargs["app_secret"] == "local-lark-secret"
     assert channel_kwargs["security"].mode == "audit"
+    assert channel_kwargs["log_level"].name == "WARNING"
     openai_kwargs = next(event[1] for event in events if event[0] == "openai")
     assert openai_kwargs == {
         "api_key": "local-deepseek-key",

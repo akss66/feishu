@@ -1,6 +1,6 @@
 import logging
 
-from lark_channel import FeishuChannel, SecurityConfig
+from lark_channel import FeishuChannel, LogLevel, SecurityConfig
 from openai import AsyncOpenAI
 
 from commerce_agent.application import BotService
@@ -37,6 +37,7 @@ async def run() -> None:
         channel = FeishuChannel(
             app_id=settings.lark_app_id,
             app_secret=settings.lark_app_secret.get_secret_value(),
+            log_level=LogLevel.WARNING,
             security=SecurityConfig(mode="audit"),
         )
         adapter = FeishuAdapter(channel, service)
