@@ -111,6 +111,52 @@ async def test_allows_allowlisted_public_https_url_and_resolves_every_address() 
 
 
 @pytest.mark.asyncio
+async def test_idna2008_unicode_host_matches_its_canonical_ascii_allowlist() -> None:
+    policy = UrlSafetyPolicy(resolver=_resolver({"xn--fa-hia.de": ["93.184.216.34"]}))
+
+    safe = await policy.validate("https://faß.de/news", {"xn--fa-hia.de"})
+
+    assert safe.host == "xn--fa-hia.de"
+    assert safe.url == "https://xn--fa-hia.de/news"
+
+
+@pytest.mark.asyncio
+async def test_idna2008_ascii_host_matches_its_unicode_allowlist() -> None:
+    policy = UrlSafetyPolicy(resolver=_resolver({"xn--fa-hia.de": ["93.184.216.34"]}))
+
+    safe = await policy.validate("https://xn--fa-hia.de/news", {"faß.de"})
+
+    assert safe.host == "xn--fa-hia.de"
+
+
+@pytest.mark.asyncio
+async def test_idna2008_does_not_conflate_sharp_s_with_ascii_ss() -> None:
+    policy = UrlSafetyPolicy(resolver=_resolver({"fass.de": ["93.184.216.34"]}))
+
+    with pytest.raises(UrlSafetyError) as raised:
+        await policy.validate("https://fass.de/news", {"faß.de"})
+
+    assert raised.value.code == "host_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_safe_url_repr_redacts_query_and_fragment_but_request_url_keeps_query() -> None:
+    policy = UrlSafetyPolicy(resolver=_resolver({"news.example.com": ["93.184.216.34"]}))
+
+    safe = await policy.validate(
+        "https://news.example.com/items/1?token=repr-secret#private-fragment",
+        {"news.example.com"},
+    )
+
+    assert safe.url == "https://news.example.com/items/1?token=repr-secret"
+    assert "https://news.example.com/items/1" in repr(safe)
+    assert "?" not in repr(safe)
+    assert "#" not in repr(safe)
+    assert "repr-secret" not in repr(safe)
+    assert "private-fragment" not in repr(safe)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("url", "allowed_hosts", "expected_code"),
     [
@@ -264,3 +310,106 @@ def test_redacts_urls_headers_cookies_and_tokens_from_exception_text() -> None:
     ):
         assert secret not in redacted
     assert redacted.count("[REDACTED]") >= 5
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "ftp://user:password@files.example.com/releases/item.zip?token=query-secret#part",
+            "ftp://files.example.com/releases/item.zip",
+        ),
+        (
+            "custom+transport://service.example.com/resource?cursor=private#section",
+            "custom+transport://service.example.com/resource",
+        ),
+    ],
+)
+def test_redacts_query_fragment_and_userinfo_from_urls_with_any_scheme(
+    raw: str, expected: str
+) -> None:
+    assert UrlSafetyPolicy().redact_for_log(raw) == expected
+
+
+def test_redacts_non_hierarchical_url_with_an_unrecognized_scheme() -> None:
+    raw = "urn:private:resource?token=urn-secret#private-fragment"
+
+    redacted = UrlSafetyPolicy().redact_for_log(raw)
+
+    assert redacted == "[REDACTED_URL]"
+
+
+def test_log_redaction_safely_degrades_for_malformed_and_invalid_unicode_urls() -> None:
+    malformed_urls = (
+        "https://[::1?token=malformed-secret",
+        f"https://{chr(0xDCFF)}.example/path?token=unicode-secret",
+        "https://example.com／attacker?token=normalized-secret",
+    )
+
+    redacted = [UrlSafetyPolicy().redact_for_log(url) for url in malformed_urls]
+
+    assert redacted == ["[REDACTED_URL]"] * len(malformed_urls)
+    assert all("secret" not in item for item in redacted)
+
+
+def test_log_redaction_safely_degrades_when_value_cannot_be_rendered() -> None:
+    class Unrenderable:
+        def __str__(self) -> str:
+            raise UnicodeError("unrenderable sensitive value")
+
+    assert UrlSafetyPolicy().redact_for_log(Unrenderable()) == "[REDACTED]"
+
+
+def test_redacts_sensitive_json_fields_without_preserving_values() -> None:
+    raw = (
+        '{"password":"json-password","token":"json-token",'
+        '"secret":"json-secret","api_key":"json-api-key",'
+        '"authorization":"Bearer json-authorization",'
+        '"cookie":"session=json-cookie","event":"fetch"}'
+    )
+
+    redacted = UrlSafetyPolicy().redact_for_log(raw)
+
+    assert '"event": "fetch"' in redacted
+    for sensitive_value in (
+        "json-password",
+        "json-token",
+        "json-secret",
+        "json-api-key",
+        "json-authorization",
+        "json-cookie",
+    ):
+        assert sensitive_value not in redacted
+    assert redacted.count("[REDACTED]") == 6
+
+
+def test_redacts_colon_and_equals_sensitive_field_forms() -> None:
+    raw = (
+        "password: colon-password\n"
+        "token=equals-token\n"
+        "secret : colon-secret\n"
+        "api_key = equals-api-key\n"
+        "authorization:Bearer <synthetic-auth-placeholder>\n"
+        "cookie=session=header-cookie"
+    )
+
+    redacted = UrlSafetyPolicy().redact_for_log(raw)
+
+    for sensitive_value in (
+        "colon-password",
+        "equals-token",
+        "colon-secret",
+        "equals-api-key",
+        "synthetic-auth-placeholder",
+        "header-cookie",
+    ):
+        assert sensitive_value not in redacted
+    assert redacted.count("[REDACTED]") == 6
+
+
+def test_replaces_unstructured_body_like_blob_instead_of_logging_content() -> None:
+    raw = "upstream response body: opaque-body-value\nsecond private line"
+
+    redacted = UrlSafetyPolicy().redact_for_log(raw)
+
+    assert redacted == "[REDACTED_BODY]"

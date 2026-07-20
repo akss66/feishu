@@ -1,12 +1,15 @@
 """Dynamic URL safety and log-redaction boundaries."""
 
 import asyncio
+import json
 import re
 import socket
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from urllib.parse import SplitResult, urlsplit, urlunsplit
+
+import idna
 
 Resolver = Callable[[str], Awaitable[Collection[str]]]
 
@@ -26,16 +29,38 @@ _METADATA_IPS = frozenset(
         "169.254.170.2",
     }
 )
-_URL_LIKE = re.compile(r"(?i)\b(?:https?://[^\s<>\"']+|(?:data|file):[^\s<>\"']+)")
-_SENSITIVE_HEADER = re.compile(
-    r"(?im)(\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)"
-    r"\b[\"']?\s*:\s*)[^\r\n]*"
+_URL_LIKE = re.compile(
+    r"(?i)\b(?!(?:authorization|proxy[-_]authorization|cookie|set[-_]cookie|"
+    r"x[-_]api[-_]key|api[-_]key|access[-_]token|refresh[-_]token|id[-_]token|"
+    r"password|secret|token):)"
+    r"[a-z][a-z0-9+.-]*:(?://)?[^\s<>\"']+"
 )
-_SENSITIVE_ASSIGNMENT = re.compile(
-    r"(?i)(\b(?:access_token|refresh_token|id_token|api[_-]?key|token|secret|password)"
-    r"\b[\"']?\s*=\s*[\"']?)[^&,;\s}\]]+"
+_SENSITIVE_FIELD = re.compile(
+    r"(?im)(\b(?:authorization|proxy[-_]authorization|cookie|set[-_]cookie|x[-_]api[-_]key|"
+    r"api[-_]key|access[-_]token|refresh[-_]token|id[-_]token|token|secret|password)"
+    r"\b[\"']?\s*[:=]\s*)(?:[\"'][^\"'\r\n]*[\"']|[^\r\n,;}\]]*)"
 )
 _BEARER_TOKEN = re.compile(r"(?i)(\bbearer\s+)[^,;\s}\]]+")
+_BODY_LIKE = re.compile(
+    r"(?i)\b(?:(?:request|response|upstream)\s+)?(?:body|payload|content)\s*[:=]"
+)
+_SENSITIVE_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "authorization",
+        "cookie",
+        "id_token",
+        "password",
+        "proxy_authorization",
+        "refresh_token",
+        "secret",
+        "set_cookie",
+        "token",
+        "x_api_key",
+    }
+)
+_BODY_KEYS = frozenset({"body", "content", "payload", "request_body", "response_body"})
 
 
 class UrlSafetyError(ValueError):
@@ -44,11 +69,18 @@ class UrlSafetyError(ValueError):
         super().__init__(f"URL rejected: {code}")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class SafeUrl:
     url: str
     host: str
     resolved_addresses: tuple[str, ...]
+
+    def __repr__(self) -> str:
+        safe_url = _render_url_for_log(self.url)
+        return (
+            f"SafeUrl(url={safe_url!r}, host={self.host!r}, "
+            f"resolved_addresses={self.resolved_addresses!r})"
+        )
 
 
 class UrlSafetyPolicy:
@@ -108,13 +140,23 @@ class UrlSafetyPolicy:
 
     def redact_for_log(self, url: object) -> str:
         """Render URL-bearing or credential-bearing text without logging secrets."""
-        text = str(url)
-        if _is_entire_url(text):
-            return _render_url_for_log(text)
-        text = _URL_LIKE.sub(lambda match: _render_url_for_log(match.group(0)), text)
-        text = _SENSITIVE_HEADER.sub(r"\1[REDACTED]", text)
-        text = _SENSITIVE_ASSIGNMENT.sub(r"\1[REDACTED]", text)
-        return _BEARER_TOKEN.sub(r"\1[REDACTED]", text)
+        try:
+            return _redact_text_for_log(str(url))
+        except Exception:
+            return "[REDACTED]"
+
+
+def _redact_text_for_log(text: str) -> str:
+    structured = _redact_json(text)
+    if structured is not None:
+        return structured
+    if _BODY_LIKE.search(text):
+        return "[REDACTED_BODY]"
+    if _is_entire_url(text):
+        return _render_url_for_log(text)
+    text = _SENSITIVE_FIELD.sub(r"\1[REDACTED]", text)
+    text = _BEARER_TOKEN.sub(r"\1[REDACTED]", text)
+    return _URL_LIKE.sub(lambda match: _render_url_for_log(match.group(0)), text)
 
 
 def _parse_url(url: str) -> SplitResult:
@@ -136,7 +178,7 @@ def _normalize_host(host: str | None, *, required: bool = True) -> str | None:
         if required:
             raise UrlSafetyError("invalid_url")
         return None
-    normalized = host.rstrip(".").lower()
+    normalized = host.rstrip(".")
     if not normalized:
         if required:
             raise UrlSafetyError("invalid_url")
@@ -145,8 +187,13 @@ def _normalize_host(host: str | None, *, required: bool = True) -> str | None:
     if address is not None:
         return str(address)
     try:
-        ascii_host = normalized.encode("idna").decode("ascii")
-    except UnicodeError:
+        ascii_host = idna.encode(
+            normalized,
+            uts46=True,
+            std3_rules=True,
+            transitional=False,
+        ).decode("ascii")
+    except idna.IDNAError:
         if required:
             raise UrlSafetyError("invalid_url") from None
         return None
@@ -208,11 +255,47 @@ def _render_url_for_log(url: str) -> str:
         parsed = urlsplit(url)
     except ValueError:
         return "[REDACTED_URL]"
-    if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
+    scheme = parsed.scheme.lower()
+    if re.fullmatch(r"[a-z][a-z0-9+.-]*", scheme) is None or parsed.hostname is None:
         return "[REDACTED_URL]"
     try:
         host = _normalize_host(parsed.hostname)
     except UrlSafetyError:
         return "[REDACTED_URL]"
     netloc = f"[{host}]" if _as_ip_address(host) and ":" in host else host
-    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", "", ""))
+    return urlunsplit((scheme, netloc, parsed.path or "/", "", ""))
+
+
+def _redact_json(text: str) -> str | None:
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return json.dumps(_redact_json_value(value), ensure_ascii=False, sort_keys=True)
+
+
+def _redact_json_value(value: object) -> object:
+    if isinstance(value, dict):
+        redacted: dict[object, object] = {}
+        for key, item in value.items():
+            normalized_key = _normalize_field_name(str(key))
+            if normalized_key in _BODY_KEYS:
+                redacted[key] = "[REDACTED_BODY]"
+            elif _is_sensitive_key(normalized_key):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_json_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_json_value(item) for item in value]
+    if isinstance(value, str):
+        return _URL_LIKE.sub(lambda match: _render_url_for_log(match.group(0)), value)
+    return value
+
+
+def _normalize_field_name(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+
+
+def _is_sensitive_key(key: str) -> bool:
+    return key in _SENSITIVE_KEYS or key.endswith(("_api_key", "_password", "_secret", "_token"))
