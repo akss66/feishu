@@ -39,3 +39,27 @@ async def test_message_event_is_replied_to_in_thread() -> None:
     ]
     await adapter.connect()
     assert channel.connected is True
+
+
+async def test_message_event_prefers_sdk_body_text_over_mentioned_content() -> None:
+    class RecordingService:
+        def __init__(self) -> None:
+            self.message = None
+
+        async def handle(self, message) -> str:
+            self.message = message
+            return "help content"
+
+    channel = FakeChannel()
+    service = RecordingService()
+    FeishuAdapter(channel, service)
+    event = SimpleNamespace(
+        chat_id="chat-one",
+        message_id="msg-one",
+        body_text="\u5e2e\u52a9",
+        content_text="@\u673a\u5668\u4eba \u5e2e\u52a9",
+    )
+
+    await channel.handlers["message"](event)
+
+    assert service.message.text == "\u5e2e\u52a9"

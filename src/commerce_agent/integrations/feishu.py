@@ -11,10 +11,11 @@ class FeishuAdapter:
         self._channel.on("message", self._on_message)
 
     async def _on_message(self, event: Any) -> None:
+        text = event.body_text if hasattr(event, "body_text") else event.content_text
         inbound = InboundMessage(
             chat_id=event.chat_id,
             message_id=event.message_id,
-            text=event.content_text,
+            text=text,
         )
         reply = await self._service.handle(inbound)
         await self._channel.send(
