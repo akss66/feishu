@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cross-border-commerce-agent"
+version = "0.1.0"
+description = "Feishu cross-border ecommerce intelligence agent"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "aiosqlite>=0.21,<1",
+  "lark-channel-sdk==1.2.0",
+  "openai>=1.60,<3",
+  "pydantic-settings>=2.7,<3",
+  "sqlalchemy[asyncio]>=2.0.51,<2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.25,<2",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/commerce_agent"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
