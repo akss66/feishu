@@ -15,12 +15,12 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 
+from commerce_agent.config import require_browser_ingestion_disabled
 from commerce_agent.ingestion.collectors import (
     ApiCollector,
     BrowserCollector,
     FeedCollector,
     HtmlCollector,
-    PlaywrightBrowserPort,
     SitemapCollector,
 )
 from commerce_agent.ingestion.compliance import CompliancePolicy
@@ -137,6 +137,7 @@ async def build_application() -> CliApplication:
     """Build only public-ingestion dependencies and initialize their local schema."""
 
     settings = _IngestionSettings()
+    require_browser_ingestion_disabled(settings.ingestion_browser_enabled)
     registry = build_registry()
     database = Database(settings.database_url)
     http_client: IngestionHttpClient | None = None
@@ -154,19 +155,14 @@ async def build_application() -> CliApplication:
             max_response_bytes=settings.ingestion_max_response_bytes,
             user_agent=settings.ingestion_user_agent,
         )
-        browser_port = (
-            PlaywrightBrowserPort(safety_policy=safety_policy)
-            if settings.ingestion_browser_enabled
-            else None
-        )
         collectors = {
             CollectorKind.RSS: FeedCollector(http_client),
             CollectorKind.SITEMAP: SitemapCollector(http_client),
             CollectorKind.HTML: HtmlCollector(http_client),
             CollectorKind.API: ApiCollector(http_client),
             CollectorKind.BROWSER: BrowserCollector(
-                enabled=settings.ingestion_browser_enabled,
-                browser_port=browser_port,
+                enabled=False,
+                browser_port=None,
                 timeout_seconds=settings.ingestion_http_timeout_seconds,
             ),
         }

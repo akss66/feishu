@@ -17,7 +17,7 @@ from commerce_agent.ingestion.models import (
     TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry
-from commerce_agent.ingestion_cli import HealthRow, run_cli
+from commerce_agent.ingestion_cli import HealthRow, build_application, run_cli
 
 NOW = datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
 
@@ -436,3 +436,47 @@ async def test_close_failure_changes_an_otherwise_successful_command_to_exit_thr
     assert exit_code == 3
     assert stderr == "error: command failed\n"
     assert "sk-secret-value" not in stderr
+
+
+async def test_production_cli_rejects_browser_before_creating_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import ingestion_cli
+    from commerce_agent.config import ProductionConfigurationError
+
+    class BrowserSettings:
+        ingestion_browser_enabled = True
+
+    def forbidden_database(url: str) -> object:
+        del url
+        raise AssertionError("database must not be created")
+
+    monkeypatch.setattr(ingestion_cli, "_IngestionSettings", BrowserSettings)
+    monkeypatch.setattr(ingestion_cli, "Database", forbidden_database)
+
+    with pytest.raises(ProductionConfigurationError, match="browser ingestion is unavailable"):
+        await build_application()
+
+
+async def test_cli_browser_config_failure_is_controlled_exit_three(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import ingestion_cli
+
+    class BrowserSettings:
+        ingestion_browser_enabled = True
+
+    monkeypatch.setattr(ingestion_cli, "_IngestionSettings", BrowserSettings)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = await run_cli(
+        ["health"],
+        app_factory=build_application,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 3
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "error: command failed\n"

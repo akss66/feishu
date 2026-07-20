@@ -15,16 +15,12 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-仅当某个 `allowed` 来源确实需要公开页面 JavaScript 渲染，并经过人工批准后，才安装并
-启用浏览器能力：
+生产环境暂不开放浏览器采集。必须保持 `INGESTION_BROWSER_ENABLED=false`；飞书运行时和
+采集 CLI 会在创建数据库、HTTP、浏览器或网络资源前拒绝 `true`。安装 Playwright 可选依赖
+不会使该能力在生产组合中可达。
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,ingestion,browser]"
-.\.venv\Scripts\python.exe -m playwright install chromium
-```
-
-随后显式设置 `INGESTION_BROWSER_ENABLED=true`。浏览器采集仍不得使用持久上下文、Cookie、
-登录、验证码或反爬绕过；安装浏览器依赖本身不会批准任何来源。
+浏览器 collector 的隔离单元能力仍保留。只有 HTTP 与浏览器路径统一使用 10 MiB 响应上限、
+全局并发限制和逐域名速率预算后，才能重新评审生产开放；本版本尚未统一这些预算。
 
 ## 来源登记表
 

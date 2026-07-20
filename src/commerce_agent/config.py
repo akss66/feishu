@@ -4,6 +4,17 @@ from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class ProductionConfigurationError(ValueError):
+    """A controlled rejection of an unsupported production configuration."""
+
+
+def require_browser_ingestion_disabled(enabled: bool) -> None:
+    if enabled:
+        raise ProductionConfigurationError(
+            "browser ingestion is unavailable in production until shared resource budgets exist"
+        )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",

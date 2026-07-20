@@ -76,5 +76,10 @@
 才可设置 `INGESTION_SCHEDULER_ENABLED=true`。修改 `.env` 后必须重启进程才会生效；
 检查配置时不要打印或复制密钥、Cookie、完整查询串或群绑定码。
 
-完整安装、来源复核、健康解释、浏览器 opt-in、数据位置与回退步骤见
+完整安装、来源复核、健康解释、浏览器禁用边界、数据位置与回退步骤见
 [`docs/operations/source-ingestion-runbook.md`](docs/operations/source-ingestion-runbook.md)。
+### 浏览器采集可用性
+
+生产环境当前不开放浏览器采集。保持 `INGESTION_BROWSER_ENABLED=false`；启用时，运行时和
+CLI 组合会安全拒绝。浏览器 collector 的单元能力保留供后续使用，但只有 HTTP 与浏览器抓取
+统一使用 10 MiB 响应上限、全局并发限制和逐域名速率预算后，才能评审生产开放。
