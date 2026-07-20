@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +20,15 @@ class Settings(BaseSettings):
     bot_bind_code: SecretStr
     database_url: str = "sqlite+aiosqlite:///./commerce_agent.db"
     log_level: str = "INFO"
+    ingestion_interval_minutes: int = Field(default=120, gt=0)
+    ingestion_global_concurrency: int = Field(default=4, gt=0)
+    ingestion_domain_rps: float = Field(default=1.0, gt=0)
+    ingestion_http_timeout_seconds: float = Field(default=20.0, gt=0)
+    ingestion_max_response_bytes: int = Field(default=10_485_760, gt=0)
+    ingestion_browser_enabled: bool = False
+    snapshot_dir: Path = Path("./data/snapshots")
+    ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
+    ingestion_scheduler_enabled: bool = False
 
     @field_validator("lark_app_secret", "deepseek_api_key", "bot_bind_code")
     @classmethod
@@ -33,3 +44,10 @@ class Settings(BaseSettings):
         if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("unsupported log level")
         return normalized
+
+    @field_validator("ingestion_user_agent")
+    @classmethod
+    def reject_blank_ingestion_user_agent(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("ingestion user agent must not be blank")
+        return value

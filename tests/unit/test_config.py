@@ -1,7 +1,55 @@
+from pathlib import Path
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
 from commerce_agent.config import Settings
+
+
+def configure_required_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LARK_APP_ID", "cli_test")
+    monkeypatch.setenv("LARK_APP_SECRET", "local-test-secret")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "local-test-key")
+    monkeypatch.setenv("BOT_BIND_CODE", "local-bind-code")
+
+
+def test_settings_apply_safe_ingestion_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure_required_settings(monkeypatch)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ingestion_interval_minutes == 120
+    assert settings.ingestion_global_concurrency == 4
+    assert settings.ingestion_domain_rps == 1.0
+    assert settings.ingestion_http_timeout_seconds == 20.0
+    assert settings.ingestion_max_response_bytes == 10_485_760
+    assert settings.ingestion_browser_enabled is False
+    assert settings.snapshot_dir == Path("data/snapshots")
+    assert settings.ingestion_user_agent.strip()
+    assert settings.ingestion_scheduler_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("environment_key", "invalid_value"),
+    [
+        ("INGESTION_INTERVAL_MINUTES", "0"),
+        ("INGESTION_GLOBAL_CONCURRENCY", "0"),
+        ("INGESTION_DOMAIN_RPS", "0"),
+        ("INGESTION_HTTP_TIMEOUT_SECONDS", "0"),
+        ("INGESTION_MAX_RESPONSE_BYTES", "0"),
+        ("INGESTION_USER_AGENT", "   "),
+    ],
+)
+def test_settings_reject_invalid_ingestion_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    environment_key: str,
+    invalid_value: str,
+) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv(environment_key, invalid_value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_settings_load_required_secrets_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:

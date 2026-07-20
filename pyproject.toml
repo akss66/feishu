@@ -22,6 +22,17 @@ dev = [
   "pytest-cov>=6,<8",
   "ruff>=0.11,<1",
 ]
+ingestion = [
+  "httpx>=0.28.1,<1",
+  "feedparser>=6.0.12,<7",
+  "trafilatura>=2.1,<3",
+  "lingua-language-detector>=2.1.1,<3",
+  "APScheduler>=3.11.3,<4",
+  "PyYAML>=6.0.2,<7",
+]
+browser = [
+  "playwright>=1.61,<2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/commerce_agent"]

@@ -10,6 +10,9 @@ __pycache__/
 venv/
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
+/data/
 logs/
 dist/
 build/
