@@ -82,6 +82,7 @@ class CliApplication(Protocol):
 
 
 ApplicationFactory = Callable[[], Awaitable[CliApplication]]
+RegistryFactory = Callable[[], SourceRegistry]
 
 
 class _ProductionApplication:
@@ -136,7 +137,7 @@ async def build_application() -> CliApplication:
     """Build only public-ingestion dependencies and initialize their local schema."""
 
     settings = _IngestionSettings()
-    registry = SourceRegistry.from_yaml(_REGISTRY_PATH)
+    registry = build_registry()
     database = Database(settings.database_url)
     http_client: IngestionHttpClient | None = None
     try:
@@ -193,6 +194,12 @@ async def build_application() -> CliApplication:
         raise
 
 
+def build_registry() -> SourceRegistry:
+    """Load the source registry without initializing runtime dependencies."""
+
+    return SourceRegistry.from_yaml(_REGISTRY_PATH)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _SafeArgumentParser(prog="commerce-agent-ingestion")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -214,6 +221,7 @@ async def run_cli(
     argv: Sequence[str] | None = None,
     *,
     app_factory: ApplicationFactory = build_application,
+    registry_factory: RegistryFactory = build_registry,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
@@ -226,6 +234,18 @@ async def run_cli(
         return 2
     except SystemExit as exc:
         return int(exc.code or 0)
+
+    if arguments.command == "run" and not arguments.run_all:
+        try:
+            registry_factory().require(arguments.source)
+        except KeyError:
+            errors.write("error: unknown source_id\n")
+            return 2
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
+                raise
+            errors.write("error: command failed\n")
+            return 3
 
     application: CliApplication | None = None
     exit_code = 0
@@ -240,18 +260,10 @@ async def run_cli(
             if arguments.run_all:
                 summaries = await application.run_all()
             else:
-                try:
-                    application.registry.require(arguments.source)
-                except KeyError:
-                    errors.write("error: unknown source_id\n")
-                    exit_code = 2
-                    summaries = ()
-                else:
-                    summaries = (await application.run_source(arguments.source),)
-            if exit_code != 2:
-                _write_runs(summaries, output)
-                if any(item.status in _FAILED_RUN_STATUSES for item in summaries):
-                    exit_code = 3
+                summaries = (await application.run_source(arguments.source),)
+            _write_runs(summaries, output)
+            if any(item.status in _FAILED_RUN_STATUSES for item in summaries):
+                exit_code = 3
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
             raise

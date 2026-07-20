@@ -111,6 +111,7 @@ async def invoke(app: FakeApplication, *arguments: str) -> tuple[int, str, str]:
     exit_code = await run_cli(
         list(arguments),
         app_factory=factory_for(app),
+        registry_factory=lambda: app.registry,
         stdout=stdout,
         stderr=stderr,
     )
@@ -202,7 +203,31 @@ async def test_unknown_source_exits_two_without_echoing_query_or_secret() -> Non
     assert secret not in stderr
     assert "?token=" not in stderr
     assert app.run_source_calls == []
-    assert app.closed is True
+    assert app.closed is False
+
+
+async def test_unknown_source_exits_two_without_building_application() -> None:
+    registry = SourceRegistry([source("known-source", platform="amazon")])
+    build_calls: list[str] = []
+
+    async def broken_factory() -> FakeApplication:
+        build_calls.append("built")
+        raise RuntimeError("database initialization failed")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = await run_cli(
+        ["run", "--source", "missing-source"],
+        app_factory=broken_factory,
+        registry_factory=lambda: registry,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "error: unknown source_id\n"
+    assert build_calls == []
 
 
 async def test_run_source_success_reports_counts_and_exits_zero() -> None:
