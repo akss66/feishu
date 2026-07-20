@@ -6,8 +6,9 @@
   Channel-compatible object.
 - Normalizes `chat_id`, `message_id`, and text (preferring `body_text` with a
   fallback to `content_text`) into `InboundMessage`.
-- Replies to the source message through `reply_to`, and delegates connection to
-  the injected channel once per `connect()` invocation.
+- Replies through `channel.reply(event, content)`, preserving Channel SDK
+  conversation and thread context, and delegates connection to the injected
+  channel once per `connect()` invocation.
 - Added a fake-channel unit test; no network connection or credentials are used.
 
 ## TDD Evidence
@@ -23,6 +24,28 @@ ModuleNotFoundError: No module named 'commerce_agent.integrations.feishu'
 ```text
 python -m pytest tests/unit/test_feishu.py -v  # 1 passed
 python -m pytest                              # 14 passed
+python -m ruff check src tests                # All checks passed
+git diff --check                              # no output
+```
+
+## Follow-up Fix: Thread-Aware Channel Replies
+
+- The adapter now calls `await channel.reply(event, {"text": reply})` instead
+  of constructing a `send(..., {"reply_to": ...})` call.
+- This preserves the original SDK event, including its conversation thread
+  context. Local SDK inspection confirmed `FeishuChannel.reply(self, msg,
+  message, opts=None)` is asynchronous.
+- TDD regression evidence: a fake SDK event with
+  `conversation.thread_id="thread-one"` first failed because the old adapter
+  called `send`; it now verifies that `reply` receives that same event and text
+  payload. Mention-stripped `body_text` preference and `content_text` fallback
+  coverage remain in the unit suite.
+
+Follow-up verification:
+
+```text
+python -m pytest tests/unit/test_feishu.py -v  # 2 passed
+python -m pytest                              # 17 passed
 python -m ruff check src tests                # All checks passed
 git diff --check                              # no output
 ```

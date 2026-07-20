@@ -18,11 +18,7 @@ class FeishuAdapter:
             text=text,
         )
         reply = await self._service.handle(inbound)
-        await self._channel.send(
-            inbound.chat_id,
-            {"text": reply},
-            {"reply_to": inbound.message_id},
-        )
+        await self._channel.reply(event, {"text": reply})
 
     async def connect(self) -> None:
         await self._channel.connect()

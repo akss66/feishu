@@ -6,6 +6,7 @@ from commerce_agent.integrations.feishu import FeishuAdapter
 class FakeChannel:
     def __init__(self) -> None:
         self.handlers = {}
+        self.replies = []
         self.sent = []
         self.connected = False
 
@@ -14,6 +15,9 @@ class FakeChannel:
 
     async def send(self, chat_id, content, options) -> None:
         self.sent.append((chat_id, content, options))
+
+    async def reply(self, event, content) -> None:
+        self.replies.append((event, content))
 
     async def connect(self) -> None:
         self.connected = True
@@ -30,13 +34,16 @@ class FakeService:
 async def test_message_event_is_replied_to_in_thread() -> None:
     channel = FakeChannel()
     adapter = FeishuAdapter(channel, FakeService())
-    event = SimpleNamespace(chat_id="chat-one", message_id="msg-one", content_text="help")
+    event = SimpleNamespace(
+        chat_id="chat-one",
+        message_id="msg-one",
+        content_text="help",
+        conversation=SimpleNamespace(thread_id="thread-one"),
+    )
 
     await channel.handlers["message"](event)
 
-    assert channel.sent == [
-        ("chat-one", {"text": "help content"}, {"reply_to": "msg-one"})
-    ]
+    assert channel.replies == [(event, {"text": "help content"})]
     await adapter.connect()
     assert channel.connected is True
 
