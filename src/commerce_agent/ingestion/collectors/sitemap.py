@@ -9,6 +9,7 @@ from commerce_agent.ingestion.collectors.base import (
     candidate_url,
     fetch_request,
     item_limit,
+    record_response,
     require_success,
     response_artifact,
 )
@@ -41,6 +42,7 @@ class SitemapCollector:
             response = await self._http.get(
                 fetch_request(source, context, url=sitemap_url, conditional=is_root)
             )
+            record_response(context, response)
             if not require_success(response):
                 continue
             try:
@@ -63,6 +65,7 @@ class SitemapCollector:
                 detail = await self._http.get(
                     fetch_request(source, context, url=url, conditional=False)
                 )
+                record_response(context, detail)
                 if not require_success(detail):
                     continue
                 artifact = response_artifact(detail)

@@ -11,6 +11,7 @@ from commerce_agent.ingestion.collectors.base import (
     candidate_url,
     fetch_request,
     item_limit,
+    record_response,
     require_success,
     response_artifact,
 )
@@ -86,6 +87,7 @@ class HtmlCollector:
         context: FetchContext,
     ) -> AsyncIterator[CollectedItem]:
         response = await self._http.get(fetch_request(source, context))
+        record_response(context, response)
         if not require_success(response):
             return
         selector = source.collector_config.get("link_selector")
@@ -100,6 +102,7 @@ class HtmlCollector:
             detail = await self._http.get(
                 fetch_request(source, context, url=candidate.url, conditional=False)
             )
+            record_response(context, detail)
             if not require_success(detail):
                 continue
             artifact = response_artifact(detail)

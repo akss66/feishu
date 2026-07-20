@@ -62,7 +62,12 @@ class FixtureBrowser:
 
     async def render(self, request: BrowserRequest) -> RenderedPage:
         self.requests.append(request)
-        return self.pages[request.url]
+        page = self.pages[request.url]
+        request.metrics.record_response(
+            status_code=page.artifact.status_code,
+            bytes_received=len(page.artifact.body),
+        )
+        return page
 
 
 def source(source_id: str, kind: CollectorKind) -> SourceDefinition:
@@ -246,6 +251,12 @@ async def test_full_pipeline_is_idempotent_versions_changes_groups_and_handles_3
 
         assert not_modified.status is RunStatus.SUCCESS
         assert not_modified.discovered == 0
+        assert (
+            not_modified.http_requests,
+            not_modified.http_not_modified,
+            not_modified.bytes_received,
+        ) == (1, 1, 0)
+        assert not_modified.error_summary is None
         assert http.requests[-1].etag == '"feed-v2"'
         async with database.session() as session:
             final_version_count = await session.scalar(
@@ -261,6 +272,12 @@ async def test_full_pipeline_is_idempotent_versions_changes_groups_and_handles_3
         assert health is not None and health.health_status == "healthy"
         assert health.last_success_at is not None
         assert latest_run is not None and latest_run.status == RunStatus.SUCCESS.value
+        assert (
+            latest_run.http_requests,
+            latest_run.http_not_modified,
+            latest_run.bytes_received,
+        ) == (1, 1, 0)
+        assert latest_run.error_summary is None
         snapshot_bodies = {
             gzip.decompress(path.read_bytes())
             for path in (tmp_path / "snapshots").rglob("*.bin.gz")
@@ -290,13 +307,29 @@ async def test_run_all_does_not_cancel_a_healthy_source_when_another_returns_500
         by_source = {summary.source_id: summary for summary in summaries}
         assert by_source["fixture-api"].status is RunStatus.FAILED
         assert by_source["fixture-api"].error_code == "fetch_failed"
+        assert by_source["fixture-api"].error_summary == "fetch_failed"
+        assert (
+            by_source["fixture-api"].http_requests,
+            by_source["fixture-api"].http_not_modified,
+            by_source["fixture-api"].bytes_received,
+        ) == (1, 0, len(b'{"error":"fixture failure"}'))
         assert by_source["fixture-feed"].status is RunStatus.SUCCESS
         assert by_source["fixture-feed"].created == 2
         async with database.session() as session:
             document_count = await session.scalar(select(func.count()).select_from(Document))
             run_count = await session.scalar(select(func.count()).select_from(FetchRun))
+            failed_run = await session.scalar(
+                select(FetchRun).where(FetchRun.source_id == api_source.source_id)
+            )
         assert document_count == 2
         assert run_count == 2
+        assert failed_run is not None
+        assert (
+            failed_run.http_requests,
+            failed_run.http_not_modified,
+            failed_run.bytes_received,
+            failed_run.error_summary,
+        ) == (1, 0, len(b'{"error":"fixture failure"}'), "fetch_failed")
     finally:
         await database.dispose()
 

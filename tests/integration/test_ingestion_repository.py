@@ -136,6 +136,9 @@ async def test_fetch_run_lifecycle_updates_health_aggregation(tmp_path) -> None:
                 created=2,
                 updated=1,
                 skipped=1,
+                http_requests=3,
+                http_not_modified=1,
+                bytes_received=4096,
             ),
         )
 
@@ -153,6 +156,9 @@ async def test_fetch_run_lifecycle_updates_health_aggregation(tmp_path) -> None:
                 finished_at=failed_started_at + timedelta(seconds=15),
                 failed=1,
                 error_code="http_500",
+                http_requests=2,
+                bytes_received=512,
+                error_summary="http_500",
             ),
         )
 
@@ -169,8 +175,20 @@ async def test_fetch_run_lifecycle_updates_health_aggregation(tmp_path) -> None:
             1,
             1,
         )
+        assert (
+            success.http_requests,
+            success.http_not_modified,
+            success.bytes_received,
+        ) == (3, 1, 4096)
+        assert success.error_summary is None
         assert failure is not None
         assert failure.status == RunStatus.FAILED.value
+        assert (
+            failure.http_requests,
+            failure.http_not_modified,
+            failure.bytes_received,
+        ) == (2, 0, 512)
+        assert failure.error_summary == "http_500"
         assert health is not None
         assert health.last_attempt_at == failed_started_at + timedelta(seconds=15)
         assert health.last_success_at == started_at + timedelta(minutes=1)

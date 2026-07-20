@@ -243,6 +243,21 @@ def service(
     )
 
 
+@pytest.mark.parametrize("error_summary", ["x" * 513, "unsafe\nsummary"])
+def test_run_summary_rejects_unsafe_error_summaries(error_summary: str) -> None:
+    with pytest.raises(ValueError):
+        RunSummary(
+            source_id="amazon-news",
+            trigger=Trigger.MANUAL,
+            status=RunStatus.FAILED,
+            started_at=NOW,
+            finished_at=NOW,
+            failed=1,
+            error_code="unexpected_error",
+            error_summary=error_summary,
+        )
+
+
 async def test_checks_compliance_before_invoking_the_collector() -> None:
     events: list[str] = []
     collector = FakeCollector(events=events)
@@ -326,7 +341,8 @@ async def test_collector_cancellation_finishes_failed_then_propagates() -> None:
 
     class BlockingCollector:
         async def collect(self, definition: SourceDefinition, context: FetchContext):
-            del definition, context
+            del definition
+            context.metrics.record_response(status_code=200, bytes_received=17)
             entered.set()
             await never.wait()
             yield item()
@@ -346,6 +362,12 @@ async def test_collector_cancellation_finishes_failed_then_propagates() -> None:
     summary = repository.finished[0][1]
     assert summary.status is RunStatus.FAILED
     assert summary.error_code == "cancelled"
+    assert (summary.http_requests, summary.http_not_modified, summary.bytes_received) == (
+        1,
+        0,
+        17,
+    )
+    assert summary.error_summary == "cancelled"
 
 
 async def test_item_ingestion_cancellation_finishes_failed_then_propagates() -> None:
@@ -622,6 +644,7 @@ async def test_logs_only_source_category_and_counts_not_exception_details(
 
     rendered = "\n".join(record.getMessage() + repr(record.__dict__) for record in caplog.records)
     assert summary.error_code == "unexpected_error"
+    assert summary.error_summary == "unexpected_error"
     assert secret not in rendered
     assert "?token=" not in rendered
     assert all(record.source_id == "amazon-news" for record in caplog.records)

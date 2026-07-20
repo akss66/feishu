@@ -90,20 +90,37 @@ class PlaywrightBrowserPort:
                     )
                     if navigation_response is None:
                         raise CollectorError("renderer_response_unavailable")
-                    final_url = await self._validate_pinned(
-                        page.url,
-                        request.allowed_hosts,
-                        pinned_hosts,
-                    )
                     try:
+                        final_url = await self._validate_pinned(
+                            page.url,
+                            request.allowed_hosts,
+                            pinned_hosts,
+                        )
+                    except CollectorError:
+                        request.metrics.record_response(
+                            status_code=navigation_response.status,
+                            bytes_received=0,
+                        )
+                        raise
+                    try:
+                        raw_headers = await navigation_response.all_headers()
+                        raw_body = await navigation_response.body()
                         artifact = ResponseArtifact(
                             url=final_url.url,
                             status_code=navigation_response.status,
-                            headers=await navigation_response.all_headers(),
-                            body=await navigation_response.body(),
+                            headers=raw_headers,
+                            body=raw_body,
                         )
                     except Exception:
+                        request.metrics.record_response(
+                            status_code=navigation_response.status,
+                            bytes_received=0,
+                        )
                         raise CollectorError("renderer_response_unavailable") from None
+                    request.metrics.record_response(
+                        status_code=artifact.status_code,
+                        bytes_received=len(artifact.body),
+                    )
                     body = (await page.content()).encode("utf-8")
                     return RenderedPage(
                         url=final_url.url,
@@ -183,7 +200,6 @@ class BrowserCollector:
         source: SourceDefinition,
         context: FetchContext,
     ) -> AsyncIterator[CollectedItem]:
-        del context
         if not self._enabled:
             raise CollectorError("renderer_unavailable")
         browser = self._browser or PlaywrightBrowserPort()
@@ -192,6 +208,7 @@ class BrowserCollector:
                 url=source.entry_url,
                 allowed_hosts=allowed_hosts(source),
                 timeout_seconds=self._timeout_seconds,
+                metrics=context.metrics,
             )
         )
         _require_render_success(page)
@@ -209,6 +226,7 @@ class BrowserCollector:
                     url=candidate.url,
                     allowed_hosts=allowed_hosts(source),
                     timeout_seconds=self._timeout_seconds,
+                    metrics=context.metrics,
                 )
             )
             _require_render_success(detail)

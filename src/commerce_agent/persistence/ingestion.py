@@ -65,7 +65,13 @@ class PersistOutcome:
 class IngestionRepository(Protocol):
     async def sync_sources(self, sources: Sequence[SourceDefinition]) -> None: ...
 
-    async def start_run(self, source_id: str, trigger: Trigger) -> int: ...
+    async def start_run(
+        self,
+        source_id: str,
+        trigger: Trigger,
+        *,
+        started_at: datetime | None = None,
+    ) -> int: ...
 
     async def find_document(
         self, source_id: str, canonical_url: str
@@ -215,6 +221,10 @@ class SqlAlchemyIngestionRepository:
             run.skipped = summary.skipped
             run.failed = summary.failed
             run.error_code = summary.error_code
+            run.http_requests = summary.http_requests
+            run.http_not_modified = summary.http_not_modified
+            run.bytes_received = summary.bytes_received
+            run.error_summary = summary.error_summary
 
             source = await session.get(Source, summary.source_id)
             if source is None:  # pragma: no cover - the run foreign key guarantees this

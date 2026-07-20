@@ -17,6 +17,7 @@ from commerce_agent.ingestion.models import (
     CollectedItem,
     CollectorKind,
     FetchContext,
+    FetchMetrics,
     ResponseArtifact,
     RunStatus,
     RunSummary,
@@ -57,6 +58,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "redirect_missing_location",
         "redirect_status_not_supported",
         "renderer_failed",
+        "renderer_response_unavailable",
         "renderer_security_rejected",
         "renderer_timeout",
         "renderer_unavailable",
@@ -68,6 +70,17 @@ _KNOWN_ERROR_CODES = frozenset(
         "too_many_redirects",
         "unexpected_http_status",
         "userinfo_not_allowed",
+    }
+)
+_CONTROLLED_ERROR_CODES = _KNOWN_ERROR_CODES | frozenset(
+    {
+        "cancelled",
+        "collector_error",
+        "compliance_error",
+        "extraction_error",
+        "fetch_error",
+        "snapshot_error",
+        "unexpected_error",
     }
 )
 
@@ -145,8 +158,9 @@ class IngestionService:
                 trigger,
                 started_at=started_at,
             )
+            metrics = FetchMetrics()
             try:
-                summary = await self._run_started(source, trigger, started_at)
+                summary = await self._run_started(source, trigger, started_at, metrics)
             except asyncio.CancelledError:
                 summary = self._summary(
                     source,
@@ -154,6 +168,7 @@ class IngestionService:
                     started_at,
                     RunStatus.FAILED,
                     _RunCounts(failed=1, error_code="cancelled"),
+                    metrics,
                 )
                 await self._finish(run_id, summary)
                 raise
@@ -164,6 +179,7 @@ class IngestionService:
                     started_at,
                     RunStatus.FAILED,
                     _RunCounts(failed=1, error_code=_error_code(error)),
+                    metrics,
                 )
             await self._finish(run_id, summary)
             return summary
@@ -203,6 +219,7 @@ class IngestionService:
         source: SourceDefinition,
         trigger: Trigger,
         started_at: datetime,
+        metrics: FetchMetrics,
     ) -> RunSummary:
         counts = _RunCounts()
         try:
@@ -215,6 +232,7 @@ class IngestionService:
                 started_at,
                 RunStatus.SKIPPED,
                 counts,
+                metrics,
             )
 
         collector = self._collectors.get(source.collector)
@@ -226,6 +244,7 @@ class IngestionService:
                 started_at,
                 RunStatus.FAILED,
                 counts,
+                metrics,
             )
 
         etag, last_modified = self._conditionals.get(source.source_id, (None, None))
@@ -234,6 +253,7 @@ class IngestionService:
             started_at=started_at,
             etag=etag,
             last_modified=last_modified,
+            metrics=metrics,
         )
         try:
             async for item in collector.collect(source, context):
@@ -258,7 +278,7 @@ class IngestionService:
             status = RunStatus.PARTIAL
         else:
             status = RunStatus.FAILED
-        return self._summary(source, trigger, started_at, status, counts)
+        return self._summary(source, trigger, started_at, status, counts, metrics)
 
     async def _ingest_item(
         self,
@@ -307,6 +327,7 @@ class IngestionService:
         started_at: datetime,
         status: RunStatus,
         counts: _RunCounts,
+        metrics: FetchMetrics,
     ) -> RunSummary:
         return RunSummary(
             source_id=source.source_id,
@@ -320,6 +341,10 @@ class IngestionService:
             skipped=counts.skipped,
             failed=counts.failed,
             error_code=counts.error_code,
+            http_requests=metrics.http_requests,
+            http_not_modified=metrics.http_not_modified,
+            bytes_received=metrics.bytes_received,
+            error_summary=_controlled_error_summary(counts.error_code),
         )
 
     async def _finish(self, run_id: int, summary: RunSummary) -> None:
@@ -337,6 +362,9 @@ class IngestionService:
                 "count_updated": summary.updated,
                 "count_skipped": summary.skipped,
                 "count_failed": summary.failed,
+                "count_http_requests": summary.http_requests,
+                "count_http_not_modified": summary.http_not_modified,
+                "count_bytes_received": summary.bytes_received,
             },
         )
 
@@ -370,4 +398,12 @@ def _error_code(error: BaseException) -> str:
         return "snapshot_error"
     if isinstance(error, FetchError):
         return "fetch_error"
+    return "unexpected_error"
+
+
+def _controlled_error_summary(error_code: str | None) -> str | None:
+    if error_code is None:
+        return None
+    if error_code in _CONTROLLED_ERROR_CODES:
+        return error_code
     return "unexpected_error"

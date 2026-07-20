@@ -10,6 +10,7 @@ from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
     CollectedItem,
     FetchContext,
+    FetchMetrics,
     ResponseArtifact,
     SourceDefinition,
 )
@@ -34,6 +35,7 @@ class BrowserRequest:
     url: str
     allowed_hosts: Collection[str]
     timeout_seconds: float
+    metrics: FetchMetrics = field(default_factory=FetchMetrics, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
@@ -113,6 +115,16 @@ def require_success(response: FetchResponse) -> bool:
     if not 200 <= response.status_code < 300:
         raise CollectorError("fetch_failed")
     return True
+
+
+def record_response(
+    context: FetchContext,
+    response: FetchResponse | ResponseArtifact,
+) -> None:
+    context.metrics.record_response(
+        status_code=response.status_code,
+        bytes_received=len(response.body),
+    )
 
 
 def response_artifact(response: FetchResponse) -> ResponseArtifact:

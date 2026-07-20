@@ -8,6 +8,8 @@ from types import MappingProxyType
 
 Scalar = str | int | float | bool | None
 _SAFE_ARTIFACT_HEADERS = frozenset({"content-type", "etag", "last-modified"})
+_MAX_COUNTER = 2**63 - 1
+_METRIC_FIELDS = frozenset({"http_requests", "http_not_modified", "bytes_received"})
 
 
 class Platform(StrEnum):
@@ -104,12 +106,41 @@ class SourceDefinition:
         return self.entry_url
 
 
+@dataclass(slots=True)
+class FetchMetrics:
+    http_requests: int = 0
+    http_not_modified: int = 0
+    bytes_received: int = 0
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _METRIC_FIELDS:
+            value = _safe_counter(name, value)
+        object.__setattr__(self, name, value)
+
+    def record_response(self, *, status_code: int, bytes_received: int) -> None:
+        if not isinstance(status_code, int) or isinstance(status_code, bool):
+            raise TypeError("status_code must be an integer")
+        if not 100 <= status_code <= 599:
+            raise ValueError("status_code must be a valid HTTP status")
+        response_bytes = _safe_counter("bytes_received", bytes_received)
+        next_requests = _safe_counter("http_requests", self.http_requests + 1)
+        next_not_modified = _safe_counter(
+            "http_not_modified",
+            self.http_not_modified + (status_code == 304),
+        )
+        next_bytes = _safe_counter("bytes_received", self.bytes_received + response_bytes)
+        self.http_requests = next_requests
+        self.http_not_modified = next_not_modified
+        self.bytes_received = next_bytes
+
+
 @dataclass(frozen=True, slots=True)
 class FetchContext:
     trigger: Trigger
     started_at: datetime
     etag: str | None = None
     last_modified: str | None = None
+    metrics: FetchMetrics = field(default_factory=FetchMetrics)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,3 +205,39 @@ class RunSummary:
     skipped: int = 0
     failed: int = 0
     error_code: str | None = None
+    http_requests: int = 0
+    http_not_modified: int = 0
+    bytes_received: int = 0
+    error_summary: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "discovered",
+            "created",
+            "updated",
+            "skipped",
+            "failed",
+            "http_requests",
+            "http_not_modified",
+            "bytes_received",
+        ):
+            _safe_counter(name, getattr(self, name))
+        if self.error_summary is not None:
+            if not isinstance(self.error_summary, str):
+                raise TypeError("error_summary must be a string")
+            if (
+                len(self.error_summary) > 512
+                or "\r" in self.error_summary
+                or "\n" in self.error_summary
+            ):
+                raise ValueError(
+                    "error_summary must be a safe single-line value up to 512 characters"
+                )
+
+
+def _safe_counter(name: str, value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer")
+    if not 0 <= value <= _MAX_COUNTER:
+        raise ValueError(f"{name} must be between 0 and {_MAX_COUNTER}")
+    return value

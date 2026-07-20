@@ -30,6 +30,7 @@ from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
     FetchContext,
+    FetchMetrics,
     Platform,
     ResponseArtifact,
     SourceDefinition,
@@ -66,7 +67,12 @@ class FakeBrowserPort:
 
     async def render(self, request: BrowserRequest) -> RenderedPage:
         self.requests.append(request)
-        return self.pages[request.url]
+        page = self.pages[request.url]
+        request.metrics.record_response(
+            status_code=page.artifact.status_code,
+            bytes_received=len(page.artifact.body),
+        )
+        return page
 
 
 class FakeResolver:
@@ -114,8 +120,15 @@ def context() -> FetchContext:
     )
 
 
-async def collected(collector: Collector, definition: SourceDefinition):
-    return [item async for item in collector.collect(definition, context())]
+async def collected(
+    collector: Collector,
+    definition: SourceDefinition,
+    fetch_context: FetchContext | None = None,
+):
+    return [
+        item
+        async for item in collector.collect(definition, fetch_context or context())
+    ]
 
 
 def bundled_xml(name: str) -> dict[str, bytes]:
@@ -160,6 +173,31 @@ def test_response_artifact_is_immutable_and_filters_unsafe_headers() -> None:
     assert item.artifact is artifact
     with pytest.raises(TypeError):
         artifact.headers["content-type"] = "application/json"  # type: ignore[index]
+
+
+def test_fetch_metrics_are_isolated_mutable_and_reject_unsafe_counters() -> None:
+    first = context()
+    second = context()
+
+    first.metrics.record_response(status_code=200, bytes_received=12)
+    first.metrics.record_response(status_code=304, bytes_received=0)
+
+    assert first.metrics == FetchMetrics(
+        http_requests=2,
+        http_not_modified=1,
+        bytes_received=12,
+    )
+    assert second.metrics == FetchMetrics()
+    with pytest.raises(ValueError):
+        FetchMetrics(http_requests=-1)
+    with pytest.raises(TypeError):
+        FetchMetrics(bytes_received=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        first.metrics.record_response(status_code=200, bytes_received=-1)
+    saturated = FetchMetrics(bytes_received=2**63 - 1)
+    with pytest.raises(ValueError):
+        saturated.record_response(status_code=200, bytes_received=1)
+    assert saturated == FetchMetrics(bytes_received=2**63 - 1)
 
 
 @pytest.mark.asyncio
@@ -228,6 +266,32 @@ async def test_feed_collector_applies_cap_after_removing_duplicates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_feed_collector_records_a_not_modified_response_once() -> None:
+    url = "https://feeds.example.com/feed.xml"
+    http = FakeHttpPort(
+        {
+            url: FetchResponse(
+                url=url,
+                status_code=304,
+                headers={"etag": '"current"'},
+                body=b"",
+            )
+        }
+    )
+    definition = source(CollectorKind.RSS, entry_url=url, config={"item_limit": 10})
+    fetch_context = context()
+
+    items = await collected(FeedCollector(http), definition, fetch_context)
+
+    assert items == []
+    assert fetch_context.metrics == FetchMetrics(
+        http_requests=1,
+        http_not_modified=1,
+        bytes_received=0,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sitemap_collector_walks_nested_indexes_and_namespaced_urlsets() -> None:
     documents = bundled_xml("sitemap.xml")
     detail_body = (FIXTURES / "article_en.html").read_bytes()
@@ -244,7 +308,8 @@ async def test_sitemap_collector_walks_nested_indexes_and_namespaced_urlsets() -
         config={"item_limit": 10},
     )
 
-    items = await collected(SitemapCollector(http), definition)
+    fetch_context = context()
+    items = await collected(SitemapCollector(http), definition, fetch_context)
 
     assert [item.url for item in items] == [
         "https://docs.example.com/articles/alpha",
@@ -265,6 +330,8 @@ async def test_sitemap_collector_walks_nested_indexes_and_namespaced_urlsets() -
     assert all(request.allowed_hosts == ("docs.example.com",) for request in http.requests)
     assert http.requests[0].etag == '"previous"'
     assert all(request.etag is None for request in http.requests[1:])
+    assert fetch_context.metrics.http_requests == 7
+    assert fetch_context.metrics.bytes_received > len(detail_body) * 3
 
 
 @pytest.mark.asyncio
@@ -381,7 +448,8 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
         config={"link_selector": "main#updates article a.update-link", "item_limit": 2},
     )
 
-    items = await collected(HtmlCollector(http), definition)
+    fetch_context = context()
+    items = await collected(HtmlCollector(http), definition, fetch_context)
 
     assert [item.url for item in items] == [
         "https://news.example.com/articles/alpha",
@@ -395,6 +463,10 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
     assert http.requests[0].etag == '"previous"'
     assert all(request.etag is None for request in http.requests[1:])
     assert "set-cookie" not in items[0].artifact.headers
+    assert fetch_context.metrics == FetchMetrics(
+        http_requests=3,
+        bytes_received=len(response.body) + len(detail_body) * 2,
+    )
 
 
 @pytest.mark.asyncio
@@ -413,7 +485,8 @@ async def test_api_collector_extracts_public_json_path_and_configured_fields() -
         },
     )
 
-    items = await collected(ApiCollector(http), definition)
+    fetch_context = context()
+    items = await collected(ApiCollector(http), definition, fetch_context)
 
     assert [item.url for item in items] == [
         "https://api.example.com/updates/alpha",
@@ -431,6 +504,10 @@ async def test_api_collector_extracts_public_json_path_and_configured_fields() -
         item.artifact.body == (FIXTURES / "api.json").read_bytes()
         for item in items
         if item.artifact
+    )
+    assert fetch_context.metrics == FetchMetrics(
+        http_requests=1,
+        bytes_received=len((FIXTURES / "api.json").read_bytes()),
     )
 
 
@@ -524,9 +601,11 @@ async def test_browser_collector_uses_injected_renderer_for_candidate_links() ->
         config={"link_selector": "main a.item", "item_limit": 1},
     )
 
+    fetch_context = context()
     items = await collected(
         BrowserCollector(enabled=True, browser_port=browser, timeout_seconds=2.5),
         definition,
+        fetch_context,
     )
 
     assert [item.url for item in items] == [detail_url]
@@ -546,6 +625,10 @@ async def test_browser_collector_uses_injected_renderer_for_candidate_links() ->
             timeout_seconds=2.5,
         ),
     ]
+    assert fetch_context.metrics == FetchMetrics(
+        http_requests=2,
+        bytes_received=len(b"raw list response") + len(raw_detail),
+    )
 
 
 @pytest.mark.asyncio
@@ -766,6 +849,10 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
     assert first.artifact.status_code == 200
     assert dict(first.artifact.headers) == {"content-type": "text/html; charset=utf-8"}
     assert second.url == final_url
+    assert request.metrics == FetchMetrics(
+        http_requests=2,
+        bytes_received=len(b"raw navigation response") * 2,
+    )
     assert len(browsers) == 2
     for browser in browsers:
         assert browser.launch_options == {
@@ -814,16 +901,16 @@ async def test_playwright_port_fails_closed_when_navigation_has_no_response(
     resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
     port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
 
+    request = BrowserRequest(
+        url="https://browser.example.com/list",
+        allowed_hosts=("browser.example.com",),
+        timeout_seconds=2.5,
+    )
     with pytest.raises(CollectorError) as error:
-        await port.render(
-            BrowserRequest(
-                url="https://browser.example.com/list",
-                allowed_hosts=("browser.example.com",),
-                timeout_seconds=2.5,
-            )
-        )
+        await port.render(request)
 
     assert error.value.code == "renderer_response_unavailable"
+    assert request.metrics == FetchMetrics()
 
 
 @pytest.mark.asyncio
@@ -846,16 +933,16 @@ async def test_playwright_port_closes_resources_when_raw_response_body_fails(
     resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
     port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
 
+    request = BrowserRequest(
+        url="https://browser.example.com/list",
+        allowed_hosts=("browser.example.com",),
+        timeout_seconds=2.5,
+    )
     with pytest.raises(CollectorError) as error:
-        await port.render(
-            BrowserRequest(
-                url="https://browser.example.com/list",
-                allowed_hosts=("browser.example.com",),
-                timeout_seconds=2.5,
-            )
-        )
+        await port.render(request)
 
     assert error.value.code == "renderer_response_unavailable"
+    assert request.metrics == FetchMetrics(http_requests=1)
     assert browsers[0].contexts[0].closed is True
     assert browsers[0].closed is True
 
