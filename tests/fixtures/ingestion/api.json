@@ -1,0 +1,29 @@
+{
+  "data": {
+    "items": [
+      {
+        "url": "/updates/alpha",
+        "headline": "Alpha update",
+        "published_at": "2026-07-20T08:00:00Z"
+      },
+      {
+        "url": "https://api.example.com/updates/alpha",
+        "headline": "Alpha duplicate",
+        "published_at": "2026-07-20T08:01:00Z"
+      },
+      {
+        "url": "updates/bravo",
+        "headline": "Bravo update",
+        "published_at": "2026-07-19T10:30:00+00:00"
+      },
+      {
+        "url": "/updates/charlie",
+        "headline": "Charlie update",
+        "published_at": "not-a-date"
+      },
+      {
+        "headline": "Missing URL"
+      }
+    ]
+  }
+}

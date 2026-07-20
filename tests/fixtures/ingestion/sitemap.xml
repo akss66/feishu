@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<fixture-documents>
+  <document url="https://docs.example.com/sitemap.xml"><![CDATA[
+    <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <sitemap><loc>/sitemaps/nested.xml</loc></sitemap>
+      <sitemap><loc>https://docs.example.com/sitemaps/articles-b.xml</loc></sitemap>
+    </sitemapindex>
+  ]]></document>
+  <document url="https://docs.example.com/sitemaps/nested.xml"><![CDATA[
+    <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <sitemap><loc>articles-a.xml</loc></sitemap>
+    </sitemapindex>
+  ]]></document>
+  <document url="https://docs.example.com/sitemaps/articles-a.xml"><![CDATA[
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+            xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+      <url>
+        <loc>https://docs.example.com/articles/alpha</loc>
+        <news:news><news:title>Alpha</news:title></news:news>
+      </url>
+      <url><loc>/articles/shared</loc></url>
+    </urlset>
+  ]]></document>
+  <document url="https://docs.example.com/sitemaps/articles-b.xml"><![CDATA[
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://docs.example.com/articles/shared</loc></url>
+      <url><loc>https://docs.example.com/articles/bravo</loc></url>
+    </urlset>
+  ]]></document>
+</fixture-documents>

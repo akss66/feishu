@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<fixture-documents>
+  <document name="rss"><![CDATA[
+    <rss version="2.0">
+      <channel>
+        <title>Commerce updates</title>
+        <item>
+          <title>Seller fee update</title>
+          <link>/news/fee-update</link>
+          <description>&lt;p&gt;New fee details.&lt;/p&gt;</description>
+          <author>newsroom@example.com</author>
+          <pubDate>Mon, 20 Jul 2026 08:30:00 GMT</pubDate>
+        </item>
+        <item>
+          <title>Duplicate fee update</title>
+          <link>https://feeds.example.com/news/fee-update</link>
+        </item>
+        <item>
+          <title>Shipping update</title>
+          <link>https://feeds.example.com/news/shipping</link>
+        </item>
+      </channel>
+    </rss>
+  ]]></document>
+  <document name="atom"><![CDATA[
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>Atom commerce updates</title>
+      <entry>
+        <title>Policy update</title>
+        <link rel="alternate" href="/policy/2026-07" />
+        <summary type="html">Public policy summary.</summary>
+        <author><name>Policy Team</name></author>
+        <updated>2026-07-20T09:15:00Z</updated>
+      </entry>
+      <entry>
+        <title>Operations update</title>
+        <link href="https://atom.example.com/operations" />
+        <published>2026-07-19T12:00:00+00:00</published>
+      </entry>
+    </feed>
+  ]]></document>
+</fixture-documents>
