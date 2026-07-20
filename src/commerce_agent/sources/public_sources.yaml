@@ -174,7 +174,7 @@ sources:
     terms_url: https://www.ebayinc.com/terms-of-use/
     robots_url: https://www.ebayinc.com/robots.txt
     reviewed_at: 2026-07-20
-    compliance_notes: Publisher invites RSS subscription; robots allows the feed and specifies crawl-delay 2.
+    compliance_notes: Rechecked 2026-07-20; the official Press Room invites RSS-reader subscription, and robots allows this feed with crawl-delay 2.
     collector_config:
       item_limit: 50
 

@@ -13,6 +13,12 @@
    .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
    ```
 
+   如需使用公开来源采集 CLI，安装采集依赖：
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -e ".[dev,ingestion]"
+   ```
+
 3. 复制本地配置文件：
 
    ```powershell
@@ -54,3 +60,21 @@
 .\.venv\Scripts\python.exe -m pytest -v
 .\.venv\Scripts\python.exe -m ruff check src tests
 ```
+
+## 公开来源采集
+
+管理员可以在不启动飞书、DeepSeek 或自动调度器的情况下检查和手动运行来源：
+
+```powershell
+.\.venv\Scripts\python.exe -m commerce_agent.ingestion_cli sources list
+.\.venv\Scripts\python.exe -m commerce_agent.ingestion_cli run --source <source-id>
+.\.venv\Scripts\python.exe -m commerce_agent.ingestion_cli run --all
+.\.venv\Scripts\python.exe -m commerce_agent.ingestion_cli health
+```
+
+自动调度默认关闭。只有在人工运行成功、来源合规状态已复核并由运维人员明确决定后，
+才可设置 `INGESTION_SCHEDULER_ENABLED=true`。修改 `.env` 后必须重启进程才会生效；
+检查配置时不要打印或复制密钥、Cookie、完整查询串或群绑定码。
+
+完整安装、来源复核、健康解释、浏览器 opt-in、数据位置与回退步骤见
+[`docs/operations/source-ingestion-runbook.md`](docs/operations/source-ingestion-runbook.md)。
