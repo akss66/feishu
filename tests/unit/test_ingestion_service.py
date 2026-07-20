@@ -639,6 +639,19 @@ async def test_run_all_bounds_parallelism_and_isolates_source_failures() -> None
     assert len(repository.finished) == 4
 
 
+async def test_initialize_syncs_sources_once_before_first_scheduled_run() -> None:
+    ingestion, repository, _ = service(
+        [source()],
+        {CollectorKind.RSS: FakeCollector(items=[])},
+    )
+
+    await ingestion.initialize()
+    await ingestion.run_all(Trigger.SCHEDULED)
+
+    assert len(repository.synced) == 1
+    assert len(repository.finished) == 1
+
+
 async def test_run_all_surfaces_finish_storage_failure_after_other_sources_complete() -> None:
     class FinishFailingRepository(FakeRepository):
         async def finish_run(self, run_id: int, summary: RunSummary) -> None:

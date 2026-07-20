@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Protocol
 
+from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from commerce_agent.ingestion.models import Trigger
@@ -34,10 +35,17 @@ class IngestionScheduler:
         self._scheduler = scheduler or AsyncIOScheduler(timezone=timezone)
         self._started = False
         self._running_tasks: set[asyncio.Task[None]] = set()
+        self._shutdown_complete = asyncio.Event()
+        self._shutdown_loop: asyncio.AbstractEventLoop | None = None
+        add_listener = getattr(self._scheduler, "add_listener", None)
+        self._waits_for_shutdown_event = callable(add_listener)
+        if self._waits_for_shutdown_event:
+            add_listener(self._on_scheduler_shutdown, EVENT_SCHEDULER_SHUTDOWN)
 
     def start(self) -> None:
         if self._started:
             return
+        self._shutdown_complete.clear()
         self._scheduler.add_job(
             self._run,
             trigger="interval",
@@ -69,9 +77,17 @@ class IngestionScheduler:
         if not self._started:
             return
         self._started = False
+        self._shutdown_loop = asyncio.get_running_loop()
         self._scheduler.shutdown(wait=True)
+        if self._waits_for_shutdown_event:
+            await self._shutdown_complete.wait()
         tasks = tuple(self._running_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _on_scheduler_shutdown(self, event: Any) -> None:
+        del event
+        if self._shutdown_loop is not None:
+            self._shutdown_loop.call_soon_threadsafe(self._shutdown_complete.set)

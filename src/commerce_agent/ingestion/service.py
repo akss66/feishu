@@ -151,6 +151,11 @@ class IngestionService:
         self._sources_synced = False
         self._conditionals: dict[str, tuple[str | None, str | None]] = {}
 
+    async def initialize(self) -> None:
+        """Synchronize configured sources once before scheduled or manual work."""
+
+        await self._ensure_sources_synced()
+
     async def run_source(
         self,
         source_id: str,

@@ -93,7 +93,6 @@ async def _build_ingestion(
 
     registry = build_registry()
     repository = SqlAlchemyIngestionRepository(database.session)
-    await repository.sync_sources(registry.sources)
     safety_policy = UrlSafetyPolicy()
     http_client = IngestionHttpClient(
         safety_policy=safety_policy,
@@ -129,7 +128,7 @@ async def _build_ingestion(
             repository=repository,
             max_concurrency=settings.ingestion_global_concurrency,
         )
-        service._sources_synced = True
+        await service.initialize()
         scheduler = IngestionScheduler(
             service,
             interval_minutes=settings.ingestion_interval_minutes,

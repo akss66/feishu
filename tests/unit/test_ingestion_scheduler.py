@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from commerce_agent.ingestion.models import Trigger
 from commerce_agent.ingestion.scheduler import INGESTION_JOB_ID, IngestionScheduler
@@ -129,3 +132,47 @@ async def test_shutdown_cancels_and_awaits_a_running_ingestion() -> None:
         if not backend.task.done():
             backend.task.cancel()
             await asyncio.gather(backend.task, return_exceptions=True)
+
+
+async def test_real_backend_is_stopped_when_aclose_returns() -> None:
+    backend = AsyncIOScheduler(timezone="UTC")
+    scheduler = IngestionScheduler(RecordingService(), scheduler=backend)
+    scheduler.start()
+
+    await scheduler.aclose()
+
+    assert backend.running is False
+
+
+async def test_submitted_job_cannot_outlive_scheduler_shutdown() -> None:
+    class ResourceService:
+        def __init__(self) -> None:
+            self.resource_closed = False
+            self.accessed_after_close = False
+
+        async def run_all(self, trigger: Trigger) -> tuple[object, ...]:
+            del trigger
+            if self.resource_closed:
+                self.accessed_after_close = True
+            try:
+                await asyncio.Event().wait()
+            finally:
+                if self.resource_closed:
+                    self.accessed_after_close = True
+
+    service = ResourceService()
+    backend = AsyncIOScheduler(timezone="UTC")
+    scheduler = IngestionScheduler(service, scheduler=backend)
+    scheduler.start()
+    backend.modify_job(INGESTION_JOB_ID, next_run_time=datetime.now(UTC))
+    backend._process_jobs()
+    executor = backend._executors["default"]
+    submitted = tuple(executor._pending_futures)
+    assert submitted
+    assert not scheduler._running_tasks
+
+    await scheduler.aclose()
+    service.resource_closed = True
+
+    assert all(task.done() for task in submitted)
+    assert service.accessed_after_close is False
