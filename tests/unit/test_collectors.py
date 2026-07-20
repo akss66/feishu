@@ -4,6 +4,7 @@ import ast
 import importlib
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,13 +52,20 @@ class FakeHttpPort:
         self.requests.append(request)
         response = self.responses[request.url]
         if isinstance(response, FetchResponse):
-            return response
-        return FetchResponse(
-            url=request.url,
-            status_code=200,
-            headers={"content-type": "application/octet-stream"},
-            body=response,
-        )
+            result = response
+        else:
+            result = FetchResponse(
+                url=request.url,
+                status_code=200,
+                headers={"content-type": "application/octet-stream"},
+                body=response,
+            )
+        if request.metrics is not None:
+            request.metrics.record_request(
+                status_code=result.status_code,
+                bytes_received=len(result.body),
+            )
+        return result
 
 
 class FakeBrowserPort:
@@ -68,7 +76,7 @@ class FakeBrowserPort:
     async def render(self, request: BrowserRequest) -> RenderedPage:
         self.requests.append(request)
         page = self.pages[request.url]
-        request.metrics.record_response(
+        request.metrics.record_request(
             status_code=page.artifact.status_code,
             bytes_received=len(page.artifact.body),
         )
@@ -179,11 +187,12 @@ def test_fetch_metrics_are_isolated_mutable_and_reject_unsafe_counters() -> None
     first = context()
     second = context()
 
-    first.metrics.record_response(status_code=200, bytes_received=12)
-    first.metrics.record_response(status_code=304, bytes_received=0)
+    first.metrics.record_request(status_code=200, bytes_received=12)
+    first.metrics.record_request(status_code=304, bytes_received=0)
+    first.metrics.record_request(status_code=None, bytes_received=0)
 
     assert first.metrics == FetchMetrics(
-        http_requests=2,
+        http_requests=3,
         http_not_modified=1,
         bytes_received=12,
     )
@@ -193,11 +202,24 @@ def test_fetch_metrics_are_isolated_mutable_and_reject_unsafe_counters() -> None
     with pytest.raises(TypeError):
         FetchMetrics(bytes_received=True)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
-        first.metrics.record_response(status_code=200, bytes_received=-1)
+        first.metrics.record_request(status_code=200, bytes_received=-1)
     saturated = FetchMetrics(bytes_received=2**63 - 1)
     with pytest.raises(ValueError):
-        saturated.record_response(status_code=200, bytes_received=1)
+        saturated.record_request(status_code=200, bytes_received=1)
     assert saturated == FetchMetrics(bytes_received=2**63 - 1)
+
+    concurrent = FetchMetrics()
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(
+            executor.map(
+                lambda _: concurrent.record_request(
+                    status_code=200,
+                    bytes_received=1,
+                ),
+                range(8_000),
+            )
+        )
+    assert concurrent == FetchMetrics(http_requests=8_000, bytes_received=8_000)
 
 
 @pytest.mark.asyncio
@@ -910,7 +932,7 @@ async def test_playwright_port_fails_closed_when_navigation_has_no_response(
         await port.render(request)
 
     assert error.value.code == "renderer_response_unavailable"
-    assert request.metrics == FetchMetrics()
+    assert request.metrics == FetchMetrics(http_requests=1)
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass
@@ -13,10 +14,12 @@ from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     RenderedPage,
     allowed_hosts,
+    detail_failure,
     item_limit,
 )
 from commerce_agent.ingestion.collectors.html import links_from_html
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     FetchContext,
     ResponseArtifact,
@@ -54,84 +57,79 @@ class PlaywrightBrowserPort:
         module = _load_playwright()
         timeout_ms = request.timeout_seconds * 1000
         resolver_rules = _chromium_resolver_rules(pinned_hosts)
+        terminal_status: int | None = None
+        received_bytes = 0
         try:
-            async with module.async_playwright() as playwright:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    args=["--disable-quic", f"--host-resolver-rules={resolver_rules}"],
-                )
-                browser_context = None
-                try:
-                    browser_context = await browser.new_context(
-                        accept_downloads=False,
-                        service_workers="block",
+            try:
+                async with module.async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(
+                        headless=True,
+                        args=["--disable-quic", f"--host-resolver-rules={resolver_rules}"],
                     )
-                    page = await browser_context.new_page()
-                    page.set_default_timeout(timeout_ms)
-                    page.set_default_navigation_timeout(timeout_ms)
-
-                    async def guard_route(route: _Route) -> None:
-                        try:
-                            await self._validate_pinned(
-                                route.request.url,
-                                request.allowed_hosts,
-                                pinned_hosts,
-                            )
-                        except CollectorError:
-                            await route.abort("blockedbyclient")
-                        else:
-                            await route.continue_()
-
-                    await page.route("**/*", guard_route)
-                    navigation_response = await page.goto(
-                        entry_url.url,
-                        wait_until="domcontentloaded",
-                        timeout=timeout_ms,
-                    )
-                    if navigation_response is None:
-                        raise CollectorError("renderer_response_unavailable")
+                    browser_context = None
                     try:
+                        browser_context = await browser.new_context(
+                            accept_downloads=False,
+                            service_workers="block",
+                        )
+                        page = await browser_context.new_page()
+                        page.set_default_timeout(timeout_ms)
+                        page.set_default_navigation_timeout(timeout_ms)
+
+                        async def guard_route(route: _Route) -> None:
+                            try:
+                                await self._validate_pinned(
+                                    route.request.url,
+                                    request.allowed_hosts,
+                                    pinned_hosts,
+                                )
+                            except CollectorError:
+                                await route.abort("blockedbyclient")
+                            else:
+                                await route.continue_()
+
+                        await page.route("**/*", guard_route)
+                        navigation_response = await page.goto(
+                            entry_url.url,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                        if navigation_response is None:
+                            raise CollectorError("renderer_response_unavailable")
+                        terminal_status = navigation_response.status
                         final_url = await self._validate_pinned(
                             page.url,
                             request.allowed_hosts,
                             pinned_hosts,
                         )
-                    except CollectorError:
-                        request.metrics.record_response(
-                            status_code=navigation_response.status,
-                            bytes_received=0,
-                        )
-                        raise
-                    try:
-                        raw_headers = await navigation_response.all_headers()
-                        raw_body = await navigation_response.body()
-                        artifact = ResponseArtifact(
+                        try:
+                            raw_headers = await navigation_response.all_headers()
+                            raw_body = await navigation_response.body()
+                            artifact = ResponseArtifact(
+                                url=final_url.url,
+                                status_code=navigation_response.status,
+                                headers=raw_headers,
+                                body=raw_body,
+                            )
+                        except Exception:
+                            raise CollectorError("renderer_response_unavailable") from None
+                        received_bytes = len(artifact.body)
+                        body = (await page.content()).encode("utf-8")
+                        return RenderedPage(
                             url=final_url.url,
-                            status_code=navigation_response.status,
-                            headers=raw_headers,
-                            body=raw_body,
+                            body=body,
+                            artifact=artifact,
+                            headers=dict(artifact.headers),
                         )
-                    except Exception:
-                        request.metrics.record_response(
-                            status_code=navigation_response.status,
-                            bytes_received=0,
-                        )
-                        raise CollectorError("renderer_response_unavailable") from None
-                    request.metrics.record_response(
-                        status_code=artifact.status_code,
-                        bytes_received=len(artifact.body),
-                    )
-                    body = (await page.content()).encode("utf-8")
-                    return RenderedPage(
-                        url=final_url.url,
-                        body=body,
-                        artifact=artifact,
-                        headers=dict(artifact.headers),
-                    )
-                finally:
-                    if browser_context is not None:
-                        await browser_context.close()
-                    await browser.close()
+                    finally:
+                        if browser_context is not None:
+                            await browser_context.close()
+                        await browser.close()
+            finally:
+                request.metrics.record_request(
+                    status_code=terminal_status,
+                    bytes_received=received_bytes,
+                )
         except CollectorError:
             raise
         except Exception as exc:
@@ -199,7 +197,7 @@ class BrowserCollector:
         self,
         source: SourceDefinition,
         context: FetchContext,
-    ) -> AsyncIterator[CollectedItem]:
+    ) -> AsyncIterator[CollectedItem | CollectedFailure]:
         if not self._enabled:
             raise CollectorError("renderer_unavailable")
         browser = self._browser or PlaywrightBrowserPort()
@@ -221,15 +219,21 @@ class BrowserCollector:
             selector=selector,
             limit=item_limit(source),
         ):
-            detail = await browser.render(
-                BrowserRequest(
-                    url=candidate.url,
-                    allowed_hosts=allowed_hosts(source),
-                    timeout_seconds=self._timeout_seconds,
-                    metrics=context.metrics,
+            try:
+                detail = await browser.render(
+                    BrowserRequest(
+                        url=candidate.url,
+                        allowed_hosts=allowed_hosts(source),
+                        timeout_seconds=self._timeout_seconds,
+                        metrics=context.metrics,
+                    )
                 )
-            )
-            _require_render_success(detail)
+                _require_render_success(detail)
+            except asyncio.CancelledError:
+                raise
+            except CollectorError as error:
+                yield detail_failure(error)
+                continue
             yield CollectedItem(
                 url=detail.url,
                 body=detail.body,

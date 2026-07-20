@@ -12,6 +12,7 @@ from commerce_agent.ingestion.collectors import CollectorError
 from commerce_agent.ingestion.compliance import CompliancePolicy
 from commerce_agent.ingestion.extract import ExtractionError
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
@@ -94,7 +95,7 @@ def item(
 class FakeCollector:
     def __init__(
         self,
-        items: Sequence[CollectedItem] = (),
+        items: Sequence[CollectedItem | CollectedFailure] = (),
         *,
         events: list[str] | None = None,
         error: Exception | None = None,
@@ -342,7 +343,7 @@ async def test_collector_cancellation_finishes_failed_then_propagates() -> None:
     class BlockingCollector:
         async def collect(self, definition: SourceDefinition, context: FetchContext):
             del definition
-            context.metrics.record_response(status_code=200, bytes_received=17)
+            context.metrics.record_request(status_code=200, bytes_received=17)
             entered.set()
             await never.wait()
             yield item()
@@ -508,6 +509,40 @@ async def test_item_extraction_failure_is_counted_while_other_items_continue() -
         ("amazon-news", b"raw:bad"),
         ("amazon-news", b"raw:good"),
     ]
+
+
+async def test_detail_failure_event_is_counted_without_snapshot_and_later_item_continues() -> None:
+    collector = FakeCollector(
+        [CollectedFailure("fetch_failed"), item(b"good", suffix="good")]
+    )
+    ingestion, repository, snapshots = service(
+        [source()],
+        {CollectorKind.RSS: collector},
+    )
+
+    summary = await ingestion.run_source("amazon-news", Trigger.MANUAL)
+
+    assert summary.status is RunStatus.PARTIAL
+    assert (summary.discovered, summary.created, summary.failed) == (2, 1, 1)
+    assert summary.error_code == "fetch_failed"
+    assert snapshots.saved == [("amazon-news", b"raw:good")]
+    assert [candidate.body for candidate in repository.persisted] == ["good"]
+
+
+async def test_untrusted_detail_failure_code_is_replaced_with_controlled_fallback() -> None:
+    ingestion, repository, snapshots = service(
+        [source()],
+        {CollectorKind.RSS: FakeCollector([CollectedFailure("secret-detail-code")])},
+    )
+
+    summary = await ingestion.run_source("amazon-news", Trigger.MANUAL)
+
+    assert summary.status is RunStatus.FAILED
+    assert (summary.discovered, summary.failed) == (1, 1)
+    assert summary.error_code == "detail_fetch_failed"
+    assert summary.error_summary == "detail_fetch_failed"
+    assert repository.persisted == []
+    assert snapshots.saved == []
 
 
 async def test_run_summary_stably_classifies_create_update_and_duplicate() -> None:

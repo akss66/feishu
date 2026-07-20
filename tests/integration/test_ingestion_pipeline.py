@@ -52,7 +52,13 @@ class FixtureHttp:
 
     async def get(self, request: FetchRequest) -> FetchResponse:
         self.requests.append(request)
-        return self.responses[request.url]
+        response = self.responses[request.url]
+        if request.metrics is not None:
+            request.metrics.record_request(
+                status_code=response.status_code,
+                bytes_received=len(response.body),
+            )
+        return response
 
 
 class FixtureBrowser:
@@ -63,7 +69,7 @@ class FixtureBrowser:
     async def render(self, request: BrowserRequest) -> RenderedPage:
         self.requests.append(request)
         page = self.pages[request.url]
-        request.metrics.record_response(
+        request.metrics.record_request(
             status_code=page.artifact.status_code,
             bytes_received=len(page.artifact.body),
         )
@@ -339,29 +345,32 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
 ) -> None:
     article = (FIXTURES / "article_en.html").read_bytes()
     html_list = "https://details.example.com/html-list"
+    html_failed = "https://details.example.com/html-failed"
     html_detail = "https://details.example.com/html-detail"
     sitemap = "https://details.example.com/sitemap.xml"
+    sitemap_failed = "https://details.example.com/sitemap-failed"
     sitemap_detail = "https://details.example.com/sitemap-detail"
     browser_list = "https://details.example.com/browser-list"
+    browser_failed = "https://details.example.com/browser-failed"
     browser_detail = "https://details.example.com/browser-detail"
     definitions = [
         detail_source(
             "detail-html",
             CollectorKind.HTML,
             entry_url=html_list,
-            config={"link_selector": "main a.item", "item_limit": 1},
+            config={"link_selector": "main a.item", "item_limit": 2},
         ),
         detail_source(
             "detail-sitemap",
             CollectorKind.SITEMAP,
             entry_url=sitemap,
-            config={"item_limit": 1},
+            config={"item_limit": 2},
         ),
         detail_source(
             "detail-browser",
             CollectorKind.BROWSER,
             entry_url=browser_list,
-            config={"link_selector": "main a.item", "item_limit": 1},
+            config={"link_selector": "main a.item", "item_limit": 2},
         ),
     ]
     http = FixtureHttp(
@@ -370,7 +379,16 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
                 url=html_list,
                 status_code=200,
                 headers={"content-type": "text/html"},
-                body=b'<main><a class="item" href="/html-detail">HTML</a></main>',
+                body=(
+                    b'<main><a class="item" href="/html-failed">Failed</a>'
+                    b'<a class="item" href="/html-detail">HTML</a></main>'
+                ),
+            ),
+            html_failed: FetchResponse(
+                url=html_failed,
+                status_code=500,
+                headers={"content-type": "text/html"},
+                body=b"",
             ),
             html_detail: FetchResponse(
                 url=html_detail,
@@ -384,8 +402,15 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
                 headers={"content-type": "application/xml"},
                 body=(
                     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    f"<url><loc>{sitemap_failed}</loc></url>"
                     f"<url><loc>{sitemap_detail}</loc></url></urlset>"
                 ).encode(),
+            ),
+            sitemap_failed: FetchResponse(
+                url=sitemap_failed,
+                status_code=500,
+                headers={"content-type": "text/html"},
+                body=b"",
             ),
             sitemap_detail: FetchResponse(
                 url=sitemap_detail,
@@ -399,12 +424,25 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
         {
             browser_list: RenderedPage(
                 url=browser_list,
-                body=b'<main><a class="item" href="/browser-detail">Browser</a></main>',
+                body=(
+                    b'<main><a class="item" href="/browser-failed">Failed</a>'
+                    b'<a class="item" href="/browser-detail">Browser</a></main>'
+                ),
                 artifact=ResponseArtifact(
                     url=browser_list,
                     status_code=200,
                     headers={"content-type": "text/html"},
                     body=b"raw browser list",
+                ),
+            ),
+            browser_failed: RenderedPage(
+                url=browser_failed,
+                body=b"failed browser response",
+                artifact=ResponseArtifact(
+                    url=browser_failed,
+                    status_code=500,
+                    headers={"content-type": "text/html"},
+                    body=b"",
                 ),
             ),
             browser_detail: RenderedPage(
@@ -437,8 +475,13 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
     try:
         summaries = await ingestion.run_all(Trigger.MANUAL)
 
-        assert all(summary.status is RunStatus.SUCCESS for summary in summaries)
-        assert all((summary.created, summary.failed) == (1, 0) for summary in summaries)
+        assert all(summary.status is RunStatus.PARTIAL for summary in summaries)
+        assert all(
+            (summary.discovered, summary.created, summary.failed) == (2, 1, 1)
+            for summary in summaries
+        )
+        assert all(summary.error_code == "fetch_failed" for summary in summaries)
+        assert all(summary.http_requests == 3 for summary in summaries)
         async with database.session() as session:
             document_count = await session.scalar(select(func.count()).select_from(Document))
             version_count = await session.scalar(
@@ -446,15 +489,27 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
             )
         assert (document_count, version_count) == (3, 3)
         requested_urls = [request.url for request in http.requests]
-        assert set(requested_urls) == {html_list, html_detail, sitemap, sitemap_detail}
-        assert requested_urls.index(html_list) < requested_urls.index(html_detail)
-        assert requested_urls.index(sitemap) < requested_urls.index(sitemap_detail)
-        assert [request.url for request in browser.requests] == [browser_list, browser_detail]
+        assert set(requested_urls) == {
+            html_list,
+            html_failed,
+            html_detail,
+            sitemap,
+            sitemap_failed,
+            sitemap_detail,
+        }
+        assert requested_urls.index(html_failed) < requested_urls.index(html_detail)
+        assert requested_urls.index(sitemap_failed) < requested_urls.index(sitemap_detail)
+        assert [request.url for request in browser.requests] == [
+            browser_list,
+            browser_failed,
+            browser_detail,
+        ]
         snapshot_bodies = {
             gzip.decompress(path.read_bytes())
             for path in (tmp_path / "detail-snapshots").rglob("*.bin.gz")
         }
         assert b"raw browser detail" in snapshot_bodies
         assert b"raw browser list" not in snapshot_bodies
+        assert b"failed browser response" not in snapshot_bodies
     finally:
         await database.dispose()

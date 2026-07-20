@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from _thread import LockType
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
+from threading import Lock
 from types import MappingProxyType
 
 Scalar = str | int | float | bool | None
@@ -111,27 +113,38 @@ class FetchMetrics:
     http_requests: int = 0
     http_not_modified: int = 0
     bytes_received: int = 0
+    _lock: LockType = field(default_factory=Lock, init=False, compare=False, repr=False)
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in _METRIC_FIELDS:
             value = _safe_counter(name, value)
         object.__setattr__(self, name, value)
 
-    def record_response(self, *, status_code: int, bytes_received: int) -> None:
-        if not isinstance(status_code, int) or isinstance(status_code, bool):
-            raise TypeError("status_code must be an integer")
-        if not 100 <= status_code <= 599:
-            raise ValueError("status_code must be a valid HTTP status")
+    def record_request(
+        self,
+        *,
+        status_code: int | None,
+        bytes_received: int,
+    ) -> None:
+        if status_code is not None:
+            if not isinstance(status_code, int) or isinstance(status_code, bool):
+                raise TypeError("status_code must be an integer or None")
+            if not 100 <= status_code <= 599:
+                raise ValueError("status_code must be a valid HTTP status")
         response_bytes = _safe_counter("bytes_received", bytes_received)
-        next_requests = _safe_counter("http_requests", self.http_requests + 1)
-        next_not_modified = _safe_counter(
-            "http_not_modified",
-            self.http_not_modified + (status_code == 304),
-        )
-        next_bytes = _safe_counter("bytes_received", self.bytes_received + response_bytes)
-        self.http_requests = next_requests
-        self.http_not_modified = next_not_modified
-        self.bytes_received = next_bytes
+        with self._lock:
+            next_requests = _safe_counter("http_requests", self.http_requests + 1)
+            next_not_modified = _safe_counter(
+                "http_not_modified",
+                self.http_not_modified + (status_code == 304),
+            )
+            next_bytes = _safe_counter(
+                "bytes_received",
+                self.bytes_received + response_bytes,
+            )
+            self.http_requests = next_requests
+            self.http_not_modified = next_not_modified
+            self.bytes_received = next_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +173,11 @@ class ResponseArtifact:
         }
         object.__setattr__(self, "headers", MappingProxyType(safe_headers))
         object.__setattr__(self, "body", bytes(self.body))
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedFailure:
+    error_code: str
 
 
 @dataclass(frozen=True, slots=True)

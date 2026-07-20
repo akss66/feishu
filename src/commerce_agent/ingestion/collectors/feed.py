@@ -11,7 +11,6 @@ from commerce_agent.ingestion.collectors.base import (
     candidate_url,
     fetch_request,
     item_limit,
-    record_response,
     require_success,
     response_artifact,
 )
@@ -28,7 +27,6 @@ class FeedCollector:
         context: FetchContext,
     ) -> AsyncIterator[CollectedItem]:
         response = await self._http.get(fetch_request(source, context))
-        record_response(context, response)
         if not require_success(response):
             return
         artifact = response_artifact(response)

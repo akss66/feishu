@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from xml.etree import ElementTree
 
@@ -7,13 +8,20 @@ from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     HttpPort,
     candidate_url,
+    detail_failure,
     fetch_request,
     item_limit,
-    record_response,
     require_success,
     response_artifact,
 )
-from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
+from commerce_agent.ingestion.http import FetchError
+from commerce_agent.ingestion.models import (
+    CollectedFailure,
+    CollectedItem,
+    FetchContext,
+    SourceDefinition,
+)
+from commerce_agent.ingestion.security import UrlSafetyError
 
 _MAX_SITEMAPS = 256
 
@@ -26,7 +34,7 @@ class SitemapCollector:
         self,
         source: SourceDefinition,
         context: FetchContext,
-    ) -> AsyncIterator[CollectedItem]:
+    ) -> AsyncIterator[CollectedItem | CollectedFailure]:
         stack: list[tuple[str, bool]] = [(source.entry_url, True)]
         visited_sitemaps: set[str] = set()
         seen_items: set[str] = set()
@@ -42,7 +50,6 @@ class SitemapCollector:
             response = await self._http.get(
                 fetch_request(source, context, url=sitemap_url, conditional=is_root)
             )
-            record_response(context, response)
             if not require_success(response):
                 continue
             try:
@@ -62,11 +69,17 @@ class SitemapCollector:
                 if url in seen_items:
                     continue
                 seen_items.add(url)
-                detail = await self._http.get(
-                    fetch_request(source, context, url=url, conditional=False)
-                )
-                record_response(context, detail)
-                if not require_success(detail):
+                try:
+                    detail = await self._http.get(
+                        fetch_request(source, context, url=url, conditional=False)
+                    )
+                    if not require_success(detail):
+                        yield CollectedFailure("detail_fetch_failed")
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except (FetchError, CollectorError, UrlSafetyError) as error:
+                    yield detail_failure(error)
                     continue
                 artifact = response_artifact(detail)
                 yield CollectedItem(

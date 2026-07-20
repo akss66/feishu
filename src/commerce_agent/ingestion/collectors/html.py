@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -9,13 +10,20 @@ from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     HttpPort,
     candidate_url,
+    detail_failure,
     fetch_request,
     item_limit,
-    record_response,
     require_success,
     response_artifact,
 )
-from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
+from commerce_agent.ingestion.http import FetchError
+from commerce_agent.ingestion.models import (
+    CollectedFailure,
+    CollectedItem,
+    FetchContext,
+    SourceDefinition,
+)
+from commerce_agent.ingestion.security import UrlSafetyError
 
 _SELECTOR_PART = re.compile(r"^(?P<tag>[a-zA-Z][\w-]*|\*)?(?P<suffix>(?:[.#][\w-]+)*)$")
 _SELECTOR_SUFFIX = re.compile(r"([.#])([\w-]+)")
@@ -85,9 +93,8 @@ class HtmlCollector:
         self,
         source: SourceDefinition,
         context: FetchContext,
-    ) -> AsyncIterator[CollectedItem]:
+    ) -> AsyncIterator[CollectedItem | CollectedFailure]:
         response = await self._http.get(fetch_request(source, context))
-        record_response(context, response)
         if not require_success(response):
             return
         selector = source.collector_config.get("link_selector")
@@ -99,11 +106,17 @@ class HtmlCollector:
             selector=selector,
             limit=item_limit(source),
         ):
-            detail = await self._http.get(
-                fetch_request(source, context, url=candidate.url, conditional=False)
-            )
-            record_response(context, detail)
-            if not require_success(detail):
+            try:
+                detail = await self._http.get(
+                    fetch_request(source, context, url=candidate.url, conditional=False)
+                )
+                if not require_success(detail):
+                    yield CollectedFailure("detail_fetch_failed")
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except (FetchError, CollectorError, UrlSafetyError) as error:
+                yield detail_failure(error)
                 continue
             artifact = response_artifact(detail)
             yield CollectedItem(

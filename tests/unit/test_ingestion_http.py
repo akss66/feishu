@@ -18,6 +18,7 @@ from commerce_agent.ingestion.http import (
     IngestionHttpClient,
     _PinnedAsyncTransport,
 )
+from commerce_agent.ingestion.models import FetchMetrics
 from commerce_agent.ingestion.security import UrlSafetyError, UrlSafetyPolicy
 
 PUBLIC_IP = "93.184.216.34"
@@ -241,11 +242,13 @@ async def test_conditional_headers_and_not_modified_response() -> None:
             headers={"ETag": '"new"', "Last-Modified": "Mon, 20 Jul 2026 00:00:00 GMT"},
         )
 
+    metrics = FetchMetrics()
     request = FetchRequest(
         "https://news.example.com/items",
         ("news.example.com",),
         etag='"old"',
         last_modified="Sun, 19 Jul 2026 00:00:00 GMT",
+        metrics=metrics,
     )
     async with IngestionHttpClient(
         safety_policy=policy(),
@@ -259,6 +262,34 @@ async def test_conditional_headers_and_not_modified_response() -> None:
     assert response.not_modified is True
     assert response.body == b""
     assert response.etag == '"new"'
+    assert metrics == FetchMetrics(http_requests=1, http_not_modified=1)
+
+
+async def test_terminal_500_records_one_logical_request() -> None:
+    metrics = FetchMetrics()
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, content=b"not read")
+
+    request = FetchRequest(
+        "https://news.example.com/items",
+        ("news.example.com",),
+        metrics=metrics,
+    )
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(FetchError) as caught:
+            await client.get(request)
+
+    assert caught.value.status_code == 500
+    assert calls == 1
+    assert metrics == FetchMetrics(http_requests=1)
 
 
 async def test_streamed_response_aborts_above_ten_mib_and_closes_response() -> None:
@@ -360,6 +391,7 @@ async def test_retry_after_http_date_uses_injected_wall_clock_and_is_clamped(
 async def test_5xx_and_transient_connection_errors_are_retried() -> None:
     fake_time = FakeTime()
     calls = 0
+    metrics = FetchMetrics()
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -376,11 +408,18 @@ async def test_5xx_and_transient_connection_errors_are_retried() -> None:
         sleeper=fake_time.sleep,
         transport=httpx.MockTransport(handler),
     ) as client:
-        response = await client.get(fetch())
+        response = await client.get(
+            FetchRequest(
+                "https://news.example.com/items",
+                ("news.example.com",),
+                metrics=metrics,
+            )
+        )
 
     assert response.body == b"ok"
     assert calls == 3
     assert fake_time.sleeps == [1.0, 2.0]
+    assert metrics == FetchMetrics(http_requests=1, bytes_received=2)
 
 
 async def test_transient_write_error_is_retried() -> None:
@@ -408,6 +447,8 @@ async def test_transient_write_error_is_retried() -> None:
 
 
 async def test_nontransient_httpx_error_is_wrapped_in_stable_classification() -> None:
+    metrics = FetchMetrics()
+
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.LocalProtocolError(
             "malformed request with top-secret-value",
@@ -419,15 +460,23 @@ async def test_nontransient_httpx_error_is_wrapped_in_stable_classification() ->
         transport=httpx.MockTransport(handler),
     ) as client:
         with pytest.raises(FetchError) as caught:
-            await client.get(fetch())
+            await client.get(
+                FetchRequest(
+                    "https://news.example.com/items",
+                    ("news.example.com",),
+                    metrics=metrics,
+                )
+            )
 
     assert caught.value.code == "http_transport_error"
     assert "top-secret-value" not in str(caught.value)
+    assert metrics == FetchMetrics(http_requests=1)
 
 
 async def test_retryable_status_has_at_most_three_retries_and_closes_each_response() -> None:
     fake_time = FakeTime()
     streams: list[TrackingStream] = []
+    metrics = FetchMetrics()
 
     async def handler(request: httpx.Request) -> httpx.Response:
         stream = TrackingStream(())
@@ -441,12 +490,36 @@ async def test_retryable_status_has_at_most_three_retries_and_closes_each_respon
         transport=httpx.MockTransport(handler),
     ) as client:
         with pytest.raises(FetchError) as caught:
-            await client.get(fetch())
+            await client.get(
+                FetchRequest(
+                    "https://news.example.com/items",
+                    ("news.example.com",),
+                    metrics=metrics,
+                )
+            )
 
     assert caught.value.code == "retry_exhausted"
     assert caught.value.status_code == 503
     assert len(streams) == 4
     assert all(stream.closed for stream in streams)
+    assert metrics == FetchMetrics(http_requests=1)
+
+
+async def test_initial_url_safety_rejection_does_not_record_a_request() -> None:
+    metrics = FetchMetrics()
+    request = FetchRequest(
+        "http://news.example.com/items",
+        ("news.example.com",),
+        metrics=metrics,
+    )
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+    ) as client:
+        with pytest.raises(UrlSafetyError):
+            await client.get(request)
+
+    assert metrics == FetchMetrics()
 
 
 async def test_ordinary_4xx_is_not_retried() -> None:

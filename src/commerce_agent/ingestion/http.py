@@ -21,6 +21,7 @@ from urllib.parse import urljoin
 import httpcore
 import httpx
 
+from commerce_agent.ingestion.models import FetchMetrics
 from commerce_agent.ingestion.security import SafeUrl, UrlSafetyError, UrlSafetyPolicy
 
 Clock = Callable[[], float]
@@ -56,6 +57,7 @@ class FetchRequest:
     allowed_hosts: Collection[str]
     etag: str | None = None
     last_modified: str | None = None
+    metrics: FetchMetrics | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "allowed_hosts", tuple(self.allowed_hosts))
@@ -204,12 +206,16 @@ class IngestionHttpClient:
         if self._closed:
             raise RuntimeError("HTTP client is closed")
         current_url = request.url
+        request_started = False
+        terminal_status: int | None = None
+        received_bytes = 0
         try:
             for redirect_count in range(self._max_redirects + 1):
                 safe_url = await self._safety_policy.validate(
                     current_url,
                     request.allowed_hosts,
                 )
+                request_started = True
                 result = await self._fetch_hop(safe_url, request)
                 if result.status_code in _REDIRECT_STATUSES:
                     location = result.headers.get("Location")
@@ -234,6 +240,8 @@ class IngestionHttpClient:
                     },
                     body=result.body,
                 )
+                terminal_status = response.status_code
+                received_bytes = len(response.body)
                 _LOGGER.info(
                     "ingestion fetch completed url=%s status=%d bytes=%d",
                     self._safety_policy.redact_for_log(safe_url.url),
@@ -241,7 +249,8 @@ class IngestionHttpClient:
                     len(response.body),
                 )
                 return response
-        except (FetchError, UrlSafetyError) as exc:
+        except FetchError as exc:
+            terminal_status = exc.status_code
             code = exc.code
             _LOGGER.warning(
                 "ingestion fetch failed url=%s code=%s",
@@ -249,6 +258,19 @@ class IngestionHttpClient:
                 code,
             )
             raise
+        except UrlSafetyError as exc:
+            _LOGGER.warning(
+                "ingestion fetch failed url=%s code=%s",
+                self._safety_policy.redact_for_log(current_url),
+                exc.code,
+            )
+            raise
+        finally:
+            if request_started and request.metrics is not None:
+                request.metrics.record_request(
+                    status_code=terminal_status,
+                    bytes_received=received_bytes,
+                )
         raise FetchError("too_many_redirects")
 
     async def _fetch_hop(self, safe_url: SafeUrl, request: FetchRequest) -> _AttemptResult:

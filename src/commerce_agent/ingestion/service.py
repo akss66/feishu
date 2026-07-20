@@ -14,6 +14,7 @@ from commerce_agent.ingestion.dedupe import fingerprint_document
 from commerce_agent.ingestion.extract import ContentExtractor, ExtractionError
 from commerce_agent.ingestion.http import FetchError, FetchResponse
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     CollectorKind,
     FetchContext,
@@ -40,6 +41,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "compliance_not_allowed",
         "compliance_review_required",
         "destination_not_public",
+        "detail_fetch_failed",
         "dns_resolution_failed",
         "fetch_failed",
         "hash_path_conflict",
@@ -102,6 +104,11 @@ class _RunCounts:
         self.failed += 1
         if self.error_code is None:
             self.error_code = _error_code(error)
+
+    def record_error_code(self, error_code: str) -> None:
+        self.failed += 1
+        if self.error_code is None:
+            self.error_code = _controlled_detail_error_code(error_code)
 
     def record_outcome(self, outcome: PersistOutcome) -> None:
         if outcome.created_document and outcome.created_version:
@@ -258,6 +265,9 @@ class IngestionService:
         try:
             async for item in collector.collect(source, context):
                 counts.discovered += 1
+                if isinstance(item, CollectedFailure):
+                    counts.record_error_code(item.error_code)
+                    continue
                 self._remember_conditionals(source.source_id, item)
                 try:
                     outcome = await self._ingest_item(source, item)
@@ -407,3 +417,9 @@ def _controlled_error_summary(error_code: str | None) -> str | None:
     if error_code in _CONTROLLED_ERROR_CODES:
         return error_code
     return "unexpected_error"
+
+
+def _controlled_detail_error_code(error_code: str) -> str:
+    if error_code in _KNOWN_ERROR_CODES:
+        return error_code
+    return "detail_fetch_failed"

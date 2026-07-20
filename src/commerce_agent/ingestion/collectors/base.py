@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlsplit
 
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     FetchContext,
     FetchMetrics,
@@ -16,6 +17,33 @@ from commerce_agent.ingestion.models import (
 )
 
 DEFAULT_ITEM_LIMIT = 100
+_CONTROLLED_DETAIL_ERROR_CODES = frozenset(
+    {
+        "compliance_review_required",
+        "destination_not_public",
+        "dns_resolution_failed",
+        "fetch_failed",
+        "host_not_allowed",
+        "http_client_error",
+        "http_transport_error",
+        "invalid_url",
+        "network_retry_exhausted",
+        "port_not_allowed",
+        "redirect_missing_location",
+        "redirect_status_not_supported",
+        "renderer_failed",
+        "renderer_response_unavailable",
+        "renderer_security_rejected",
+        "renderer_timeout",
+        "renderer_unavailable",
+        "response_too_large",
+        "retry_exhausted",
+        "scheme_not_allowed",
+        "too_many_redirects",
+        "unexpected_http_status",
+        "userinfo_not_allowed",
+    }
+)
 
 
 class CollectorError(RuntimeError):
@@ -65,7 +93,7 @@ class Collector(Protocol):
         self,
         source: SourceDefinition,
         context: FetchContext,
-    ) -> AsyncIterator[CollectedItem]: ...
+    ) -> AsyncIterator[CollectedItem | CollectedFailure]: ...
 
 
 def allowed_hosts(source: SourceDefinition) -> tuple[str, ...]:
@@ -106,6 +134,7 @@ def fetch_request(
         allowed_hosts=allowed_hosts(source),
         etag=context.etag if conditional else None,
         last_modified=context.last_modified if conditional else None,
+        metrics=context.metrics,
     )
 
 
@@ -117,16 +146,6 @@ def require_success(response: FetchResponse) -> bool:
     return True
 
 
-def record_response(
-    context: FetchContext,
-    response: FetchResponse | ResponseArtifact,
-) -> None:
-    context.metrics.record_response(
-        status_code=response.status_code,
-        bytes_received=len(response.body),
-    )
-
-
 def response_artifact(response: FetchResponse) -> ResponseArtifact:
     return ResponseArtifact(
         url=response.url,
@@ -134,3 +153,10 @@ def response_artifact(response: FetchResponse) -> ResponseArtifact:
         headers=response.headers,
         body=response.body,
     )
+
+
+def detail_failure(error: BaseException) -> CollectedFailure:
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code in _CONTROLLED_DETAIL_ERROR_CODES:
+        return CollectedFailure(code)
+    return CollectedFailure("detail_fetch_failed")
