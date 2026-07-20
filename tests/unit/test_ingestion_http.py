@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Collection
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 
 import httpcore
 import httpx
@@ -140,6 +142,47 @@ async def test_same_domain_requests_are_spaced_by_at_least_one_second() -> None:
     assert fake_time.sleeps == [1.0, 1.0]
 
 
+async def test_same_domain_spacing_is_measured_after_waiting_for_global_capacity() -> None:
+    fake_time = FakeTime()
+    blockers_entered = asyncio.Event()
+    release_blockers = asyncio.Event()
+    active_blockers = 0
+    starts: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active_blockers
+        if request.url.host.startswith("blocker-"):
+            active_blockers += 1
+            if active_blockers == 2:
+                blockers_entered.set()
+            await release_blockers.wait()
+            return httpx.Response(200, content=b"blocker done")
+        starts.append(fake_time.monotonic())
+        return httpx.Response(200, content=b"ok")
+
+    blockers = [
+        FetchRequest(f"https://blocker-{index}.example/items", (f"blocker-{index}.example",))
+        for index in range(2)
+    ]
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        global_concurrency=2,
+        domain_rps=1.0,
+        clock=fake_time.monotonic,
+        sleeper=fake_time.sleep,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        blocker_tasks = [asyncio.create_task(client.get(request)) for request in blockers]
+        await asyncio.wait_for(blockers_entered.wait(), timeout=1)
+        same_host_tasks = [asyncio.create_task(client.get(fetch())) for _ in range(2)]
+        await asyncio.sleep(0)
+        release_blockers.set()
+        await asyncio.gather(*blocker_tasks, *same_host_tasks)
+
+    assert len(starts) == 2
+    assert starts[1] - starts[0] >= 1.0
+
+
 async def test_redirect_is_manually_revalidated_before_next_network_call() -> None:
     resolved_hosts: list[str] = []
     seen_urls: list[str] = []
@@ -257,6 +300,61 @@ async def test_429_retry_respects_retry_after() -> None:
     assert response.body == b"ok"
     assert calls == 2
     assert fake_time.sleeps == [3.0]
+
+
+async def test_retry_after_delta_is_clamped_to_sixty_seconds() -> None:
+    fake_time = FakeTime()
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "3600"})
+        return httpx.Response(200, content=b"ok")
+
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        clock=fake_time.monotonic,
+        wall_clock=lambda: datetime(2026, 7, 20, tzinfo=UTC).timestamp(),
+        sleeper=fake_time.sleep,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        await client.get(fetch())
+
+    assert fake_time.sleeps == [60.0]
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected_sleep"),
+    [(timedelta(seconds=120), 60.0), (timedelta(seconds=-120), 1.0)],
+)
+async def test_retry_after_http_date_uses_injected_wall_clock_and_is_clamped(
+    offset: timedelta,
+    expected_sleep: float,
+) -> None:
+    fake_time = FakeTime()
+    wall_now = datetime(2026, 7, 20, tzinfo=UTC)
+    retry_after = format_datetime(wall_now + offset, usegmt=True)
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, headers={"Retry-After": retry_after})
+        return httpx.Response(200, content=b"ok")
+
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        clock=fake_time.monotonic,
+        wall_clock=lambda: wall_now.timestamp(),
+        sleeper=fake_time.sleep,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        await client.get(fetch())
+
+    assert fake_time.sleeps == [expected_sleep]
 
 
 async def test_5xx_and_transient_connection_errors_are_retried() -> None:
@@ -476,17 +574,20 @@ async def test_default_transport_rejects_unvalidated_connection_attempt() -> Non
     assert backend.connected_hosts == []
 
 
-async def test_default_transport_reuses_a_connection_that_was_opened_to_a_validated_ip() -> None:
+async def test_default_transport_reconnects_when_same_host_validates_to_a_new_ip() -> None:
     backend = FakeNetworkBackend(response_count=2)
     transport = _PinnedAsyncTransport(network_backend=backend)
     async with httpx.AsyncClient(transport=transport) as client:
-        for _ in range(2):
-            request = client.build_request("GET", "https://news.example.com/items")
-            request.extensions[_RESOLVED_ADDRESSES_EXTENSION] = (PUBLIC_IP,)
-            response = await client.send(request)
-            assert response.content == b"ok"
+        first = client.build_request("GET", "https://news.example.com/items")
+        first.extensions[_RESOLVED_ADDRESSES_EXTENSION] = ("93.184.216.10",)
+        first_response = await client.send(first)
+        second = client.build_request("GET", "https://news.example.com/items")
+        second.extensions[_RESOLVED_ADDRESSES_EXTENSION] = ("93.184.216.20",)
+        second_response = await client.send(second)
 
-    assert backend.connected_hosts == [PUBLIC_IP]
+    assert first_response.content == b"ok"
+    assert second_response.content == b"ok"
+    assert backend.connected_hosts == ["93.184.216.10", "93.184.216.20"]
 
 
 class ConcurrentNetworkBackend(httpcore.AsyncNetworkBackend):

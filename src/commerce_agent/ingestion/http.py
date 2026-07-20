@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from ipaddress import IPv6Address, ip_address
+from time import monotonic as monotonic_clock
+from time import time as system_wall_clock
 from types import MappingProxyType
 from typing import Protocol, cast
 from urllib.parse import urljoin
@@ -22,11 +24,13 @@ import httpx
 from commerce_agent.ingestion.security import SafeUrl, UrlSafetyError, UrlSafetyPolicy
 
 Clock = Callable[[], float]
+WallClock = Callable[[], float]
 Sleeper = Callable[[float], Awaitable[None]]
 
 _LOGGER = logging.getLogger(__name__)
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _SAFE_RESPONSE_HEADERS = frozenset({"content-type", "etag", "last-modified"})
+_MAX_RETRY_AFTER_SECONDS = 60.0
 _TRANSIENT_HTTPX_ERRORS = (
     httpx.NetworkError,
     httpx.TimeoutException,
@@ -155,7 +159,8 @@ class IngestionHttpClient:
         user_agent: str = "CrossBorderCommerceAgent/0.1",
         max_retries: int = 3,
         max_redirects: int = 5,
-        clock: Clock = time.monotonic,
+        clock: Clock = monotonic_clock,
+        wall_clock: WallClock = system_wall_clock,
         sleeper: Sleeper = asyncio.sleep,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -170,6 +175,7 @@ class IngestionHttpClient:
         self._safety_policy = safety_policy
         self._semaphore = asyncio.Semaphore(global_concurrency)
         self._limiter = _DomainLimiter(domain_rps, clock, sleeper)
+        self._wall_clock = wall_clock
         self._sleeper = sleeper
         self._max_response_bytes = max_response_bytes
         self._max_retries = max_retries
@@ -247,7 +253,6 @@ class IngestionHttpClient:
 
     async def _fetch_hop(self, safe_url: SafeUrl, request: FetchRequest) -> _AttemptResult:
         for attempt in range(self._max_retries + 1):
-            await self._limiter.wait(safe_url.host)
             try:
                 result = await self._send_once(safe_url, request)
             except _TRANSIENT_HTTPX_ERRORS:
@@ -266,7 +271,10 @@ class IngestionHttpClient:
                         status_code=status_code,
                         retryable=True,
                     )
-                retry_after = _retry_after_seconds(result.headers.get("Retry-After"))
+                retry_after = _retry_after_seconds(
+                    result.headers.get("Retry-After"),
+                    self._wall_clock(),
+                )
                 await self._sleeper(max(_backoff(attempt), retry_after or 0.0))
                 continue
             if status_code in {401, 403}:
@@ -291,6 +299,7 @@ class IngestionHttpClient:
         httpx_request.extensions[_RESOLVED_ADDRESSES_EXTENSION] = safe_url.resolved_addresses
 
         async with self._semaphore:
+            await self._limiter.wait(safe_url.host)
             response = await self._client.send(
                 httpx_request,
                 stream=True,
@@ -376,6 +385,7 @@ class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
     def __init__(self, network_backend: httpcore.AsyncNetworkBackend | None = None) -> None:
         self._pool = httpcore.AsyncConnectionPool(
             network_backend=_PinnedNetworkBackend(network_backend),
+            max_keepalive_connections=0,
             retries=0,
         )
 
@@ -490,11 +500,11 @@ def _content_length(headers: httpx.Headers) -> int | None:
     return parsed if parsed >= 0 else None
 
 
-def _retry_after_seconds(value: str | None) -> float | None:
+def _retry_after_seconds(value: str | None, wall_now: float) -> float | None:
     if value is None:
         return None
     try:
-        return max(0.0, float(value.strip()))
+        delay = float(value.strip())
     except ValueError:
         try:
             retry_at = parsedate_to_datetime(value)
@@ -502,7 +512,10 @@ def _retry_after_seconds(value: str | None) -> float | None:
             return None
         if retry_at.tzinfo is None:
             return None
-        return max(0.0, retry_at.timestamp() - time.time())
+        delay = retry_at.timestamp() - wall_now
+    if not math.isfinite(delay):
+        return None
+    return min(_MAX_RETRY_AFTER_SECONDS, max(0.0, delay))
 
 
 def _backoff(attempt: int) -> float:

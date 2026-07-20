@@ -56,16 +56,16 @@ calls `start_tls()` with that original hostname, preserving TLS SNI and certific
 verification even though `connect_tcp()` receives the pinned IP. Environment proxies are disabled.
 The context is task-local, so concurrent hosts cannot replace one another's destination set.
 
-Connection pooling remains enabled. Reuse is safe because the existing socket was originally
-opened to a validated public IP and does not perform a second DNS lookup. A fresh
-`UrlSafetyPolicy.validate()` still runs before every later request and every redirect; if a later
-resolution becomes private, the request is rejected before the existing pool is consulted.
+The shared client and pool remain enabled, but idle cross-request connection reuse is deliberately
+disabled with the documented `max_keepalive_connections=0` setting. This makes every request open
+a connection to that request's newly validated address set, including when the same hostname
+changes addresses between validations.
 
 Directed offline tests prove:
 
 - TCP receives the validated IP while TLS receives the original hostname.
 - A request without validated addresses is rejected before the delegate backend is called.
-- A previously validated same-origin connection is reused without another DNS/connect operation.
+- The same origin resolving from IP A to IP B performs distinct TCP connections to A and then B.
 - Concurrent origins retain isolated pinned-address contexts.
 
 ## HTTP behavior
@@ -123,8 +123,9 @@ after the fresh pre-commit run.
 
 ## Review and concerns
 
-- Correctness/security review covered SSRF, redirect validation, ContextVar isolation, connection
-  reuse, resource cleanup, header/query redaction, path traversal, and hash-path conflicts.
+- Correctness/security review covered SSRF, redirect validation, ContextVar isolation,
+  per-validation connection pinning, resource cleanup, header/query redaction, path traversal,
+  and hash-path conflicts.
 - Performance remains bounded by the semaphore and 10 MiB body cap. Snapshot compression and disk
   I/O run through `asyncio.to_thread()` so the event loop is not blocked.
 - The implementation intentionally uses httpcore's public low-level API. The `<2` upper bound is
@@ -142,3 +143,36 @@ after the fresh pre-commit run.
 - Compile check: `python -m compileall -q src` -> exit code 0.
 - Diff/secret scan: staged diff check and manual review completed before commit; test-only dummy
   values such as `top-secret-value` are deliberately non-credential fixtures.
+
+## Final review corrections
+
+The final security review identified three Important issues. Each correction followed a separate
+RED/GREEN cycle:
+
+1. Same-origin idle connection reuse could keep using IP A after a later validation returned IP B.
+   RED showed only A reached `connect_tcp()`. GREEN sets httpcore's documented
+   `max_keepalive_connections=0`, retaining the shared client/pool while forcing each request to
+   connect to its current pinned address set. Official parameter semantics:
+   https://www.encode.io/httpcore/async/#httpcore.AsyncConnectionPool
+2. The per-domain limiter updated its start time before waiting for global capacity. RED held both
+   semaphore slots with other hosts and showed the two queued same-host requests starting together.
+   GREEN acquires the global semaphore first, then performs the lock-protected domain wait
+   immediately before `send()`.
+3. `Retry-After` HTTP-date used the process clock directly and server values were unbounded. RED
+   covered an oversized delay-seconds value plus future and past HTTP-date values. GREEN injects a
+   wall clock distinct from the monotonic limiter clock, removes direct clock reads from parsing,
+   and clamps both formats to `[0, 60]` seconds before combining them with exponential backoff.
+
+Final-review residual (Minor, intentionally not expanded in this fix): `SnapshotStore` does not
+explicitly reject a pre-existing symbolic link at the final hash path. Existing source-ID grammar,
+resolved-parent containment, content comparison, and no-overwrite behavior remain intact; explicit
+link rejection is deferred as a separate filesystem-hardening change.
+
+Final-review verification is recorded by the independent fix commit:
+
+- HTTP focused: 22 passed.
+- Snapshot focused: 11 passed.
+- Full suite: 195 passed.
+- Ruff: all checks passed.
+- Compile check: exit code 0.
+- Staged diff/secret scan: completed before the fix commit.
