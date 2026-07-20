@@ -53,6 +53,30 @@ def test_unicode_paths_have_one_stable_nfc_percent_encoded_form() -> None:
 
 
 @pytest.mark.parametrize(
+    ("path", "expected_path"),
+    [
+        ("/a/./b", "/a/b"),
+        ("/a/x/../b", "/a/b"),
+        ("/%2E/a/%2E%2E/b", "/b"),
+        ("/a/b/.", "/a/b/"),
+        ("/a/b/..", "/a/"),
+        ("/a//b/../c/", "/a//c/"),
+        ("/../../a", "/a"),
+        ("/a%2Fb/./c", "/a%2Fb/c"),
+        ("/a%2Fb/../c", "/c"),
+        ("/.well-known/..hidden", "/.well-known/..hidden"),
+    ],
+)
+def test_removes_rfc3986_dot_segments_without_collapsing_other_path_structure(
+    path: str,
+    expected_path: str,
+) -> None:
+    assert canonicalize_url(f"https://example.com{path}") == (
+        f"https://example.com{expected_path}"
+    )
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "ftp://example.com/file",

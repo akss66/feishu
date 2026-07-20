@@ -60,3 +60,25 @@ existing `PersistableDocument` hash fields.
 - Explicit selectors support the same practical tag/id/class descendant subset currently used by
   the source registry; unsupported selectors fail with `invalid_selector` rather than silently
   falling back to unrelated page text.
+
+## Review fixes
+
+Two Important findings were resolved in a follow-up strict TDD cycle:
+
+1. Minimal one- and two-paragraph `<article>` tests reproduced Trafilatura 2.1 returning the
+   complete extracted sequence twice through `extract()` and every content field returned by
+   `bare_extraction()`. The automatic path now removes the explicit boilerplate nodes first and
+   uses the official `trafilatura.baseline()` text return, which returns these article bodies once.
+   An intentional repeated-heading fixture proves legitimate repetition inside a body is retained;
+   no generic paragraph de-duplication was added. Selector overrides remain unchanged.
+2. URL tests reproduced missing RFC 3986 dot-segment removal. A direct section 5.2.4 state-machine
+   implementation now removes raw and percent-encoded dot segments, preserves leading/trailing and
+   repeated slashes, cannot traverse above the root, and continues to keep `%2F` distinct from a
+   path separator. Existing query/business-parameter and Unicode-path tests remain in place.
+
+Review-fix RED evidence: three article cases failed with exact full-sequence duplication; nine of
+ten dot-segment cases failed while the non-dot control passed. Focused, full-suite, static, compile,
+diff, and secret-scan results were rerun before the follow-up commit.
+
+Review-fix verification: focused `37 passed`; full suite `255 passed in 4.48s`; Ruff, compileall,
+staged diff-check, and staged secret scan passed.

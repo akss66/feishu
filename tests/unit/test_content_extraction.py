@@ -83,6 +83,43 @@ def test_trafilatura_removes_html_boilerplate_and_extracts_metadata() -> None:
     assert document.published_at == datetime(2026, 7, 19, 8, 30, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    ("article_html", "expected_body"),
+    [
+        (
+            "<article><p>One standalone seller policy paragraph.</p></article>",
+            "One standalone seller policy paragraph.",
+        ),
+        (
+            "<article><p>First seller policy paragraph.</p>"
+            "<p>Second seller policy paragraph.</p></article>",
+            "First seller policy paragraph.\nSecond seller policy paragraph.",
+        ),
+        (
+            "<article><p>Repeated heading.</p>"
+            "<p>Clause body remains here.</p>"
+            "<p>Repeated heading.</p></article>",
+            "Repeated heading.\nClause body remains here.\nRepeated heading.",
+        ),
+    ],
+)
+def test_automatic_article_extraction_does_not_repeat_the_complete_body_sequence(
+    article_html: str,
+    expected_body: str,
+) -> None:
+    item = CollectedItem(
+        url="https://example.com/simple-article",
+        body=f"<html><body>{article_html}</body></html>".encode(),
+        content_type="text/html",
+    )
+
+    document = ContentExtractor(FixedLanguageDetector()).extract(
+        source(), item, fetched_at=FETCHED_AT
+    )
+
+    assert document.body == expected_body
+
+
 def test_source_article_selector_overrides_automatic_extraction() -> None:
     html = b"""
     <html><head><title>Selector fixture</title></head><body>

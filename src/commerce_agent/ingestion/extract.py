@@ -91,7 +91,7 @@ class ContentExtractor:
             if isinstance(selector, str):
                 body = _selected_text(item.body, selector)
             else:
-                body = _trafilatura_text(item.body, item.url)
+                body = _trafilatura_text(item.body)
         else:
             body = _decode_text(item.body, item.content_type)
         body = normalize_text(body)
@@ -142,17 +142,20 @@ def _decode_text(body: bytes, content_type: str | None) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-def _trafilatura_text(body: bytes, url: str) -> str:
-    document = trafilatura.bare_extraction(
-        body,
-        url=url,
-        with_metadata=True,
-        include_comments=False,
-        include_tables=True,
-        favor_precision=True,
-        prune_xpath=["//nav", "//script", "//style", "//header", "//footer", "//aside"],
-    )
-    return document.text if document is not None and document.text is not None else ""
+def _trafilatura_text(body: bytes) -> str:
+    cleaned = _without_boilerplate(body)
+    _, text, _ = trafilatura.baseline(cleaned)
+    return text
+
+
+def _without_boilerplate(body: bytes) -> bytes:
+    try:
+        root = lxml_html.fromstring(body)
+    except (ValueError, TypeError, lxml_html.etree.ParserError):
+        return body
+    for element in root.xpath("//nav | //script | //style | //header | //footer | //aside"):
+        element.drop_tree()
+    return lxml_html.tostring(root, encoding="utf-8")
 
 
 def _selected_text(body: bytes, selector: str) -> str:

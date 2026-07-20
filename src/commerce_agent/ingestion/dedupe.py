@@ -155,4 +155,42 @@ def _canonical_path(path: str) -> str:
                 decoded.extend(f"%{byte:02X}" for byte in character.encode("utf-8"))
 
     nfc_path = unicodedata.normalize("NFC", "".join(decoded))
-    return quote(nfc_path, safe="/%:@!$&'()*+,;=-._~")
+    return quote(_remove_dot_segments(nfc_path), safe="/%:@!$&'()*+,;=-._~")
+
+
+def _remove_dot_segments(path: str) -> str:
+    """Apply the RFC 3986 section 5.2.4 algorithm without collapsing empty segments."""
+
+    remaining = path
+    output = ""
+    while remaining:
+        if remaining.startswith("../"):
+            remaining = remaining[3:]
+        elif remaining.startswith("./"):
+            remaining = remaining[2:]
+        elif remaining.startswith("/./"):
+            remaining = remaining[2:]
+        elif remaining == "/.":
+            remaining = "/"
+        elif remaining.startswith("/../"):
+            remaining = remaining[3:]
+            output = _remove_last_segment(output)
+        elif remaining == "/..":
+            remaining = "/"
+            output = _remove_last_segment(output)
+        elif remaining in {".", ".."}:
+            remaining = ""
+        else:
+            next_slash = remaining.find("/", 1 if remaining.startswith("/") else 0)
+            if next_slash == -1:
+                output += remaining
+                remaining = ""
+            else:
+                output += remaining[:next_slash]
+                remaining = remaining[next_slash:]
+    return output
+
+
+def _remove_last_segment(path: str) -> str:
+    final_slash = path.rfind("/")
+    return path[:final_slash] if final_slash >= 0 else ""
