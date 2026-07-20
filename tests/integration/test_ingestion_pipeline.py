@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 from datetime import date
 from pathlib import Path
 from xml.etree import ElementTree
@@ -260,7 +261,15 @@ async def test_full_pipeline_is_idempotent_versions_changes_groups_and_handles_3
         assert health is not None and health.health_status == "healthy"
         assert health.last_success_at is not None
         assert latest_run is not None and latest_run.status == RunStatus.SUCCESS.value
-        assert len(list((tmp_path / "snapshots").rglob("*.bin.gz"))) == 5
+        snapshot_bodies = {
+            gzip.decompress(path.read_bytes())
+            for path in (tmp_path / "snapshots").rglob("*.bin.gz")
+        }
+        assert snapshot_bodies == {
+            original_feed,
+            changed_feed,
+            (FIXTURES / "api.json").read_bytes(),
+        }
     finally:
         await database.dispose()
 
@@ -408,5 +417,11 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
         assert requested_urls.index(html_list) < requested_urls.index(html_detail)
         assert requested_urls.index(sitemap) < requested_urls.index(sitemap_detail)
         assert [request.url for request in browser.requests] == [browser_list, browser_detail]
+        snapshot_bodies = {
+            gzip.decompress(path.read_bytes())
+            for path in (tmp_path / "detail-snapshots").rglob("*.bin.gz")
+        }
+        assert b"raw browser detail" in snapshot_bodies
+        assert b"raw browser list" not in snapshot_bodies
     finally:
         await database.dispose()

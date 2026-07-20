@@ -17,6 +17,7 @@ from commerce_agent.ingestion.models import (
     CollectedItem,
     CollectorKind,
     FetchContext,
+    ResponseArtifact,
     RunStatus,
     RunSummary,
     SourceDefinition,
@@ -59,6 +60,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "renderer_security_rejected",
         "renderer_timeout",
         "renderer_unavailable",
+        "response_artifact_missing",
         "response_too_large",
         "retry_exhausted",
         "scheme_not_allowed",
@@ -263,9 +265,11 @@ class IngestionService:
         source: SourceDefinition,
         item: CollectedItem,
     ) -> PersistOutcome:
+        if item.artifact is None:
+            raise CollectorError("response_artifact_missing")
         snapshot = await self._snapshot_store.save(
             source.source_id,
-            _candidate_response(item),
+            _artifact_response(item.artifact),
         )
         fetched_at = self._clock()
         document = self._extractor.extract(source, item, fetched_at=fetched_at)
@@ -337,19 +341,12 @@ class IngestionService:
         )
 
 
-def _candidate_response(item: CollectedItem) -> FetchResponse:
-    headers: dict[str, str] = {}
-    if item.content_type is not None:
-        headers["content-type"] = item.content_type
-    if (etag := _safe_conditional(item.etag)) is not None:
-        headers["etag"] = etag
-    if (last_modified := _safe_conditional(item.last_modified)) is not None:
-        headers["last-modified"] = last_modified
+def _artifact_response(artifact: ResponseArtifact) -> FetchResponse:
     return FetchResponse(
-        url=item.url,
-        status_code=200,
-        headers=headers,
-        body=item.body,
+        url=artifact.url,
+        status_code=artifact.status_code,
+        headers=artifact.headers,
+        body=artifact.body,
     )
 
 

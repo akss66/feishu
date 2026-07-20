@@ -18,6 +18,7 @@ from commerce_agent.ingestion.models import (
     ExtractedDocument,
     FetchContext,
     Platform,
+    ResponseArtifact,
     RunStatus,
     RunSummary,
     SourceDefinition,
@@ -59,13 +60,34 @@ def source(
     )
 
 
-def item(body: bytes = b"good", *, suffix: str = "one") -> CollectedItem:
+def item(
+    body: bytes = b"good",
+    *,
+    suffix: str = "one",
+    raw_body: bytes | None = None,
+    with_artifact: bool = True,
+) -> CollectedItem:
+    url = f"https://amazon-news.example.com/{suffix}?token=never-log-me"
     return CollectedItem(
-        url=f"https://amazon-news.example.com/{suffix}?token=never-log-me",
+        url=url,
         body=body,
         content_type="text/plain; charset=utf-8",
         etag='"etag-v1"',
         last_modified="Mon, 20 Jul 2026 08:00:00 GMT",
+        artifact=(
+            ResponseArtifact(
+                url=url,
+                status_code=200,
+                headers={
+                    "content-type": "text/plain; charset=utf-8",
+                    "etag": '"etag-v1"',
+                    "last-modified": "Mon, 20 Jul 2026 08:00:00 GMT",
+                },
+                body=raw_body if raw_body is not None else b"raw:" + body,
+            )
+            if with_artifact
+            else None
+        ),
     )
 
 
@@ -412,7 +434,11 @@ async def test_saves_candidate_snapshot_before_persisting_a_version() -> None:
     snapshots = FakeSnapshotStore(events)
     ingestion, _, _ = service(
         [source()],
-        {CollectorKind.RSS: FakeCollector([item()])},
+        {
+            CollectorKind.RSS: FakeCollector(
+                [item(b"rendered candidate", raw_body=b"raw HTTP response")]
+            )
+        },
         repository=repository,
         snapshot_store=snapshots,
     )
@@ -420,8 +446,27 @@ async def test_saves_candidate_snapshot_before_persisting_a_version() -> None:
     summary = await ingestion.run_source("amazon-news", Trigger.MANUAL)
 
     assert events == ["snapshot", "persist"]
+    assert snapshots.saved == [("amazon-news", b"raw HTTP response")]
     assert repository.persisted[0].snapshot_path.endswith("candidate.bin.gz")
     assert summary.created == 1
+
+
+async def test_missing_response_artifact_fails_item_without_snapshot_or_persist() -> None:
+    ingestion, repository, snapshots = service(
+        [source()],
+        {
+            CollectorKind.RSS: FakeCollector(
+                [item(b"candidate without raw response", with_artifact=False)]
+            )
+        },
+    )
+
+    summary = await ingestion.run_source("amazon-news", Trigger.MANUAL)
+
+    assert summary.status is RunStatus.FAILED
+    assert summary.error_code == "response_artifact_missing"
+    assert snapshots.saved == []
+    assert repository.persisted == []
 
 
 async def test_item_extraction_failure_is_counted_while_other_items_continue() -> None:
@@ -438,8 +483,8 @@ async def test_item_extraction_failure_is_counted_while_other_items_continue() -
     assert summary.error_code == "blank_content"
     assert [candidate.body for candidate in repository.persisted] == ["good"]
     assert snapshots.saved == [
-        ("amazon-news", b"bad"),
-        ("amazon-news", b"good"),
+        ("amazon-news", b"raw:bad"),
+        ("amazon-news", b"raw:good"),
     ]
 
 
