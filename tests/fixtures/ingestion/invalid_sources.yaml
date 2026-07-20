@@ -1,0 +1,18 @@
+version: 1
+sources:
+  - source_id: invalid-enabled-source
+    name: Invalid enabled source
+    entry_url: https://example.com/news
+    platforms: [amazon]
+    trust_tier: official
+    collector: rss
+    compliance: pending_review
+    enabled: true
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://example.com/terms
+    robots_url: https://example.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Still awaiting review.
+    collector_config: {}

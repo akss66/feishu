@@ -1,0 +1,400 @@
+version: 1
+sources:
+  # Amazon candidates remain disabled until Amazon confirms automated reuse terms.
+  - &amazon
+    source_id: amazon-seller-blog
+    name: Amazon Selling Partner Blog
+    entry_url: https://sell.amazon.com/blog/
+    platforms: [amazon]
+    trust_tier: official
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.amazon.com/gp/help/customer/display.html?nodeId=508088
+    robots_url: https://sell.amazon.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Public official page confirmed; automated reuse permission was not confirmed.
+    collector_config: &html_config
+      link_selector: "article a"
+      article_selector: article
+      item_limit: 50
+
+  - <<: *amazon
+    source_id: amazon-seller-announcements
+    name: Amazon Seller Announcements
+    entry_url: https://sell.amazon.com/blog/announcements
+
+  - <<: *amazon
+    source_id: amazon-seller-forums
+    name: Amazon Seller Forums
+    entry_url: https://sellercentral.amazon.com/seller-forums
+    robots_url: https://sellercentral.amazon.com/robots.txt
+    compliance_notes: Public forum entry retained for review; login boundaries must not be crossed.
+
+  # Temu terms prohibit crawling or scraping; these entries are visible but denied.
+  - &temu
+    source_id: temu-seller-center
+    name: Temu Seller Center
+    entry_url: https://seller.temu.com/
+    platforms: [temu]
+    trust_tier: official
+    collector: html
+    compliance: denied
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.temu.com/terms-of-use.html
+    robots_url: https://seller.temu.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Temu terms prohibit automated crawling and scraping of service pages.
+    collector_config: *html_config
+
+  - <<: *temu
+    source_id: temu-about
+    name: About Temu
+    entry_url: https://www.temu.com/about-temu.html
+    robots_url: https://www.temu.com/robots.txt
+
+  - <<: *temu
+    source_id: temu-support-center
+    name: Temu Support Center
+    entry_url: https://www.temu.com/support-center.html
+    robots_url: https://www.temu.com/robots.txt
+
+  # SHEIN Group terms expressly disallow automated indexing or access.
+  - &shein
+    source_id: shein-group-newsroom
+    name: SHEIN Group Newsroom
+    entry_url: https://www.sheingroup.com/newsroom
+    platforms: [shein]
+    trust_tier: official
+    collector: html
+    compliance: denied
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.sheingroup.com/terms-conditions
+    robots_url: https://www.sheingroup.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: SHEIN Group terms prohibit robots or automated devices indexing the site.
+    collector_config: *html_config
+
+  - <<: *shein
+    source_id: shein-group-press-releases
+    name: SHEIN Group Press Releases
+    entry_url: https://www.sheingroup.com/newsroom?type=media-coverage
+
+  - <<: *shein
+    source_id: shein-group-company-updates
+    name: SHEIN Supplier Community Update
+    entry_url: https://www.sheingroup.com/newsroom/shein-supplier-community-empowerment-program-continuing-the-drumbeat-of-support
+
+  # AliExpress systematic collection requires prior written authorization.
+  - &aliexpress
+    source_id: aliexpress-marketplace
+    name: AliExpress Marketplace Public Entry
+    entry_url: https://www.aliexpress.com/
+    platforms: [aliexpress]
+    trust_tier: official
+    collector: html
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html
+    robots_url: https://www.aliexpress.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: No authorized public collection feed or API has been confirmed.
+    collector_config: *html_config
+
+  - <<: *aliexpress
+    source_id: aliexpress-seller-portal
+    name: AliExpress Seller Portal
+    entry_url: https://portals.aliexpress.com/
+    robots_url: https://portals.aliexpress.com/robots.txt
+    compliance_notes: Seller portal collection requires platform authorization and must not use login state.
+
+  - <<: *aliexpress
+    source_id: aliexpress-terms-center
+    name: AliExpress Official Terms Center
+    entry_url: https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html
+    robots_url: https://terms.alicdn.com/robots.txt
+
+  # Regional Shopee seller pages require separate terms and robots review.
+  - &shopee
+    source_id: shopee-sg-seller-education
+    name: Shopee Singapore Seller Education Hub
+    entry_url: https://seller.shopee.sg/edu/home
+    platforms: [shopee]
+    trust_tier: official
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [sg]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://shopee.sg/legaldoc/termsOfService/
+    robots_url: https://seller.shopee.sg/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Regional page is public, but automated access permission is not confirmed.
+    collector_config: *html_config
+
+  - <<: *shopee
+    source_id: shopee-my-seller-education
+    name: Shopee Malaysia Seller Education Hub
+    entry_url: https://seller.shopee.com.my/edu/home
+    regions: [my]
+    robots_url: https://seller.shopee.com.my/robots.txt
+
+  - <<: *shopee
+    source_id: shopee-ph-seller-education
+    name: Shopee Philippines Seller Education Hub
+    entry_url: https://seller.shopee.ph/edu/home
+    regions: [ph]
+    robots_url: https://seller.shopee.ph/robots.txt
+
+  # eBay explicitly publishes the newsroom RSS endpoint for RSS-reader subscription.
+  - source_id: ebay-newsroom-rss
+    name: eBay Newsroom RSS
+    entry_url: https://www.ebayinc.com/stories/news/rss/
+    platforms: [ebay]
+    trust_tier: official
+    collector: rss
+    compliance: allowed
+    enabled: true
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.ebayinc.com/terms-of-use/
+    robots_url: https://www.ebayinc.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Publisher invites RSS subscription; robots allows the feed and specifies crawl-delay 2.
+    collector_config:
+      item_limit: 50
+
+  - &ebay_pending
+    source_id: ebay-press-room
+    name: eBay Press Room
+    entry_url: https://www.ebayinc.com/stories/press-room/
+    platforms: [ebay]
+    trust_tier: official
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.ebayinc.com/terms-of-use/
+    robots_url: https://www.ebayinc.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: RSS is allowed separately; full-page article collection remains under review.
+    collector_config: *html_config
+
+  - <<: *ebay_pending
+    source_id: ebay-seller-updates
+    name: eBay Seller Updates
+    entry_url: https://www.ebay.com/sellercenter/news
+    terms_url: https://www.ebay.com/help/policies/member-behaviour-policies/user-agreement?id=4259
+    robots_url: https://www.ebay.com/robots.txt
+    compliance_notes: Public seller-update page retained pending separate marketplace terms review.
+
+  # Coupang pages are public, but no publisher authorization for automation was located.
+  - &coupang
+    source_id: coupang-rules-and-policies
+    name: Coupang Global Seller Rules and Policies
+    entry_url: https://globalsellers.coupang.com/en/rules-and-policies/
+    platforms: [coupang]
+    trust_tier: official
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://globalsellers.coupang.com/en/rules-and-policies/
+    robots_url: https://globalsellers.coupang.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Official public policy page confirmed; automated reuse permission not located.
+    collector_config: *html_config
+
+  - <<: *coupang
+    source_id: coupang-seller-university
+    name: Coupang Seller University Before You Start
+    entry_url: https://globalsellers.coupang.com/en/seller-university/category/before-you-start/
+
+  - <<: *coupang
+    source_id: coupang-global-news
+    name: Coupang Global Seller Step-by-Step Guide
+    entry_url: https://globalsellers.coupang.com/en/step-by-step-guide/
+
+  # Ozon regional redirects and publisher terms require review before collection.
+  - &ozon
+    source_id: ozon-seller-news
+    name: Ozon Seller News
+    entry_url: https://seller.ozon.ru/media/news/fbo-i-fbs-gde-smotret-trebovaniya-k-upakovke/
+    platforms: [ozon]
+    trust_tier: official
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [ru]
+    language_hint: ru
+    interval_minutes: 120
+    terms_url: https://docs.ozon.ru/legal/en/partners/logistics/contract/
+    robots_url: https://seller.ozon.ru/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Public page confirmed; redirect behavior and automation terms remain unresolved.
+    collector_config: *html_config
+
+  - <<: *ozon
+    source_id: ozon-seller-media
+    name: Ozon Seller Analytics News
+    entry_url: https://seller.ozon.ru/media/news/ocenivajte-effektivnost-vashih-promokodov/
+
+  - <<: *ozon
+    source_id: ozon-global-docs
+    name: Ozon Seller Documents Topic
+    entry_url: https://seller.ozon.ru/media/tags/dokumenty/
+
+  # Joybuy has a current public newsroom but no automation terms were found in its footer.
+  - &joybuy
+    source_id: joybuy-news
+    name: Joybuy Newsroom
+    entry_url: https://about.joybuy.com/news/
+    platforms: [joybuy]
+    trust_tier: official
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [uk, eu]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://about.joybuy.com/
+    robots_url: https://about.joybuy.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Current newsroom verified; dedicated automation terms were not located.
+    collector_config: *html_config
+
+  - <<: *joybuy
+    source_id: joybuy-german-news
+    name: Joybuy German Newsroom
+    entry_url: https://about.joybuy.com/de/news/
+    regions: [de]
+    language_hint: de
+
+  - <<: *joybuy
+    source_id: joybuy-dutch-news
+    name: Joybuy Dutch Newsroom
+    entry_url: https://about.joybuy.com/nl/news/
+    regions: [nl]
+    language_hint: nl
+
+  # TikTok Shop seller terms require express written permission for automated access.
+  - &tiktok
+    source_id: tiktok-shop-academy
+    name: TikTok Shop Academy Announcement
+    entry_url: https://seller.tiktok.com/blog/tiktok-shop-academy-your-resource-for-policies-and-best-practices/10024085
+    platforms: [tiktok_shop]
+    trust_tier: official
+    collector: html
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://seller-sg.tiktok.com/university/essay?knowledge_id=2526777789482753
+    robots_url: https://seller.tiktok.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Seller terms require express written permission for bots, scrapers, or extraction tools.
+    collector_config: *html_config
+
+  - <<: *tiktok
+    source_id: tiktok-shop-policy-pulse
+    name: TikTok Shop Policy Pulse
+    entry_url: https://seller-us.tiktok.com/university/essay?default_language=en&identity=1&knowledge_id=6747273381791534
+    regions: [us]
+    robots_url: https://seller-us.tiktok.com/robots.txt
+
+  - <<: *tiktok
+    source_id: tiktok-shop-sg-seller-terms
+    name: TikTok Shop Singapore Seller Terms
+    entry_url: https://seller-sg.tiktok.com/university/essay?knowledge_id=2526777789482753
+    regions: [sg]
+    robots_url: https://seller-sg.tiktok.com/robots.txt
+
+  # Industry publishers are discovery candidates only and remain disabled.
+  - source_id: media-marketplace-pulse
+    name: Marketplace Pulse
+    entry_url: https://www.marketplacepulse.com/
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    collector: html
+    compliance: denied
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.marketplacepulse.com/terms-of-use
+    robots_url: https://www.marketplacepulse.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Terms expressly prohibit robots, spiders, scrapers, and automated access.
+    collector_config: *html_config
+
+  - source_id: media-ecommercebytes-feed
+    name: EcommerceBytes Feed
+    entry_url: https://www.ecommercebytes.com/feed/
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    collector: rss
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.ecommercebytes.com/privacy-policy-terms/
+    robots_url: https://www.ecommercebytes.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Terms restrict reproduction and commercial exploitation without prior consent.
+    collector_config:
+      item_limit: 50
+
+  - source_id: media-digital-commerce-360-feed
+    name: Digital Commerce 360 Feed
+    entry_url: https://www.digitalcommerce360.com/feed/
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    collector: rss
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.digitalcommerce360.com/terms-of-use/
+    robots_url: https://www.digitalcommerce360.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Terms limit content use to personal non-commercial copies; permission is required.
+    collector_config:
+      item_limit: 50
+
+  - source_id: media-reuters-retail
+    name: Reuters Retail and Consumer Discovery
+    entry_url: https://www.reuters.com/markets/retail-consumer/
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    collector: html
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.reuters.com/info-pages/terms-of-use/
+    robots_url: https://www.reuters.com/robots.txt
+    reviewed_at: 2026-07-20
+    compliance_notes: Reuters terms prohibit automated collection without prior written consent.
+    collector_config: *html_config
