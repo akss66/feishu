@@ -89,6 +89,16 @@ class SourcePlatform(Base):
     __table_args__ = (Index("ix_source_platforms_platform", "platform"),)
 
 
+class SourceLease(Base):
+    __tablename__ = "source_leases"
+
+    source_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    lease_token: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    acquired_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class FetchRun(Base):
     __tablename__ = "fetch_runs"
 

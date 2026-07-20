@@ -199,6 +199,35 @@ async def test_fetch_run_lifecycle_updates_health_aggregation(tmp_path) -> None:
         await database.dispose()
 
 
+async def test_source_lease_is_atomic_and_recovers_after_ttl(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    competing = SqlAlchemyIngestionRepository(database.session)
+    started_at = datetime(2026, 7, 20, 2, tzinfo=UTC)
+    try:
+        await repository.sync_sources([_source()])
+
+        first = await repository.claim_source("amazon-news", acquired_at=started_at)
+        blocked = await competing.claim_source(
+            "amazon-news",
+            acquired_at=started_at + timedelta(hours=1),
+        )
+        recovered = await competing.claim_source(
+            "amazon-news",
+            acquired_at=started_at + timedelta(days=1),
+        )
+
+        assert first is not None
+        assert blocked is None
+        assert recovered is not None
+        assert recovered != first
+        await repository.release_source("amazon-news", first)
+        assert await repository.claim_source("amazon-news") is None
+        await competing.release_source("amazon-news", recovered)
+        assert await repository.claim_source("amazon-news") is not None
+    finally:
+        await database.dispose()
+
+
 async def test_first_failed_run_initializes_health_failure_count(tmp_path) -> None:
     database, repository = await _repository(tmp_path)
     started_at = datetime(2026, 7, 20, 4, tzinfo=UTC)

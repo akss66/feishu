@@ -168,6 +168,24 @@ class FakeRepository:
         self.started: list[tuple[int, str, Trigger, datetime | None]] = []
         self.persisted: list[PersistableDocument] = []
         self.finished: list[tuple[int, RunSummary]] = []
+        self.lease_tokens: dict[str, str] = {}
+
+    async def claim_source(
+        self,
+        source_id: str,
+        *,
+        acquired_at: datetime | None = None,
+    ) -> str | None:
+        del acquired_at
+        if source_id in self.lease_tokens:
+            return None
+        lease_token = f"test-lease-{source_id}"
+        self.lease_tokens[source_id] = lease_token
+        return lease_token
+
+    async def release_source(self, source_id: str, lease_token: str) -> None:
+        if self.lease_tokens.get(source_id) == lease_token:
+            del self.lease_tokens[source_id]
 
     async def sync_sources(self, sources: Sequence[SourceDefinition]) -> None:
         self.synced.append(tuple(sources))
@@ -298,6 +316,7 @@ async def test_disabled_source_is_finished_as_skipped_without_collection() -> No
     assert summary.error_code == "source_disabled"
     assert collector.calls == []
     assert repository.finished == [(1, summary)]
+    assert repository.lease_tokens == {}
 
 
 async def test_nonallowed_source_is_finished_as_skipped_without_collection() -> None:
@@ -313,6 +332,7 @@ async def test_nonallowed_source_is_finished_as_skipped_without_collection() -> 
     assert summary.error_code == "compliance_not_allowed"
     assert collector.calls == []
     assert repository.finished == [(1, summary)]
+    assert repository.lease_tokens == {}
 
 
 async def test_unexpected_compliance_failure_still_finishes_the_started_run() -> None:
@@ -369,6 +389,7 @@ async def test_collector_cancellation_finishes_failed_then_propagates() -> None:
         17,
     )
     assert summary.error_summary == "cancelled"
+    assert repository.lease_tokens == {}
 
 
 async def test_item_ingestion_cancellation_finishes_failed_then_propagates() -> None:
@@ -401,9 +422,10 @@ async def test_item_ingestion_cancellation_finishes_failed_then_propagates() -> 
     summary = repository.finished[0][1]
     assert summary.status is RunStatus.FAILED
     assert summary.error_code == "cancelled"
+    assert repository.lease_tokens == {}
 
 
-async def test_same_source_runs_never_overlap() -> None:
+async def test_same_source_second_run_returns_busy_without_waiting() -> None:
     release = asyncio.Event()
 
     @dataclass
@@ -423,22 +445,27 @@ async def test_same_source_runs_never_overlap() -> None:
             self.active -= 1
 
     collector = LockingCollector()
-    ingestion, _, _ = service([source()], {CollectorKind.RSS: collector})
+    ingestion, repository, _ = service([source()], {CollectorKind.RSS: collector})
 
     first = asyncio.create_task(ingestion.run_source("amazon-news", Trigger.MANUAL))
     await asyncio.sleep(0)
     second = asyncio.create_task(ingestion.run_source("amazon-news", Trigger.SCHEDULED))
     await asyncio.sleep(0)
 
-    assert collector.calls == 1
-    release.set()
-    summaries = await asyncio.gather(first, second)
+    try:
+        assert second.done()
+        second_summary = await second
+        assert second_summary.status is RunStatus.SKIPPED
+        assert second_summary.error_code == "source_already_running"
+        assert collector.calls == 1
+        assert len(repository.started) == 1
+    finally:
+        release.set()
+        first_summary = await first
 
+    assert first_summary.status is RunStatus.SUCCESS
     assert collector.max_active == 1
-    assert [summary.status for summary in summaries] == [
-        RunStatus.SUCCESS,
-        RunStatus.SUCCESS,
-    ]
+    assert repository.lease_tokens == {}
 
 
 @pytest.mark.parametrize("kind", list(CollectorKind))

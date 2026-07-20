@@ -297,6 +297,26 @@ async def test_run_all_partial_failure_is_reported_and_exits_three() -> None:
     assert "fetch_failed" in stdout
 
 
+async def test_busy_source_is_reported_with_retryable_exit_code() -> None:
+    registry = SourceRegistry([source("amazon-news", platform="amazon")])
+    app = FakeApplication(
+        registry,
+        source_summaries={
+            "amazon-news": summary(
+                "amazon-news",
+                RunStatus.SKIPPED,
+                error_code="source_already_running",
+            )
+        },
+    )
+
+    exit_code, stdout, stderr = await invoke(app, "run", "--source", "amazon-news")
+
+    assert exit_code == 3
+    assert "source_already_running" in stdout
+    assert stderr == ""
+
+
 async def test_failed_run_exits_three_but_compliance_skip_is_successful() -> None:
     registry = SourceRegistry(
         [

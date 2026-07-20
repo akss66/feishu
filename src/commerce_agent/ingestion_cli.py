@@ -270,7 +270,11 @@ async def run_cli(
             else:
                 summaries = (await application.run_source(arguments.source),)
             _write_runs(summaries, output)
-            if any(item.status in _FAILED_RUN_STATUSES for item in summaries):
+            if any(
+                item.status in _FAILED_RUN_STATUSES
+                or item.error_code == "source_already_running"
+                for item in summaries
+            ):
                 exit_code = 3
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):

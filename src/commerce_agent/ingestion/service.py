@@ -69,6 +69,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "retry_exhausted",
         "scheme_not_allowed",
         "source_disabled",
+        "source_already_running",
         "too_many_redirects",
         "unexpected_http_status",
         "userinfo_not_allowed",
@@ -144,9 +145,6 @@ class IngestionService:
         self._repository = repository
         self._max_concurrency = max_concurrency
         self._clock = clock
-        self._source_locks = {
-            source.source_id: asyncio.Lock() for source in self._registry.sources
-        }
         self._sync_lock = asyncio.Lock()
         self._sources_synced = False
         self._conditionals: dict[str, tuple[str | None, str | None]] = {}
@@ -162,9 +160,23 @@ class IngestionService:
         trigger: Trigger = Trigger.MANUAL,
     ) -> RunSummary:
         source = self._registry.require(source_id)
-        async with self._source_locks[source_id]:
-            await self._ensure_sources_synced()
-            started_at = self._clock()
+        await self._ensure_sources_synced()
+        started_at = self._clock()
+        lease_token = await self._repository.claim_source(
+            source_id,
+            acquired_at=started_at,
+        )
+        if lease_token is None:
+            return self._summary(
+                source,
+                trigger,
+                started_at,
+                RunStatus.SKIPPED,
+                _RunCounts(error_code="source_already_running"),
+                FetchMetrics(),
+            )
+
+        try:
             run_id = await self._repository.start_run(
                 source_id,
                 trigger,
@@ -195,6 +207,8 @@ class IngestionService:
                 )
             await self._finish(run_id, summary)
             return summary
+        finally:
+            await self._repository.release_source(source_id, lease_token)
 
     async def run_all(
         self,

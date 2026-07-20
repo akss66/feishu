@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 from datetime import date
 from pathlib import Path
@@ -193,6 +194,63 @@ async def build_pipeline(tmp_path: Path):
         max_concurrency=2,
     )
     return service, database, http, feed_source, api_source, feed_body
+
+
+async def test_two_services_share_atomic_source_lease_without_second_fetch(tmp_path: Path) -> None:
+    definition = source("fixture-feed", CollectorKind.RSS)
+    release = asyncio.Event()
+
+    class BlockingCollector:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+
+        async def collect(self, source_definition, context):
+            del source_definition, context
+            self.calls += 1
+            self.started.set()
+            await release.wait()
+            if False:
+                yield
+
+    collector = BlockingCollector()
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'lease.db'}")
+    await database.create_schema()
+
+    def make_service() -> IngestionService:
+        return IngestionService(
+            registry=SourceRegistry([definition]),
+            compliance=CompliancePolicy(),
+            collectors={CollectorKind.RSS: collector},
+            extractor=ContentExtractor(StaticLanguageDetector()),
+            snapshot_store=SnapshotStore(tmp_path / "snapshots"),
+            repository=SqlAlchemyIngestionRepository(database.session),
+        )
+
+    first_service = make_service()
+    second_service = make_service()
+    first = asyncio.create_task(first_service.run_source(definition.source_id))
+    try:
+        await asyncio.wait_for(collector.started.wait(), timeout=1)
+        second = await asyncio.wait_for(
+            second_service.run_source(definition.source_id),
+            timeout=0.5,
+        )
+        async with database.session() as session:
+            active_runs = await session.scalar(
+                select(func.count())
+                .select_from(FetchRun)
+                .where(FetchRun.status == "running")
+            )
+
+        assert second.status is RunStatus.SKIPPED
+        assert second.error_code == "source_already_running"
+        assert collector.calls == 1
+        assert active_runs == 1
+    finally:
+        release.set()
+        await first
+        await database.dispose()
 
 
 async def test_full_pipeline_is_idempotent_versions_changes_groups_and_handles_304(

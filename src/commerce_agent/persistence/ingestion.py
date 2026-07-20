@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from uuid import uuid4
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -21,8 +22,11 @@ from commerce_agent.persistence.models import (
     FetchRun,
     Source,
     SourceHealth,
+    SourceLease,
     SourcePlatform,
 )
+
+SOURCE_LEASE_TTL = timedelta(hours=24)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +68,15 @@ class PersistOutcome:
 
 class IngestionRepository(Protocol):
     async def sync_sources(self, sources: Sequence[SourceDefinition]) -> None: ...
+
+    async def claim_source(
+        self,
+        source_id: str,
+        *,
+        acquired_at: datetime | None = None,
+    ) -> str | None: ...
+
+    async def release_source(self, source_id: str, lease_token: str) -> None: ...
 
     async def start_run(
         self,
@@ -109,6 +122,41 @@ class SqlAlchemyIngestionRepository:
                     SourcePlatform(source_id=definition.source_id, platform=platform.value)
                     for platform in definition.platforms
                 )
+
+    async def claim_source(
+        self,
+        source_id: str,
+        *,
+        acquired_at: datetime | None = None,
+    ) -> str | None:
+        claimed_at = acquired_at or datetime.now(UTC)
+        lease_token = uuid4().hex
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                delete(SourceLease).where(
+                    SourceLease.source_id == source_id,
+                    SourceLease.acquired_at <= claimed_at - SOURCE_LEASE_TTL,
+                )
+            )
+            result = await session.execute(
+                sqlite_insert(SourceLease)
+                .values(
+                    source_id=source_id,
+                    lease_token=lease_token,
+                    acquired_at=claimed_at,
+                )
+                .on_conflict_do_nothing(index_elements=["source_id"])
+            )
+            return lease_token if result.rowcount == 1 else None
+
+    async def release_source(self, source_id: str, lease_token: str) -> None:
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                delete(SourceLease).where(
+                    SourceLease.source_id == source_id,
+                    SourceLease.lease_token == lease_token,
+                )
+            )
 
     async def start_run(
         self,
