@@ -26,10 +26,12 @@ from commerce_agent.ingestion.collectors import (
 )
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
+    CollectedItem,
     CollectorKind,
     ComplianceStatus,
     FetchContext,
     Platform,
+    ResponseArtifact,
     SourceDefinition,
     Trigger,
     TrustTier,
@@ -58,13 +60,13 @@ class FakeHttpPort:
 
 
 class FakeBrowserPort:
-    def __init__(self, page: RenderedPage) -> None:
-        self.page = page
+    def __init__(self, pages: dict[str, RenderedPage]) -> None:
+        self.pages = pages
         self.requests: list[BrowserRequest] = []
 
     async def render(self, request: BrowserRequest) -> RenderedPage:
         self.requests.append(request)
-        return self.page
+        return self.pages[request.url]
 
 
 class FakeResolver:
@@ -129,6 +131,37 @@ def test_importing_collectors_does_not_import_playwright() -> None:
     assert "playwright.async_api" not in sys.modules
 
 
+def test_response_artifact_is_immutable_and_filters_unsafe_headers() -> None:
+    raw_headers = {
+        "Content-Type": "text/html; charset=utf-8",
+        "ETag": '"v1"',
+        "Last-Modified": "Mon, 20 Jul 2026 08:00:00 GMT",
+        "Set-Cookie": "session=never-store",
+        "Authorization": "Bearer never-store",
+    }
+    raw_body = bytearray(b"raw response")
+
+    artifact = ResponseArtifact(
+        url="https://example.com/article?token=not-metadata",
+        status_code=200,
+        headers=raw_headers,
+        body=raw_body,
+    )
+    item = CollectedItem(url="https://example.com/article", body=b"rendered", artifact=artifact)
+    raw_headers["Content-Type"] = "application/json"
+    raw_body[:] = b"changed"
+
+    assert dict(artifact.headers) == {
+        "content-type": "text/html; charset=utf-8",
+        "etag": '"v1"',
+        "last-modified": "Mon, 20 Jul 2026 08:00:00 GMT",
+    }
+    assert artifact.body == b"raw response"
+    assert item.artifact is artifact
+    with pytest.raises(TypeError):
+        artifact.headers["content-type"] = "application/json"  # type: ignore[index]
+
+
 @pytest.mark.asyncio
 async def test_feed_collector_parses_rss_and_atom_from_injected_http_port() -> None:
     documents = bundled_xml("feed.xml")
@@ -163,6 +196,13 @@ async def test_feed_collector_parses_rss_and_atom_from_injected_http_port() -> N
         assert items[0].author == expected_author
         assert items[0].published_at is not None
         assert items[0].published_at.tzinfo is not None
+        assert all(item.artifact is not None for item in items)
+        assert all(
+            item.artifact.body == documents[document_name]
+            for item in items
+            if item.artifact
+        )
+        assert all(item.artifact.status_code == 200 for item in items if item.artifact)
         assert len(http.requests) == 1
         assert http.requests[0] == FetchRequest(
             url=entry_url,
@@ -190,6 +230,13 @@ async def test_feed_collector_applies_cap_after_removing_duplicates() -> None:
 @pytest.mark.asyncio
 async def test_sitemap_collector_walks_nested_indexes_and_namespaced_urlsets() -> None:
     documents = bundled_xml("sitemap.xml")
+    detail_body = (FIXTURES / "article_en.html").read_bytes()
+    for url in (
+        "https://docs.example.com/articles/alpha",
+        "https://docs.example.com/articles/shared",
+        "https://docs.example.com/articles/bravo",
+    ):
+        documents[url] = detail_body
     http = FakeHttpPort(documents)
     definition = source(
         CollectorKind.SITEMAP,
@@ -204,11 +251,16 @@ async def test_sitemap_collector_walks_nested_indexes_and_namespaced_urlsets() -
         "https://docs.example.com/articles/shared",
         "https://docs.example.com/articles/bravo",
     ]
+    assert all(item.body == detail_body for item in items)
+    assert all(item.artifact is not None and item.artifact.body == detail_body for item in items)
     assert [request.url for request in http.requests] == [
         "https://docs.example.com/sitemap.xml",
         "https://docs.example.com/sitemaps/nested.xml",
         "https://docs.example.com/sitemaps/articles-a.xml",
+        "https://docs.example.com/articles/alpha",
+        "https://docs.example.com/articles/shared",
         "https://docs.example.com/sitemaps/articles-b.xml",
+        "https://docs.example.com/articles/bravo",
     ]
     assert all(request.allowed_hosts == ("docs.example.com",) for request in http.requests)
     assert http.requests[0].etag == '"previous"'
@@ -218,15 +270,30 @@ async def test_sitemap_collector_walks_nested_indexes_and_namespaced_urlsets() -
 @pytest.mark.asyncio
 async def test_sitemap_collector_caps_unique_candidates() -> None:
     documents = bundled_xml("sitemap.xml")
+    detail_body = (FIXTURES / "article_en.html").read_bytes()
+    documents.update(
+        {
+            "https://docs.example.com/articles/alpha": detail_body,
+            "https://docs.example.com/articles/shared": detail_body,
+        }
+    )
     definition = source(
         CollectorKind.SITEMAP,
         entry_url="https://docs.example.com/sitemap.xml",
         config={"item_limit": 2},
     )
 
-    items = await collected(SitemapCollector(FakeHttpPort(documents)), definition)
+    http = FakeHttpPort(documents)
+    items = await collected(SitemapCollector(http), definition)
 
     assert [item.url for item in items] == [
+        "https://docs.example.com/articles/alpha",
+        "https://docs.example.com/articles/shared",
+    ]
+    assert [request.url for request in http.requests] == [
+        "https://docs.example.com/sitemap.xml",
+        "https://docs.example.com/sitemaps/nested.xml",
+        "https://docs.example.com/sitemaps/articles-a.xml",
         "https://docs.example.com/articles/alpha",
         "https://docs.example.com/articles/shared",
     ]
@@ -288,7 +355,26 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
         headers={"Content-Type": "text/html; charset=utf-8"},
         body=(FIXTURES / "list.html").read_bytes(),
     )
-    http = FakeHttpPort({url: response})
+    detail_body = (FIXTURES / "article_en.html").read_bytes()
+    alpha_url = "https://news.example.com/articles/alpha"
+    bravo_url = "https://news.example.com/updates/articles/bravo"
+    http = FakeHttpPort(
+        {
+            url: response,
+            alpha_url: FetchResponse(
+                url=alpha_url,
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8", "Set-Cookie": "discard"},
+                body=detail_body,
+            ),
+            bravo_url: FetchResponse(
+                url=bravo_url,
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=detail_body,
+            ),
+        }
+    )
     definition = source(
         CollectorKind.HTML,
         entry_url=url,
@@ -302,7 +388,13 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
         "https://news.example.com/updates/articles/bravo",
     ]
     assert [item.title for item in items] == ["Alpha", "Bravo"]
-    assert len(http.requests) == 1
+    assert all(item.body == detail_body for item in items)
+    assert all(item.artifact is not None and item.artifact.body == detail_body for item in items)
+    assert [request.url for request in http.requests] == [url, alpha_url, bravo_url]
+    assert all(request.allowed_hosts == ("news.example.com",) for request in http.requests)
+    assert http.requests[0].etag == '"previous"'
+    assert all(request.etag is None for request in http.requests[1:])
+    assert "set-cookie" not in items[0].artifact.headers
 
 
 @pytest.mark.asyncio
@@ -334,6 +426,12 @@ async def test_api_collector_extracts_public_json_path_and_configured_fields() -
         "headline": "Alpha update",
         "published_at": "2026-07-20T08:00:00Z",
     }
+    assert all(item.artifact is not None for item in items)
+    assert all(
+        item.artifact.body == (FIXTURES / "api.json").read_bytes()
+        for item in items
+        if item.artifact
+    )
 
 
 @pytest.mark.asyncio
@@ -389,16 +487,41 @@ def test_collectors_do_not_import_persistence() -> None:
 
 @pytest.mark.asyncio
 async def test_browser_collector_uses_injected_renderer_for_candidate_links() -> None:
+    list_url = "https://browser.example.com/list"
+    detail_url = "https://browser.example.com/rendered/article/one"
+    rendered_detail = (FIXTURES / "article_en.html").read_bytes()
+    raw_detail = b"raw server response before JavaScript rendered the article"
     browser = FakeBrowserPort(
-        RenderedPage(
-            url="https://browser.example.com/rendered/",
-            body=b'<main><a class="item" href="article/one">One</a></main>',
-        )
+        {
+            list_url: RenderedPage(
+                url="https://browser.example.com/rendered/",
+                body=(
+                    b'<main><a class="item" href="article/one">One</a>'
+                    b'<a class="item" href="article/two">Two</a></main>'
+                ),
+                artifact=ResponseArtifact(
+                    url=list_url,
+                    status_code=200,
+                    headers={"content-type": "text/html"},
+                    body=b"raw list response",
+                ),
+            ),
+            detail_url: RenderedPage(
+                url=detail_url,
+                body=rendered_detail,
+                artifact=ResponseArtifact(
+                    url=detail_url,
+                    status_code=200,
+                    headers={"content-type": "text/html", "set-cookie": "discard"},
+                    body=raw_detail,
+                ),
+            ),
+        }
     )
     definition = source(
         CollectorKind.BROWSER,
-        entry_url="https://browser.example.com/list",
-        config={"link_selector": "main a.item", "item_limit": 5},
+        entry_url=list_url,
+        config={"link_selector": "main a.item", "item_limit": 1},
     )
 
     items = await collected(
@@ -406,13 +529,22 @@ async def test_browser_collector_uses_injected_renderer_for_candidate_links() ->
         definition,
     )
 
-    assert [item.url for item in items] == ["https://browser.example.com/rendered/article/one"]
+    assert [item.url for item in items] == [detail_url]
+    assert items[0].body == rendered_detail
+    assert items[0].artifact is not None
+    assert items[0].artifact.body == raw_detail
+    assert "set-cookie" not in items[0].artifact.headers
     assert browser.requests == [
         BrowserRequest(
-            url="https://browser.example.com/list",
+            url=list_url,
             allowed_hosts=("browser.example.com",),
             timeout_seconds=2.5,
-        )
+        ),
+        BrowserRequest(
+            url=detail_url,
+            allowed_hosts=("browser.example.com",),
+            timeout_seconds=2.5,
+        ),
     ]
 
 
@@ -479,9 +611,39 @@ class FakeRoute:
         self.action = "continue"
 
 
+class FakeNavigationResponse:
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+        body: bytes = b"raw navigation response",
+    ) -> None:
+        self.status = status
+        self._headers = headers or {
+            "content-type": "text/html; charset=utf-8",
+            "set-cookie": "discard",
+        }
+        self._body = body
+
+    async def all_headers(self) -> dict[str, str]:
+        return dict(self._headers)
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+_DEFAULT_NAVIGATION_RESPONSE = object()
+
+
 class FakePage:
-    def __init__(self, final_url: str) -> None:
+    def __init__(
+        self,
+        final_url: str,
+        navigation_response: FakeNavigationResponse | None,
+    ) -> None:
         self.url = final_url
+        self.navigation_response = navigation_response
         self.route_handler: Any = None
         self.default_timeout: float | None = None
         self.navigation_timeout: float | None = None
@@ -498,8 +660,9 @@ class FakePage:
         assert pattern == "**/*"
         self.route_handler = handler
 
-    async def goto(self, url: str, **kwargs: Any) -> None:
+    async def goto(self, url: str, **kwargs: Any) -> FakeNavigationResponse | None:
         self.goto_call = (url, kwargs)
+        return self.navigation_response
 
     async def content(self) -> str:
         self.content_calls += 1
@@ -507,8 +670,12 @@ class FakePage:
 
 
 class FakeContext:
-    def __init__(self, final_url: str) -> None:
-        self.page = FakePage(final_url)
+    def __init__(
+        self,
+        final_url: str,
+        navigation_response: FakeNavigationResponse | None,
+    ) -> None:
+        self.page = FakePage(final_url, navigation_response)
         self.closed = False
 
     async def new_page(self) -> FakePage:
@@ -519,8 +686,13 @@ class FakeContext:
 
 
 class FakeBrowser:
-    def __init__(self, final_url: str) -> None:
+    def __init__(
+        self,
+        final_url: str,
+        navigation_response: FakeNavigationResponse | None,
+    ) -> None:
         self.final_url = final_url
+        self.navigation_response = navigation_response
         self.contexts: list[FakeContext] = []
         self.context_options: list[dict[str, Any]] = []
         self.launch_options: dict[str, Any] = {}
@@ -528,7 +700,7 @@ class FakeBrowser:
 
     async def new_context(self, **kwargs: Any) -> FakeContext:
         self.context_options.append(kwargs)
-        context = FakeContext(self.final_url)
+        context = FakeContext(self.final_url, self.navigation_response)
         self.contexts.append(context)
         return context
 
@@ -537,12 +709,25 @@ class FakeBrowser:
 
 
 class FakePlaywrightManager:
-    def __init__(self, browsers: list[FakeBrowser], final_url: str) -> None:
+    def __init__(
+        self,
+        browsers: list[FakeBrowser],
+        final_url: str,
+        navigation_response: FakeNavigationResponse | None | object = _DEFAULT_NAVIGATION_RESPONSE,
+    ) -> None:
         self.browsers = browsers
         self.final_url = final_url
+        self.navigation_response = (
+            FakeNavigationResponse()
+            if navigation_response is _DEFAULT_NAVIGATION_RESPONSE
+            else navigation_response
+        )
 
     async def __aenter__(self):
-        browser = FakeBrowser(self.final_url)
+        assert isinstance(self.navigation_response, FakeNavigationResponse) or (
+            self.navigation_response is None
+        )
+        browser = FakeBrowser(self.final_url, self.navigation_response)
         self.browsers.append(browser)
 
         async def launch(**kwargs: Any) -> FakeBrowser:
@@ -577,6 +762,9 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
     second = await port.render(request)
 
     assert first.body == b'<a href="/rendered">Rendered</a>'
+    assert first.artifact.body == b"raw navigation response"
+    assert first.artifact.status_code == 200
+    assert dict(first.artifact.headers) == {"content-type": "text/html; charset=utf-8"}
     assert second.url == final_url
     assert len(browsers) == 2
     for browser in browsers:
@@ -608,6 +796,68 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
         allowed = FakeRoute("https://xn--bcher-kva.example/script.js")
         await page.route_handler(allowed)
         assert allowed.action == "continue"
+
+
+@pytest.mark.asyncio
+async def test_playwright_port_fails_closed_when_navigation_has_no_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browsers: list[FakeBrowser] = []
+    module = SimpleNamespace(
+        async_playwright=lambda: FakePlaywrightManager(
+            browsers,
+            "https://browser.example.com/final/",
+            navigation_response=None,
+        )
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: module)
+    resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
+
+    with pytest.raises(CollectorError) as error:
+        await port.render(
+            BrowserRequest(
+                url="https://browser.example.com/list",
+                allowed_hosts=("browser.example.com",),
+                timeout_seconds=2.5,
+            )
+        )
+
+    assert error.value.code == "renderer_response_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_playwright_port_closes_resources_when_raw_response_body_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenBodyResponse(FakeNavigationResponse):
+        async def body(self) -> bytes:
+            raise RuntimeError("raw response unavailable")
+
+    browsers: list[FakeBrowser] = []
+    module = SimpleNamespace(
+        async_playwright=lambda: FakePlaywrightManager(
+            browsers,
+            "https://browser.example.com/final/",
+            navigation_response=BrokenBodyResponse(),
+        )
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: module)
+    resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
+
+    with pytest.raises(CollectorError) as error:
+        await port.render(
+            BrowserRequest(
+                url="https://browser.example.com/list",
+                allowed_hosts=("browser.example.com",),
+                timeout_seconds=2.5,
+            )
+        )
+
+    assert error.value.code == "renderer_response_unavailable"
+    assert browsers[0].contexts[0].closed is True
+    assert browsers[0].closed is True
 
 
 @pytest.mark.asyncio

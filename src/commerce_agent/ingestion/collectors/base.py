@@ -7,7 +7,12 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import urljoin, urlsplit
 
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
-from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
+from commerce_agent.ingestion.models import (
+    CollectedItem,
+    FetchContext,
+    ResponseArtifact,
+    SourceDefinition,
+)
 
 DEFAULT_ITEM_LIMIT = 100
 
@@ -40,6 +45,7 @@ class BrowserRequest:
 class RenderedPage:
     url: str
     body: bytes
+    artifact: ResponseArtifact
     headers: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -107,3 +113,12 @@ def require_success(response: FetchResponse) -> bool:
     if not 200 <= response.status_code < 300:
         raise CollectorError("fetch_failed")
     return True
+
+
+def response_artifact(response: FetchResponse) -> ResponseArtifact:
+    return ResponseArtifact(
+        url=response.url,
+        status_code=response.status_code,
+        headers=response.headers,
+        body=response.body,
+    )

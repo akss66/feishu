@@ -11,6 +11,7 @@ from commerce_agent.ingestion.collectors.base import (
     fetch_request,
     item_limit,
     require_success,
+    response_artifact,
 )
 from commerce_agent.ingestion.collectors.feed import _parse_datetime
 from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
@@ -28,6 +29,7 @@ class ApiCollector:
         response = await self._http.get(fetch_request(source, context))
         if not require_success(response):
             return
+        artifact = response_artifact(response)
         try:
             payload = json.loads(response.body)
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
@@ -74,6 +76,7 @@ class ApiCollector:
                 published_at=published_at,
                 etag=response.etag,
                 last_modified=response.last_modified,
+                artifact=artifact,
             )
             if len(seen) >= limit:
                 return

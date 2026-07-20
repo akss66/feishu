@@ -12,6 +12,7 @@ from commerce_agent.ingestion.collectors.base import (
     fetch_request,
     item_limit,
     require_success,
+    response_artifact,
 )
 from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
 
@@ -90,13 +91,27 @@ class HtmlCollector:
         selector = source.collector_config.get("link_selector")
         if not isinstance(selector, str):
             raise CollectorError("invalid_config")
-        for item in links_from_html(
+        for candidate in links_from_html(
             response.body,
             base_url=response.url,
             selector=selector,
             limit=item_limit(source),
         ):
-            yield item
+            detail = await self._http.get(
+                fetch_request(source, context, url=candidate.url, conditional=False)
+            )
+            if not require_success(detail):
+                continue
+            artifact = response_artifact(detail)
+            yield CollectedItem(
+                url=detail.url,
+                body=detail.body,
+                content_type=artifact.headers.get("content-type"),
+                title=candidate.title,
+                etag=detail.etag,
+                last_modified=detail.last_modified,
+                artifact=artifact,
+            )
 
 
 def links_from_html(

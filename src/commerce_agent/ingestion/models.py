@@ -7,6 +7,7 @@ from enum import StrEnum
 from types import MappingProxyType
 
 Scalar = str | int | float | bool | None
+_SAFE_ARTIFACT_HEADERS = frozenset({"content-type", "etag", "last-modified"})
 
 
 class Platform(StrEnum):
@@ -112,6 +113,25 @@ class FetchContext:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseArtifact:
+    url: str
+    status_code: int
+    headers: Mapping[str, str] = field(default_factory=dict)
+    body: bytes = b""
+
+    def __post_init__(self) -> None:
+        safe_headers = {
+            key.lower(): value
+            for key, value in self.headers.items()
+            if isinstance(key, str)
+            and isinstance(value, str)
+            and key.lower() in _SAFE_ARTIFACT_HEADERS
+        }
+        object.__setattr__(self, "headers", MappingProxyType(safe_headers))
+        object.__setattr__(self, "body", bytes(self.body))
+
+
+@dataclass(frozen=True, slots=True)
 class CollectedItem:
     url: str
     body: bytes
@@ -121,6 +141,7 @@ class CollectedItem:
     published_at: datetime | None = None
     etag: str | None = None
     last_modified: str | None = None
+    artifact: ResponseArtifact | None = None
 
 
 @dataclass(frozen=True, slots=True)

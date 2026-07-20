@@ -6,7 +6,15 @@ from xml.etree import ElementTree
 
 from sqlalchemy import func, select
 
-from commerce_agent.ingestion.collectors import ApiCollector, FeedCollector
+from commerce_agent.ingestion.collectors import (
+    ApiCollector,
+    BrowserCollector,
+    BrowserRequest,
+    FeedCollector,
+    HtmlCollector,
+    RenderedPage,
+    SitemapCollector,
+)
 from commerce_agent.ingestion.compliance import CompliancePolicy
 from commerce_agent.ingestion.extract import ContentExtractor, LanguageDetection
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
@@ -14,6 +22,7 @@ from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
     Platform,
+    ResponseArtifact,
     RunStatus,
     SourceDefinition,
     Trigger,
@@ -45,6 +54,16 @@ class FixtureHttp:
         return self.responses[request.url]
 
 
+class FixtureBrowser:
+    def __init__(self, pages: dict[str, RenderedPage]) -> None:
+        self.pages = pages
+        self.requests: list[BrowserRequest] = []
+
+    async def render(self, request: BrowserRequest) -> RenderedPage:
+        self.requests.append(request)
+        return self.pages[request.url]
+
+
 def source(source_id: str, kind: CollectorKind) -> SourceDefinition:
     host = "feeds.example.com" if kind is CollectorKind.RSS else "api.example.com"
     config: dict[str, str | int]
@@ -74,6 +93,33 @@ def source(source_id: str, kind: CollectorKind) -> SourceDefinition:
         robots_url=f"https://{host}/robots.txt",
         reviewed_at=date(2026, 7, 20),
         compliance_notes="Fixture-only approved public source.",
+        collector_config=config,
+    )
+
+
+def detail_source(
+    source_id: str,
+    kind: CollectorKind,
+    *,
+    entry_url: str,
+    config: dict[str, str | int],
+) -> SourceDefinition:
+    return SourceDefinition(
+        source_id=source_id,
+        name=f"Fixture {source_id}",
+        entry_url=entry_url,
+        platforms=(Platform.AMAZON,),
+        trust_tier=TrustTier.OFFICIAL,
+        collector=kind,
+        compliance=ComplianceStatus.ALLOWED,
+        enabled=True,
+        regions=("global",),
+        language_hint="en",
+        interval_minutes=120,
+        terms_url="https://details.example.com/terms",
+        robots_url="https://details.example.com/robots.txt",
+        reviewed_at=date(2026, 7, 20),
+        compliance_notes="Fixture-only approved detail source.",
         collector_config=config,
     )
 
@@ -242,5 +288,125 @@ async def test_run_all_does_not_cancel_a_healthy_source_when_another_returns_500
             run_count = await session.scalar(select(func.count()).select_from(FetchRun))
         assert document_count == 2
         assert run_count == 2
+    finally:
+        await database.dispose()
+
+
+async def test_detail_collectors_fetch_extractable_bodies_before_service_persistence(
+    tmp_path: Path,
+) -> None:
+    article = (FIXTURES / "article_en.html").read_bytes()
+    html_list = "https://details.example.com/html-list"
+    html_detail = "https://details.example.com/html-detail"
+    sitemap = "https://details.example.com/sitemap.xml"
+    sitemap_detail = "https://details.example.com/sitemap-detail"
+    browser_list = "https://details.example.com/browser-list"
+    browser_detail = "https://details.example.com/browser-detail"
+    definitions = [
+        detail_source(
+            "detail-html",
+            CollectorKind.HTML,
+            entry_url=html_list,
+            config={"link_selector": "main a.item", "item_limit": 1},
+        ),
+        detail_source(
+            "detail-sitemap",
+            CollectorKind.SITEMAP,
+            entry_url=sitemap,
+            config={"item_limit": 1},
+        ),
+        detail_source(
+            "detail-browser",
+            CollectorKind.BROWSER,
+            entry_url=browser_list,
+            config={"link_selector": "main a.item", "item_limit": 1},
+        ),
+    ]
+    http = FixtureHttp(
+        {
+            html_list: FetchResponse(
+                url=html_list,
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b'<main><a class="item" href="/html-detail">HTML</a></main>',
+            ),
+            html_detail: FetchResponse(
+                url=html_detail,
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=article,
+            ),
+            sitemap: FetchResponse(
+                url=sitemap,
+                status_code=200,
+                headers={"content-type": "application/xml"},
+                body=(
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                    f"<url><loc>{sitemap_detail}</loc></url></urlset>"
+                ).encode(),
+            ),
+            sitemap_detail: FetchResponse(
+                url=sitemap_detail,
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=article,
+            ),
+        }
+    )
+    browser = FixtureBrowser(
+        {
+            browser_list: RenderedPage(
+                url=browser_list,
+                body=b'<main><a class="item" href="/browser-detail">Browser</a></main>',
+                artifact=ResponseArtifact(
+                    url=browser_list,
+                    status_code=200,
+                    headers={"content-type": "text/html"},
+                    body=b"raw browser list",
+                ),
+            ),
+            browser_detail: RenderedPage(
+                url=browser_detail,
+                body=article,
+                artifact=ResponseArtifact(
+                    url=browser_detail,
+                    status_code=200,
+                    headers={"content-type": "text/html"},
+                    body=b"raw browser detail",
+                ),
+            ),
+        }
+    )
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'detail-pipeline.db'}")
+    await database.create_schema()
+    ingestion = IngestionService(
+        registry=SourceRegistry(definitions),
+        compliance=CompliancePolicy(),
+        collectors={
+            CollectorKind.HTML: HtmlCollector(http),
+            CollectorKind.SITEMAP: SitemapCollector(http),
+            CollectorKind.BROWSER: BrowserCollector(enabled=True, browser_port=browser),
+        },
+        extractor=ContentExtractor(StaticLanguageDetector()),
+        snapshot_store=SnapshotStore(tmp_path / "detail-snapshots"),
+        repository=SqlAlchemyIngestionRepository(database.session),
+        max_concurrency=3,
+    )
+    try:
+        summaries = await ingestion.run_all(Trigger.MANUAL)
+
+        assert all(summary.status is RunStatus.SUCCESS for summary in summaries)
+        assert all((summary.created, summary.failed) == (1, 0) for summary in summaries)
+        async with database.session() as session:
+            document_count = await session.scalar(select(func.count()).select_from(Document))
+            version_count = await session.scalar(
+                select(func.count()).select_from(DocumentVersion)
+            )
+        assert (document_count, version_count) == (3, 3)
+        requested_urls = [request.url for request in http.requests]
+        assert set(requested_urls) == {html_list, html_detail, sitemap, sitemap_detail}
+        assert requested_urls.index(html_list) < requested_urls.index(html_detail)
+        assert requested_urls.index(sitemap) < requested_urls.index(sitemap_detail)
+        assert [request.url for request in browser.requests] == [browser_list, browser_detail]
     finally:
         await database.dispose()

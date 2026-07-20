@@ -10,6 +10,7 @@ from commerce_agent.ingestion.collectors.base import (
     fetch_request,
     item_limit,
     require_success,
+    response_artifact,
 )
 from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
 
@@ -59,11 +60,19 @@ class SitemapCollector:
                 if url in seen_items:
                     continue
                 seen_items.add(url)
+                detail = await self._http.get(
+                    fetch_request(source, context, url=url, conditional=False)
+                )
+                if not require_success(detail):
+                    continue
+                artifact = response_artifact(detail)
                 yield CollectedItem(
-                    url=url,
-                    body=b"",
-                    etag=response.etag,
-                    last_modified=response.last_modified,
+                    url=detail.url,
+                    body=detail.body,
+                    content_type=artifact.headers.get("content-type"),
+                    etag=detail.etag,
+                    last_modified=detail.last_modified,
+                    artifact=artifact,
                 )
                 if len(seen_items) >= limit:
                     return

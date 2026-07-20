@@ -12,6 +12,7 @@ from commerce_agent.ingestion.collectors.base import (
     fetch_request,
     item_limit,
     require_success,
+    response_artifact,
 )
 from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
 
@@ -28,6 +29,7 @@ class FeedCollector:
         response = await self._http.get(fetch_request(source, context))
         if not require_success(response):
             return
+        artifact = response_artifact(response)
         try:
             root = ElementTree.fromstring(response.body)
         except ElementTree.ParseError:
@@ -67,6 +69,7 @@ class FeedCollector:
                 published_at=_parse_datetime(published),
                 etag=response.etag,
                 last_modified=response.last_modified,
+                artifact=artifact,
             )
             if len(seen) >= limit:
                 return

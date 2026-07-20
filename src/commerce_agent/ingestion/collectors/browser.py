@@ -16,7 +16,12 @@ from commerce_agent.ingestion.collectors.base import (
     item_limit,
 )
 from commerce_agent.ingestion.collectors.html import links_from_html
-from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
+from commerce_agent.ingestion.models import (
+    CollectedItem,
+    FetchContext,
+    ResponseArtifact,
+    SourceDefinition,
+)
 from commerce_agent.ingestion.security import SafeUrl, UrlSafetyError, UrlSafetyPolicy
 
 
@@ -78,21 +83,33 @@ class PlaywrightBrowserPort:
                             await route.continue_()
 
                     await page.route("**/*", guard_route)
-                    await page.goto(
+                    navigation_response = await page.goto(
                         entry_url.url,
                         wait_until="domcontentloaded",
                         timeout=timeout_ms,
                     )
+                    if navigation_response is None:
+                        raise CollectorError("renderer_response_unavailable")
                     final_url = await self._validate_pinned(
                         page.url,
                         request.allowed_hosts,
                         pinned_hosts,
                     )
+                    try:
+                        artifact = ResponseArtifact(
+                            url=final_url.url,
+                            status_code=navigation_response.status,
+                            headers=await navigation_response.all_headers(),
+                            body=await navigation_response.body(),
+                        )
+                    except Exception:
+                        raise CollectorError("renderer_response_unavailable") from None
                     body = (await page.content()).encode("utf-8")
                     return RenderedPage(
                         url=final_url.url,
                         body=body,
-                        headers={"content-type": "text/html; charset=utf-8"},
+                        artifact=artifact,
+                        headers=dict(artifact.headers),
                     )
                 finally:
                     if browser_context is not None:
@@ -177,16 +194,38 @@ class BrowserCollector:
                 timeout_seconds=self._timeout_seconds,
             )
         )
+        _require_render_success(page)
         selector = source.collector_config.get("link_selector")
         if not isinstance(selector, str):
             raise CollectorError("invalid_config")
-        for item in links_from_html(
+        for candidate in links_from_html(
             page.body,
             base_url=page.url,
             selector=selector,
             limit=item_limit(source),
         ):
-            yield item
+            detail = await browser.render(
+                BrowserRequest(
+                    url=candidate.url,
+                    allowed_hosts=allowed_hosts(source),
+                    timeout_seconds=self._timeout_seconds,
+                )
+            )
+            _require_render_success(detail)
+            yield CollectedItem(
+                url=detail.url,
+                body=detail.body,
+                content_type=detail.artifact.headers.get("content-type") or "text/html",
+                title=candidate.title,
+                etag=detail.artifact.headers.get("etag"),
+                last_modified=detail.artifact.headers.get("last-modified"),
+                artifact=detail.artifact,
+            )
+
+
+def _require_render_success(page: RenderedPage) -> None:
+    if not 200 <= page.artifact.status_code < 300:
+        raise CollectorError("fetch_failed")
 
 
 def _load_playwright() -> ModuleType:
