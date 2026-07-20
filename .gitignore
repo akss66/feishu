@@ -13,4 +13,5 @@ venv/
 logs/
 dist/
 build/
-
+.worktrees/
+.superpowers/
