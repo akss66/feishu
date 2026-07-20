@@ -111,6 +111,9 @@ async def test_runtime_composes_audited_websocket_and_releases_resources(
         async def connect(self) -> None:
             events.append("connect")
 
+        async def close(self) -> None:
+            events.append("adapter_close")
+
     monkeypatch.setattr(runtime, "Settings", FakeSettings)
     monkeypatch.setattr(runtime, "Database", FakeDatabase)
     monkeypatch.setattr(runtime, "AsyncOpenAI", FakeOpenAI)
@@ -134,9 +137,78 @@ async def test_runtime_composes_audited_websocket_and_releases_resources(
         "timeout": 12.5,
     }
     assert any(event[0] == "llm" and event[2] == "deepseek-test" for event in events)
-    assert events[-4:] == [
+    assert events[-5:] == [
         "connect",
+        "adapter_close",
         "channel_disconnect",
         "openai_close",
         "database_dispose",
     ]
+
+
+@pytest.mark.filterwarnings("ignore:pkg_resources is deprecated as an API:UserWarning")
+@pytest.mark.filterwarnings(
+    "ignore:Deprecated call to `pkg_resources.declare_namespace.*:DeprecationWarning"
+)
+@pytest.mark.asyncio
+async def test_runtime_releases_created_resources_when_adapter_initialization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import runtime
+
+    events: list[str] = []
+
+    class FakeSettings:
+        lark_app_id = "cli_test"
+        lark_app_secret = SecretStr("local-lark-secret")
+        deepseek_api_key = SecretStr("local-deepseek-key")
+        deepseek_base_url = "https://api.deepseek.example/v1/"
+        deepseek_model = "deepseek-test"
+        deepseek_timeout_seconds = 12.5
+        bot_bind_code = SecretStr("local-bind-code")
+        database_url = "sqlite+aiosqlite:///:memory:"
+        log_level = "INFO"
+
+    class FakeDatabase:
+        session = object()
+
+        def __init__(self, url: str) -> None:
+            events.append("database")
+
+        async def create_schema(self) -> None:
+            events.append("create_schema")
+
+        async def dispose(self) -> None:
+            events.append("database_dispose")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            events.append("openai")
+
+        async def close(self) -> None:
+            events.append("openai_close")
+
+    class FakeChannel:
+        def __init__(self, **kwargs: object) -> None:
+            events.append("channel")
+
+        async def disconnect(self) -> None:
+            events.append("channel_disconnect")
+
+    class FailingAdapter:
+        def __init__(self, channel: object, service: object) -> None:
+            raise RuntimeError("adapter setup failed")
+
+    monkeypatch.setattr(runtime, "Settings", FakeSettings)
+    monkeypatch.setattr(runtime, "Database", FakeDatabase)
+    monkeypatch.setattr(runtime, "AsyncOpenAI", FakeOpenAI)
+    monkeypatch.setattr(runtime, "SqlAlchemyGroupBindingStore", lambda session: object())
+    monkeypatch.setattr(runtime, "DeepSeekGateway", lambda client, model: object())
+    monkeypatch.setattr(runtime, "BotService", lambda bindings, llm, bind_code: object())
+    monkeypatch.setattr(runtime, "FeishuChannel", FakeChannel)
+    monkeypatch.setattr(runtime, "FeishuAdapter", FailingAdapter)
+
+    with pytest.raises(RuntimeError, match="adapter setup failed"):
+        await runtime.run()
+
+    assert events[-3:] == ["channel_disconnect", "openai_close", "database_dispose"]

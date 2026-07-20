@@ -18,10 +18,12 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    database = Database(settings.database_url)
+    database: Database | None = None
     openai_client: AsyncOpenAI | None = None
     channel: FeishuChannel | None = None
+    adapter: FeishuAdapter | None = None
     try:
+        database = Database(settings.database_url)
         await database.create_schema()
         bindings = SqlAlchemyGroupBindingStore(database.session)
 
@@ -42,11 +44,16 @@ async def run() -> None:
         await adapter.connect()
     finally:
         try:
-            if channel is not None:
-                await channel.disconnect()
+            if adapter is not None:
+                await adapter.close()
         finally:
             try:
-                if openai_client is not None:
-                    await openai_client.close()
+                if channel is not None:
+                    await channel.disconnect()
             finally:
-                await database.dispose()
+                try:
+                    if openai_client is not None:
+                        await openai_client.close()
+                finally:
+                    if database is not None:
+                        await database.dispose()
