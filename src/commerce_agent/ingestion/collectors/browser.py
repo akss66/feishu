@@ -53,14 +53,21 @@ class PlaywrightBrowserPort:
         self._safety_policy = safety_policy or UrlSafetyPolicy()
 
     async def render(self, request: BrowserRequest) -> RenderedPage:
-        entry_url, pinned_hosts = await self._prepare_pins(request)
-        module = _load_playwright()
-        timeout_ms = request.timeout_seconds * 1000
-        resolver_rules = _chromium_resolver_rules(pinned_hosts)
+        entry_url = await self._validate(request.url, request.allowed_hosts)
         terminal_status: int | None = None
         received_bytes = 0
         try:
             try:
+                pinned_hosts = await self._prepare_pins(request)
+                entry_pin = pinned_hosts.get(entry_url.host)
+                if (
+                    entry_pin is None
+                    or entry_pin.addresses != frozenset(entry_url.resolved_addresses)
+                ):
+                    raise CollectorError("renderer_security_rejected")
+                module = _load_playwright()
+                timeout_ms = request.timeout_seconds * 1000
+                resolver_rules = _chromium_resolver_rules(pinned_hosts)
                 async with module.async_playwright() as playwright:
                     browser = await playwright.chromium.launch(
                         headless=True,
@@ -139,7 +146,7 @@ class PlaywrightBrowserPort:
     async def _prepare_pins(
         self,
         request: BrowserRequest,
-    ) -> tuple[SafeUrl, dict[str, _PinnedHost]]:
+    ) -> dict[str, _PinnedHost]:
         pinned_hosts: dict[str, _PinnedHost] = {}
         for allowed_host in request.allowed_hosts:
             safe_host = await self._validate(
@@ -153,12 +160,7 @@ class PlaywrightBrowserPort:
             pinned_hosts[safe_host.host] = pin
         if not pinned_hosts:
             raise CollectorError("renderer_security_rejected")
-        entry_url = await self._validate_pinned(
-            request.url,
-            request.allowed_hosts,
-            pinned_hosts,
-        )
-        return entry_url, pinned_hosts
+        return pinned_hosts
 
     async def _validate_pinned(
         self,

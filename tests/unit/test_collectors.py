@@ -27,6 +27,7 @@ from commerce_agent.ingestion.collectors import (
 )
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
@@ -386,6 +387,35 @@ async def test_sitemap_collector_caps_unique_candidates() -> None:
         "https://docs.example.com/articles/alpha",
         "https://docs.example.com/articles/shared",
     ]
+
+
+@pytest.mark.asyncio
+async def test_sitemap_collector_caps_consecutive_detail_failures() -> None:
+    root = "https://docs.example.com/sitemap.xml"
+    details = [f"https://docs.example.com/articles/{name}" for name in ("a", "b", "c")]
+    sitemap = (
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + "".join(f"<url><loc>{url}</loc></url>" for url in details)
+        + "</urlset>"
+    ).encode()
+    http = FakeHttpPort(
+        {
+            root: sitemap,
+            details[0]: FetchResponse(details[0], 500),
+            details[1]: FetchResponse(details[1], 500),
+            details[2]: (FIXTURES / "article_en.html").read_bytes(),
+        }
+    )
+    definition = source(
+        CollectorKind.SITEMAP,
+        entry_url=root,
+        config={"item_limit": 2},
+    )
+
+    items = await collected(SitemapCollector(http), definition)
+
+    assert items == [CollectedFailure("fetch_failed"), CollectedFailure("fetch_failed")]
+    assert [request.url for request in http.requests] == [root, *details[:2]]
 
 
 @pytest.mark.asyncio
@@ -1004,6 +1034,30 @@ async def test_playwright_port_rejects_unsafe_entry_before_browser_launch(
 
     assert error.value.code == "renderer_security_rejected"
     assert browsers == []
+    assert request.metrics == FetchMetrics()
+
+
+@pytest.mark.asyncio
+async def test_playwright_port_records_unavailable_after_initial_safety_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_playwright(name: str):
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(importlib, "import_module", missing_playwright)
+    resolver = FakeResolver({"browser.example.com": ("1.1.1.1",)})
+    port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
+    request = BrowserRequest(
+        url="https://browser.example.com/list",
+        allowed_hosts=("browser.example.com",),
+        timeout_seconds=2.5,
+    )
+
+    with pytest.raises(CollectorError) as error:
+        await port.render(request)
+
+    assert error.value.code == "renderer_unavailable"
+    assert request.metrics == FetchMetrics(http_requests=1)
 
 
 @pytest.mark.asyncio

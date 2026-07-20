@@ -68,6 +68,8 @@ class SitemapCollector:
             for url in _locations(root, "url", response.url):
                 if url in seen_items:
                     continue
+                if len(seen_items) >= limit:
+                    return
                 seen_items.add(url)
                 try:
                     detail = await self._http.get(

@@ -513,3 +513,62 @@ async def test_detail_collectors_fetch_extractable_bodies_before_service_persist
         assert b"failed browser response" not in snapshot_bodies
     finally:
         await database.dispose()
+
+
+async def test_sitemap_failure_events_respect_candidate_cap_in_service(tmp_path: Path) -> None:
+    root = "https://details.example.com/capped-sitemap.xml"
+    details = [f"https://details.example.com/capped/{name}" for name in ("a", "b", "c")]
+    definition = detail_source(
+        "capped-sitemap",
+        CollectorKind.SITEMAP,
+        entry_url=root,
+        config={"item_limit": 2},
+    )
+    sitemap = (
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + "".join(f"<url><loc>{url}</loc></url>" for url in details)
+        + "</urlset>"
+    ).encode()
+    http = FixtureHttp(
+        {
+            root: FetchResponse(root, 200, body=sitemap),
+            details[0]: FetchResponse(details[0], 500),
+            details[1]: FetchResponse(details[1], 500),
+            details[2]: FetchResponse(
+                details[2],
+                200,
+                headers={"content-type": "text/html"},
+                body=(FIXTURES / "article_en.html").read_bytes(),
+            ),
+        }
+    )
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'capped-sitemap.db'}")
+    await database.create_schema()
+    ingestion = IngestionService(
+        registry=SourceRegistry([definition]),
+        compliance=CompliancePolicy(),
+        collectors={CollectorKind.SITEMAP: SitemapCollector(http)},
+        extractor=ContentExtractor(StaticLanguageDetector()),
+        snapshot_store=SnapshotStore(tmp_path / "capped-sitemap-snapshots"),
+        repository=SqlAlchemyIngestionRepository(database.session),
+    )
+    try:
+        summary = await ingestion.run_source(definition.source_id, Trigger.MANUAL)
+
+        assert summary.status is RunStatus.FAILED
+        assert (summary.discovered, summary.failed, summary.created) == (2, 2, 0)
+        assert summary.http_requests == 3
+        assert [request.url for request in http.requests] == [root, *details[:2]]
+        async with database.session() as session:
+            document_count = await session.scalar(select(func.count()).select_from(Document))
+            run = await session.scalar(select(FetchRun))
+        assert document_count == 0
+        assert run is not None
+        assert (run.discovered, run.failed, run.created, run.status) == (
+            2,
+            2,
+            0,
+            RunStatus.FAILED.value,
+        )
+    finally:
+        await database.dispose()
