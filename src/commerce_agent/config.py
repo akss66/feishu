@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
     ingestion_scheduler_enabled: bool = False
+    intelligence_analysis_enabled: bool = False
+    intelligence_daily_report_enabled: bool = False
+    intelligence_alerts_enabled: bool = False
+    intelligence_qa_enabled: bool = False
+    intelligence_timezone: str = "Asia/Shanghai"
+    intelligence_daily_hour: int = Field(default=9, ge=0, le=23)
+    intelligence_ai_concurrency: int = Field(default=2, ge=1, le=8)
+    intelligence_evidence_threshold: int = Field(default=75, ge=0, le=100)
+    intelligence_context_ttl_minutes: int = Field(default=30, ge=1, le=1440)
+    intelligence_qa_max_turns: int = Field(default=6, ge=1, le=20)
 
     @field_validator("lark_app_secret", "deepseek_api_key", "bot_bind_code")
     @classmethod

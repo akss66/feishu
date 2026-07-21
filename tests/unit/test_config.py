@@ -29,6 +29,23 @@ def test_settings_apply_safe_ingestion_defaults(monkeypatch: pytest.MonkeyPatch)
     assert settings.ingestion_scheduler_enabled is False
 
 
+def test_intelligence_flags_are_safe_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure_required_settings(monkeypatch)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.intelligence_analysis_enabled is False
+    assert settings.intelligence_daily_report_enabled is False
+    assert settings.intelligence_alerts_enabled is False
+    assert settings.intelligence_qa_enabled is False
+    assert settings.intelligence_timezone == "Asia/Shanghai"
+    assert settings.intelligence_daily_hour == 9
+    assert settings.intelligence_ai_concurrency == 2
+    assert settings.intelligence_evidence_threshold == 75
+    assert settings.intelligence_context_ttl_minutes == 30
+    assert settings.intelligence_qa_max_turns == 6
+
+
 @pytest.mark.parametrize(
     ("environment_key", "invalid_value"),
     [
