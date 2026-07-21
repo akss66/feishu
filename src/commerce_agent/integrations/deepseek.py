@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+from commerce_agent.intelligence.analyzer import EmptyModelOutput
+
 
 class DeepSeekGateway:
     def __init__(self, client: Any, model: str) -> None:
@@ -43,5 +45,5 @@ class DeepSeekGateway:
         )
         content = response.choices[0].message.content
         if not content or not content.strip():
-            raise RuntimeError("DeepSeek returned an empty response")
+            raise EmptyModelOutput("DeepSeek returned an empty response")
         return content.strip()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.analyzer import (
     REPAIR_PROMPT,
+    EmptyModelOutput,
     IntelligenceAnalyzer,
     InvalidModelOutput,
 )
@@ -16,7 +18,7 @@ from commerce_agent.intelligence.models import AnalysisCandidate, EventType
 
 
 class FakeJsonGateway:
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[str | BaseException]) -> None:
         self._responses = iter(responses)
         self.calls: list[tuple[str, dict[str, object]]] = []
 
@@ -28,7 +30,10 @@ class FakeJsonGateway:
         self, system_prompt: str, user_payload: dict[str, object]
     ) -> str:
         self.calls.append((system_prompt, user_payload))
-        return next(self._responses)
+        response = next(self._responses)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 @pytest.fixture
@@ -116,6 +121,23 @@ async def test_analyzer_repairs_invalid_json_once(candidate: AnalysisCandidate) 
     assert "not-json" not in repr(repair_user)
 
 
+async def test_analyzer_rejects_empty_output_after_one_repair(
+    candidate: AnalysisCandidate,
+) -> None:
+    gateway = FakeJsonGateway(
+        [EmptyModelOutput("safe"), EmptyModelOutput("different internal message")]
+    )
+
+    with pytest.raises(InvalidModelOutput, match="^empty_output$"):
+        await IntelligenceAnalyzer(gateway).analyze(candidate)
+
+    assert gateway.call_count == 2
+    assert gateway.calls[1][1] == {
+        "article": gateway.calls[0][1]["article"],
+        "error_code": "empty_output",
+    }
+
+
 async def test_article_instructions_are_wrapped_as_untrusted_data(
     candidate: AnalysisCandidate,
 ) -> None:
@@ -144,3 +166,142 @@ async def test_analyzer_rejects_extra_fields_as_schema_mismatch(
 
     assert gateway.call_count == 2
     assert gateway.calls[1][1]["error_code"] == "schema_mismatch"
+
+
+async def test_analyzer_rejects_an_invented_platform(
+    candidate: AnalysisCandidate,
+) -> None:
+    gateway = FakeJsonGateway(
+        [valid_json(platforms=["amazon"]), valid_json(platforms=["amazon"])]
+    )
+
+    with pytest.raises(InvalidModelOutput, match="^platform_not_grounded$"):
+        await IntelligenceAnalyzer(gateway).analyze(candidate)
+
+    assert gateway.call_count == 2
+    assert gateway.calls[1][1]["error_code"] == "platform_not_grounded"
+
+
+async def test_analyzer_rejects_an_invented_region(
+    candidate: AnalysisCandidate,
+) -> None:
+    gateway = FakeJsonGateway(
+        [valid_json(regions=["moon"]), valid_json(regions=["moon"])]
+    )
+
+    with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
+        await IntelligenceAnalyzer(gateway).analyze(candidate)
+
+    assert gateway.call_count == 2
+    assert gateway.calls[1][1]["error_code"] == "region_not_grounded"
+
+
+async def test_analyzer_rejects_a_blank_region(candidate: AnalysisCandidate) -> None:
+    gateway = FakeJsonGateway([valid_json(regions=[""]), valid_json(regions=[""])])
+
+    with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
+        await IntelligenceAnalyzer(gateway).analyze(candidate)
+
+    assert gateway.call_count == 2
+
+
+async def test_analyzer_rejects_an_invented_effective_date(
+    candidate: AnalysisCandidate,
+) -> None:
+    gateway = FakeJsonGateway(
+        [
+            valid_json(effective_at="2027-01-02T00:00:00Z"),
+            valid_json(effective_at="2027-01-02T00:00:00Z"),
+        ]
+    )
+
+    with pytest.raises(InvalidModelOutput, match="^date_not_grounded$"):
+        await IntelligenceAnalyzer(gateway).analyze(candidate)
+
+    assert gateway.call_count == 2
+    assert gateway.calls[1][1]["error_code"] == "date_not_grounded"
+
+
+async def test_effective_date_cannot_borrow_month_and_day_from_another_year(
+    candidate: AnalysisCandidate,
+) -> None:
+    dated_candidate = replace(candidate, body="政策将于 2026年8月1日正式生效。调整成交费率。")
+    response = valid_json(effective_at="2027-08-01T00:00:00Z")
+    gateway = FakeJsonGateway([response, response])
+
+    with pytest.raises(InvalidModelOutput, match="^date_not_grounded$"):
+        await IntelligenceAnalyzer(gateway).analyze(dated_candidate)
+
+    assert gateway.call_count == 2
+
+
+@pytest.mark.parametrize("impact", ["成交费率上调 12.5%。", "每件费用为 USD 10.00。"])
+async def test_analyzer_rejects_an_invented_concrete_amount(
+    candidate: AnalysisCandidate,
+    impact: str,
+) -> None:
+    gateway = FakeJsonGateway([valid_json(impact=impact), valid_json(impact=impact)])
+
+    with pytest.raises(InvalidModelOutput, match="^amount_not_grounded$"):
+        await IntelligenceAnalyzer(gateway).analyze(candidate)
+
+    assert gateway.call_count == 2
+    assert gateway.calls[1][1]["error_code"] == "amount_not_grounded"
+
+
+async def test_analyzer_accepts_grounded_region_date_and_amounts(
+    candidate: AnalysisCandidate,
+) -> None:
+    grounded_candidate = replace(
+        candidate,
+        body=(
+            "eBay 德国站将于 2026年8月1日把成交费率调整至 12.5%，"
+            "每件费用为 USD 10.00。"
+        ),
+    )
+    gateway = FakeJsonGateway(
+        [
+            valid_json(
+                regions=["德国"],
+                effective_at="2026-08-01T00:00:00+08:00",
+                impact="成交费率调整至 12.5%，每件费用为 USD 10.00。",
+                rationale=[
+                    {
+                        "claim": "德国站费用调整至 12.5%",
+                        "quote": "德国站将于 2026年8月1日把成交费率调整至 12.5%",
+                    }
+                ],
+            )
+        ]
+    )
+
+    result = await IntelligenceAnalyzer(gateway).analyze(grounded_candidate)
+
+    assert result.regions == ("德国",)
+    assert result.effective_at == datetime(2026, 8, 1, tzinfo=result.effective_at.tzinfo)
+    assert gateway.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("quote", "body"),
+    [
+        ("   ", "政策正文   结束"),
+        ("。！？", "政策正文。！？结束"),
+        ("eBay", "eBay 发布政策正文"),
+    ],
+)
+async def test_provenance_anchor_rejects_non_substantive_quotes(
+    candidate: AnalysisCandidate,
+    quote: str,
+    body: str,
+) -> None:
+    """Anchoring proves provenance only; it does not assert semantic entailment."""
+    grounded_candidate = replace(candidate, body=body)
+    response = valid_json(rationale=[{"claim": "政策变化", "quote": quote}])
+    gateway = FakeJsonGateway([response, response])
+
+    with pytest.raises(InvalidModelOutput, match="^evidence_not_substantive$"):
+        await IntelligenceAnalyzer(gateway).analyze(grounded_candidate)
+
+    assert gateway.call_count == 2
+    assert gateway.calls[1][1]["error_code"] == "evidence_not_substantive"

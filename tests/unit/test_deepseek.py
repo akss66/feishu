@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from commerce_agent.integrations.deepseek import DeepSeekGateway
+from commerce_agent.intelligence.analyzer import EmptyModelOutput
 
 
 async def test_answer_test_calls_the_configured_model() -> None:
@@ -80,5 +81,5 @@ async def test_complete_json_rejects_whitespace_only_output() -> None:
     )
     gateway = DeepSeekGateway(client=client, model="deepseek-v4-pro")
 
-    with pytest.raises(RuntimeError, match="empty response"):
+    with pytest.raises(EmptyModelOutput, match="empty response"):
         await gateway.complete_json("只输出 JSON", {"article": {}})
