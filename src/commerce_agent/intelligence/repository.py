@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
@@ -11,6 +12,8 @@ from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.models import (
     AnalysisCandidate,
     AnalysisResult,
+    DeliveryClaim,
+    DeliveryMessage,
     MessageKind,
     RiskLevel,
     RiskResolution,
@@ -36,6 +39,15 @@ from commerce_agent.persistence.models import (
 
 class StaleLeaseError(RuntimeError):
     pass
+
+
+RETRY_DELAYS = (
+    timedelta(minutes=1),
+    timedelta(minutes=5),
+    timedelta(minutes=30),
+)
+_ALERT_KINDS = {MessageKind.HIGH_ALERT.value, MessageKind.MEDIUM_ALERT_BATCH.value}
+_RISK_ORDER = {RiskLevel.LOW.value: 0, RiskLevel.MEDIUM.value: 1, RiskLevel.HIGH.value: 2}
 
 
 class SqlAlchemyIntelligenceRepository:
@@ -259,43 +271,17 @@ class SqlAlchemyIntelligenceRepository:
             platforms_by_source: dict[str, list[Platform]] = {}
             for source_id, platform in platform_rows:
                 platforms_by_source.setdefault(source_id, []).append(Platform(platform))
-            analyses: list[ScoredAnalysis] = []
-            for analysis, job, version, document, source in rows:
-                candidate = AnalysisCandidate(
-                    job_id=job.id,
-                    lease_token=None,
-                    document_version_id=version.id,
-                    source_id=source.id,
-                    source_name=source.name,
-                    trust_tier=TrustTier(source.trust_tier),
-                    canonical_url=document.canonical_url,
-                    content_hash=version.content_hash,
-                    title=version.title,
-                    body=version.body,
-                    language=version.language,
-                    language_confidence=version.language_confidence,
-                    author=version.author,
-                    published_at=version.published_at,
-                    fetched_at=version.fetched_at,
+            return tuple(
+                _scored_analysis(
+                    analysis,
+                    job,
+                    version,
+                    document,
+                    source,
                     platforms=tuple(platforms_by_source.get(source.id, ())),
-                    regions=tuple(source.regions),
                 )
-                risk = RiskLevel(analysis.risk_level)
-                analyses.append(
-                    ScoredAnalysis(
-                        analysis_id=analysis.id,
-                        candidate=candidate,
-                        result=AnalysisResult.model_validate(analysis.structured_payload),
-                        evidence_confidence=analysis.evidence_confidence,
-                        resolution=RiskResolution(
-                            risk_level=risk,
-                            rule_hits=(),
-                            needs_review=False,
-                        ),
-                        event_fingerprint=analysis.event_fingerprint,
-                    )
-                )
-            return tuple(analyses)
+                for analysis, job, version, document, source in rows
+            )
 
     async def list_coverage(
         self, *, window_start: datetime, window_end: datetime
@@ -476,6 +462,325 @@ class SqlAlchemyIntelligenceRepository:
             report.status = "queued"
             return outbox_id
 
+    async def queue_alerts(
+        self,
+        messages: tuple[DeliveryMessage, ...],
+        *,
+        now: datetime,
+        dedup_hours: int,
+    ) -> tuple[int, ...]:
+        if not messages:
+            return ()
+        if dedup_hours <= 0:
+            raise ValueError("dedup_hours must be positive")
+
+        queued_ids: list[int] = []
+        async with self._session_factory.begin() as session:
+            recent_rows = list(
+                (
+                    await session.scalars(
+                        select(DeliveryOutbox)
+                        .where(
+                            DeliveryOutbox.group_id.in_(
+                                {message.group_id for message in messages}
+                            ),
+                            DeliveryOutbox.message_kind.in_(_ALERT_KINDS),
+                            DeliveryOutbox.created_at > now - timedelta(hours=dedup_hours),
+                            DeliveryOutbox.created_at <= now,
+                        )
+                        .order_by(DeliveryOutbox.id)
+                    )
+                ).all()
+            )
+            recent_items_by_group: dict[str, list[dict[str, object]]] = {}
+            for row in recent_rows:
+                recent_items_by_group.setdefault(row.group_id, []).extend(
+                    _payload_items(row.payload)
+                )
+
+            for message in messages:
+                recent_items = recent_items_by_group.setdefault(message.group_id, [])
+                new_items = [
+                    item
+                    for item in _payload_items(message.payload)
+                    if _alert_item_allowed(item, recent_items)
+                ]
+                if _payload_items(message.payload) and not new_items:
+                    continue
+                queued_message = _with_alert_items(message, new_items)
+                inserted_id = (
+                    await session.execute(
+                        sqlite_insert(DeliveryOutbox)
+                        .values(
+                            idempotency_key=queued_message.idempotency_key,
+                            group_id=queued_message.group_id,
+                            message_kind=queued_message.kind.value,
+                            payload=queued_message.payload,
+                            reply_to_message_id=queued_message.reply_to_message_id,
+                            reply_in_thread=queued_message.reply_in_thread,
+                            status="pending",
+                            attempt_count=0,
+                            created_at=now,
+                        )
+                        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                        .returning(DeliveryOutbox.id)
+                    )
+                ).scalar_one_or_none()
+                if inserted_id is None:
+                    continue
+                queued_ids.append(inserted_id)
+                recent_items.extend(new_items)
+        return tuple(queued_ids)
+
+    async def list_unqueued_alert_candidates(
+        self, *, since: datetime, until: datetime
+    ) -> tuple[ScoredAnalysis, ...]:
+        statement = (
+            select(DocumentAnalysis, AnalysisJob, DocumentVersion, Document, Source)
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentAnalysis.document_version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .join(AnalysisJob, AnalysisJob.document_version_id == DocumentVersion.id)
+            .where(
+                AnalysisJob.status == "completed",
+                Document.current_version_id == DocumentVersion.id,
+                Source.compliance == "allowed",
+                DocumentAnalysis.analyzed_at >= since,
+                DocumentAnalysis.analyzed_at <= until,
+            )
+            .order_by(DocumentAnalysis.analyzed_at, DocumentAnalysis.id)
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+            if not rows:
+                return ()
+            platform_rows = (
+                await session.execute(
+                    select(SourcePlatform.source_id, SourcePlatform.platform)
+                    .where(
+                        SourcePlatform.source_id.in_(
+                            {source.id for _, _, _, _, source in rows}
+                        )
+                    )
+                    .order_by(SourcePlatform.source_id, SourcePlatform.platform)
+                )
+            ).all()
+            platforms_by_source: dict[str, list[Platform]] = {}
+            for source_id, platform in platform_rows:
+                platforms_by_source.setdefault(source_id, []).append(Platform(platform))
+
+            return tuple(
+                _scored_analysis(
+                    analysis,
+                    job,
+                    version,
+                    document,
+                    source,
+                    platforms=tuple(platforms_by_source.get(source.id, ())),
+                )
+                for analysis, job, version, document, source in rows
+            )
+
+    async def claim_delivery(
+        self, *, now: datetime, lease_seconds: int = 300
+    ) -> DeliveryClaim | None:
+        return await self._claim_delivery(now=now, lease_seconds=lease_seconds)
+
+    async def claim_delivery_by_id(
+        self,
+        outbox_id: int,
+        *,
+        now: datetime,
+        lease_seconds: int = 300,
+    ) -> DeliveryClaim | None:
+        return await self._claim_delivery(
+            now=now,
+            lease_seconds=lease_seconds,
+            outbox_id=outbox_id,
+        )
+
+    async def _claim_delivery(
+        self,
+        *,
+        now: datetime,
+        lease_seconds: int,
+        outbox_id: int | None = None,
+    ) -> DeliveryClaim | None:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        lease_token = uuid4().hex
+        due = or_(
+            DeliveryOutbox.status == "pending",
+            (DeliveryOutbox.status == "retry_wait")
+            & (DeliveryOutbox.next_attempt_at <= now),
+            (DeliveryOutbox.status == "sending")
+            & (DeliveryOutbox.lease_expires_at <= now)
+            & (DeliveryOutbox.attempt_count < 4),
+        )
+        next_delivery = (
+            select(DeliveryOutbox.id)
+            .where(due)
+            .where(DeliveryOutbox.id == outbox_id if outbox_id is not None else literal(True))
+            .order_by(DeliveryOutbox.created_at, DeliveryOutbox.id)
+            .limit(1)
+            .scalar_subquery()
+        )
+        statement = (
+            update(DeliveryOutbox)
+            .where(DeliveryOutbox.id == next_delivery)
+            .values(
+                status="sending",
+                attempt_count=DeliveryOutbox.attempt_count + 1,
+                next_attempt_at=None,
+                lease_token=lease_token,
+                lease_expires_at=now + timedelta(seconds=lease_seconds),
+                safe_error_code=None,
+            )
+            .returning(DeliveryOutbox)
+        )
+        async with self._session_factory.begin() as session:
+            await session.execute(
+                update(DeliveryOutbox)
+                .where(
+                    DeliveryOutbox.status == "sending",
+                    DeliveryOutbox.lease_expires_at <= now,
+                    DeliveryOutbox.attempt_count >= 4,
+                )
+                .values(
+                    status="failed",
+                    next_attempt_at=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    safe_error_code="lease_expired",
+                )
+            )
+            row = (await session.execute(statement)).scalar_one_or_none()
+            return None if row is None else _delivery_claim(row)
+
+    async def mark_delivery_sent(
+        self,
+        claim: DeliveryClaim,
+        *,
+        message_id: str,
+        now: datetime,
+    ) -> None:
+        async with self._session_factory.begin() as session:
+            updated_id = (
+                await session.execute(
+                    update(DeliveryOutbox)
+                    .where(
+                        DeliveryOutbox.id == claim.id,
+                        DeliveryOutbox.status == "sending",
+                        DeliveryOutbox.lease_token == claim.lease_token,
+                    )
+                    .values(
+                        status="sent",
+                        next_attempt_at=None,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        safe_error_code=None,
+                        feishu_message_id=message_id,
+                        sent_at=now,
+                    )
+                    .returning(DeliveryOutbox.id)
+                )
+            ).scalar_one_or_none()
+            if updated_id is None:
+                raise StaleLeaseError("delivery lease is no longer current")
+            if claim.kind is MessageKind.DAILY_REPORT:
+                report_date = _report_date_from_key(claim.idempotency_key)
+                report_id = (
+                    await session.execute(
+                        update(DailyReport)
+                        .where(
+                            DailyReport.group_id == claim.group_id,
+                            DailyReport.report_date == report_date,
+                            DailyReport.status == "queued",
+                        )
+                        .values(status="sent", sent_at=now)
+                        .returning(DailyReport.id)
+                    )
+                ).scalar_one_or_none()
+                if report_id is None:
+                    raise RuntimeError("linked daily report is not queued")
+
+    async def fail_delivery(
+        self, claim: DeliveryClaim, code: str, *, now: datetime
+    ) -> None:
+        retry_index = claim.attempt_count - 1
+        if retry_index < len(RETRY_DELAYS):
+            status = "retry_wait"
+            next_attempt_at = now + RETRY_DELAYS[retry_index]
+        else:
+            status = "failed"
+            next_attempt_at = None
+        async with self._session_factory.begin() as session:
+            updated_id = (
+                await session.execute(
+                    update(DeliveryOutbox)
+                    .where(
+                        DeliveryOutbox.id == claim.id,
+                        DeliveryOutbox.status == "sending",
+                        DeliveryOutbox.lease_token == claim.lease_token,
+                    )
+                    .values(
+                        status=status,
+                        next_attempt_at=next_attempt_at,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        safe_error_code=code,
+                    )
+                    .returning(DeliveryOutbox.id)
+                )
+            ).scalar_one_or_none()
+            if updated_id is None:
+                raise StaleLeaseError("delivery lease is no longer current")
+
+    async def skip_delivery(self, claim: DeliveryClaim, code: str) -> None:
+        async with self._session_factory.begin() as session:
+            updated_id = (
+                await session.execute(
+                    update(DeliveryOutbox)
+                    .where(
+                        DeliveryOutbox.id == claim.id,
+                        DeliveryOutbox.status == "sending",
+                        DeliveryOutbox.lease_token == claim.lease_token,
+                    )
+                    .values(
+                        status="skipped",
+                        next_attempt_at=None,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        safe_error_code=code,
+                    )
+                    .returning(DeliveryOutbox.id)
+                )
+            ).scalar_one_or_none()
+            if updated_id is None:
+                raise StaleLeaseError("delivery lease is no longer current")
+
+    async def list_outbox(self, ids: tuple[int, ...]) -> tuple[DeliveryOutbox, ...]:
+        if not ids:
+            return ()
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(DeliveryOutbox)
+                .where(DeliveryOutbox.id.in_(ids))
+                .order_by(DeliveryOutbox.id)
+            )
+            return tuple(rows.all())
+
+    async def next_delivery_time(self, outbox_id: int) -> datetime | None:
+        async with self._session_factory() as session:
+            return await session.scalar(
+                select(DeliveryOutbox.next_attempt_at).where(
+                    DeliveryOutbox.id == outbox_id
+                )
+            )
+
     async def fail_analysis(
         self, claim: AnalysisCandidate, error_code: str, *, now: datetime
     ) -> None:
@@ -599,3 +904,138 @@ def _require_lease_token(claim: AnalysisCandidate) -> str:
     if claim.lease_token is None:
         raise StaleLeaseError("analysis claim has no lease token")
     return claim.lease_token
+
+
+def _payload_items(payload: dict[str, object]) -> list[dict[str, object]]:
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _alert_item_allowed(
+    item: dict[str, object], recent_items: list[dict[str, object]]
+) -> bool:
+    fingerprint = item.get("event_fingerprint")
+    if not isinstance(fingerprint, str):
+        return True
+    matching = [recent for recent in recent_items if recent.get("event_fingerprint") == fingerprint]
+    if not matching:
+        return True
+    risk = item.get("risk_level")
+    risk_rank = _RISK_ORDER.get(risk, -1) if isinstance(risk, str) else -1
+    previous_risk = max(
+        (
+            _RISK_ORDER.get(previous, -1)
+            for previous in (recent.get("risk_level") for recent in matching)
+            if isinstance(previous, str)
+        ),
+        default=-1,
+    )
+    if risk_rank > previous_risk:
+        return True
+    version_id = item.get("document_version_id")
+    content_hash = item.get("content_hash")
+    return all(
+        version_id != recent.get("document_version_id")
+        and content_hash != recent.get("content_hash")
+        for recent in matching
+    )
+
+
+def _with_alert_items(
+    message: DeliveryMessage, items: list[dict[str, object]]
+) -> DeliveryMessage:
+    original_items = _payload_items(message.payload)
+    if items == original_items:
+        return message
+    payload = dict(message.payload)
+    payload["items"] = items
+    if message.kind is MessageKind.MEDIUM_ALERT_BATCH:
+        payload["title"] = (
+            "早期信号·待核实"
+            if any(item.get("verification_status") == "early_signal" for item in items)
+            else "中风险预警汇总"
+        )
+    identities = "|".join(
+        sorted(
+            f"{item.get('event_fingerprint')}:{item.get('risk_level')}:"
+            f"{item.get('document_version_id')}:{item.get('content_hash')}"
+            for item in items
+        )
+    )
+    digest = hashlib.sha256(identities.encode("utf-8")).hexdigest()
+    bucket = message.idempotency_key.rsplit(":", 1)[-1]
+    return DeliveryMessage(
+        idempotency_key=f"alert-filtered:{message.group_id}:{digest}:{bucket}",
+        group_id=message.group_id,
+        kind=message.kind,
+        payload=payload,
+        reply_to_message_id=message.reply_to_message_id,
+        reply_in_thread=message.reply_in_thread,
+    )
+
+
+def _delivery_claim(row: DeliveryOutbox) -> DeliveryClaim:
+    if row.lease_token is None:
+        raise StaleLeaseError("claimed delivery has no lease token")
+    return DeliveryClaim(
+        id=row.id,
+        idempotency_key=row.idempotency_key,
+        group_id=row.group_id,
+        kind=MessageKind(row.message_kind),
+        payload=row.payload,
+        reply_to_message_id=row.reply_to_message_id,
+        reply_in_thread=row.reply_in_thread,
+        attempt_count=row.attempt_count,
+        lease_token=row.lease_token,
+    )
+
+
+def _report_date_from_key(idempotency_key: str) -> date:
+    try:
+        prefix, _, raw_date = idempotency_key.partition(":")
+        if prefix != "daily":
+            raise ValueError
+        return date.fromisoformat(raw_date.rsplit(":", 1)[-1])
+    except ValueError as error:
+        raise ValueError("invalid daily report idempotency key") from error
+
+
+def _scored_analysis(
+    analysis: DocumentAnalysis,
+    job: AnalysisJob,
+    version: DocumentVersion,
+    document: Document,
+    source: Source,
+    *,
+    platforms: tuple[Platform, ...],
+) -> ScoredAnalysis:
+    candidate = AnalysisCandidate(
+        job_id=job.id,
+        lease_token=None,
+        document_version_id=version.id,
+        source_id=source.id,
+        source_name=source.name,
+        trust_tier=TrustTier(source.trust_tier),
+        canonical_url=document.canonical_url,
+        content_hash=version.content_hash,
+        title=version.title,
+        body=version.body,
+        language=version.language,
+        language_confidence=version.language_confidence,
+        author=version.author,
+        published_at=version.published_at,
+        fetched_at=version.fetched_at,
+        platforms=platforms,
+        regions=tuple(source.regions),
+    )
+    risk = RiskLevel(analysis.risk_level)
+    return ScoredAnalysis(
+        analysis_id=analysis.id,
+        candidate=candidate,
+        result=AnalysisResult.model_validate(analysis.structured_payload),
+        evidence_confidence=analysis.evidence_confidence,
+        resolution=RiskResolution(risk_level=risk, rule_hits=(), needs_review=False),
+        event_fingerprint=analysis.event_fingerprint,
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -7,10 +8,19 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from commerce_agent.ingestion.models import Platform, TrustTier
-from commerce_agent.intelligence.models import RiskLevel, RiskProfile, ScoredAnalysis
+from commerce_agent.intelligence.models import (
+    AlertQualification,
+    DeliveryMessage,
+    MessageKind,
+    RiskDecision,
+    RiskLevel,
+    RiskProfile,
+    ScoredAnalysis,
+)
 
 if TYPE_CHECKING:
     from commerce_agent.intelligence.repository import SqlAlchemyIntelligenceRepository
+    from commerce_agent.intelligence.risk import RiskPolicy
     from commerce_agent.persistence.intelligence_preferences import (
         SqlAlchemyIntelligencePreferenceStore,
     )
@@ -24,6 +34,23 @@ _PROFILE_LABELS = {
 }
 _CONSERVATIVE_ACTION = "人工复核原文和适用范围后再决定业务变更"
 _REVERSIBLE_ACTION = "指定负责人核对原文；准备影响清单，不执行不可逆操作"
+_CONSERVATIVE_ALERT_ACTION = {
+    "action": "人工复核原文和适用范围后再决定业务变更",
+    "owner_type": "合规负责人",
+    "deadline": None,
+}
+_EARLY_SIGNAL_ACTIONS = (
+    {
+        "action": "指定负责人核对原文、适用范围与生效时间",
+        "owner_type": "运营负责人",
+        "deadline": None,
+    },
+    {
+        "action": "准备可逆的影响清单，不执行下架、改价等不可逆操作",
+        "owner_type": "业务负责人",
+        "deadline": None,
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,3 +282,136 @@ class DailyReportService:
     async def generate_and_queue(self, group_id: str, report_date: date) -> int:
         await self.preview(group_id, report_date)
         return await self.queue_previewed(group_id, report_date)
+
+
+def _alert_actions(
+    item: ScoredAnalysis, decision: RiskDecision
+) -> list[dict[str, object]]:
+    if decision.alert_qualification is AlertQualification.EARLY_SIGNAL:
+        return [dict(action) for action in _EARLY_SIGNAL_ACTIONS]
+    if decision.profile is RiskProfile.CONSERVATIVE:
+        return [dict(_CONSERVATIVE_ALERT_ACTION)]
+    return [action.model_dump(mode="json") for action in item.result.action_items]
+
+
+def alert_item(item: ScoredAnalysis, decision: RiskDecision) -> dict[str, object]:
+    return {
+        "analysis_id": item.analysis_id,
+        "document_version_id": item.candidate.document_version_id,
+        "content_hash": item.candidate.content_hash,
+        "event_fingerprint": item.event_fingerprint,
+        "risk_level": decision.risk_level.value,
+        "evidence_confidence": item.evidence_confidence,
+        "risk_profile": decision.profile.value,
+        "verification_status": decision.alert_qualification.value,
+        "headline": item.result.headline_zh,
+        "summary": item.result.summary_zh,
+        "impact": item.result.impact,
+        "rationale": [claim.model_dump(mode="json") for claim in item.result.rationale],
+        "actions": _alert_actions(item, decision),
+        "uncertainties": list(item.result.uncertainties),
+        "source_name": item.candidate.source_name,
+        "source_url": item.candidate.canonical_url,
+    }
+
+
+def high_alert_message(
+    group_id: str,
+    item: ScoredAnalysis,
+    decision: RiskDecision,
+    now: datetime,
+) -> DeliveryMessage:
+    bucket = int(now.timestamp() // timedelta(days=1).total_seconds())
+    return DeliveryMessage(
+        idempotency_key=(
+            f"alert:{group_id}:{item.event_fingerprint}:high:"
+            f"{item.candidate.content_hash[:16]}:{bucket}"
+        ),
+        group_id=group_id,
+        kind=MessageKind.HIGH_ALERT,
+        payload={
+            "title": "高风险预警",
+            "theme": "red",
+            "items": [alert_item(item, decision)],
+        },
+    )
+
+
+def medium_alert_message(
+    group_id: str,
+    items: tuple[tuple[ScoredAnalysis, RiskDecision], ...],
+    now: datetime,
+) -> DeliveryMessage:
+    bucket = int(now.timestamp() // timedelta(days=1).total_seconds())
+    identities = "|".join(
+        sorted(
+            f"{item.event_fingerprint}:{decision.risk_level.value}:"
+            f"{item.candidate.content_hash}"
+            for item, decision in items
+        )
+    )
+    digest = hashlib.sha256(identities.encode("utf-8")).hexdigest()
+    early = any(
+        decision.alert_qualification is AlertQualification.EARLY_SIGNAL
+        for _, decision in items
+    )
+    return DeliveryMessage(
+        idempotency_key=f"alert-batch:{group_id}:{digest}:{bucket}",
+        group_id=group_id,
+        kind=MessageKind.MEDIUM_ALERT_BATCH,
+        payload={
+            "title": "早期信号·待核实" if early else "中风险预警汇总",
+            "theme": "orange",
+            "items": [alert_item(item, decision) for item, decision in items],
+        },
+    )
+
+
+class AlertComposer:
+    def __init__(
+        self,
+        repository: SqlAlchemyIntelligenceRepository,
+        preferences: SqlAlchemyIntelligencePreferenceStore,
+        policy: RiskPolicy,
+        *,
+        default_profile: RiskProfile = RiskProfile.DEFAULT,
+    ) -> None:
+        self._repository = repository
+        self._preferences = preferences
+        self._policy = policy
+        self._default_profile = default_profile
+
+    async def queue_batch(
+        self,
+        group_id: str,
+        analyses: tuple[ScoredAnalysis, ...],
+        *,
+        now: datetime,
+    ) -> tuple[int, ...]:
+        profile = await self._preferences.get(group_id, default=self._default_profile)
+        evaluated = tuple(
+            (item, self._policy.assess(item.result, item.evidence_confidence, profile))
+            for item in analyses
+        )
+        eligible = tuple(pair for pair in evaluated if pair[1].eligible_for_alert)
+        verified_highs = tuple(
+            pair
+            for pair in eligible
+            if pair[1].risk_level is RiskLevel.HIGH
+            and pair[1].alert_qualification is AlertQualification.VERIFIED
+        )
+        orange = tuple(pair for pair in eligible if pair not in verified_highs)
+        messages = tuple(
+            [
+                high_alert_message(group_id, item, decision, now)
+                for item, decision in verified_highs
+            ]
+            + ([medium_alert_message(group_id, orange, now)] if orange else [])
+        )
+        return await self._repository.queue_alerts(messages, now=now, dedup_hours=24)
+
+    async def queue_due(self, group_id: str, *, now: datetime) -> tuple[int, ...]:
+        analyses = await self._repository.list_unqueued_alert_candidates(
+            since=now - timedelta(hours=24), until=now
+        )
+        return await self.queue_batch(group_id, analyses, now=now)
