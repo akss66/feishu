@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
@@ -47,6 +48,7 @@ RETRY_DELAYS = (
     timedelta(minutes=30),
 )
 _ALERT_KINDS = {MessageKind.HIGH_ALERT.value, MessageKind.MEDIUM_ALERT_BATCH.value}
+_ALERT_DEDUP_STATUSES = {"pending", "sending", "retry_wait", "sent"}
 _RISK_ORDER = {RiskLevel.LOW.value: 0, RiskLevel.MEDIUM.value: 1, RiskLevel.HIGH.value: 2}
 
 
@@ -485,6 +487,7 @@ class SqlAlchemyIntelligenceRepository:
                                 {message.group_id for message in messages}
                             ),
                             DeliveryOutbox.message_kind.in_(_ALERT_KINDS),
+                            DeliveryOutbox.status.in_(_ALERT_DEDUP_STATUSES),
                             DeliveryOutbox.created_at > now - timedelta(hours=dedup_hours),
                             DeliveryOutbox.created_at <= now,
                         )
@@ -508,6 +511,12 @@ class SqlAlchemyIntelligenceRepository:
                 if _payload_items(message.payload) and not new_items:
                     continue
                 queued_message = _with_alert_items(message, new_items)
+                queued_message = replace(
+                    queued_message,
+                    idempotency_key=await _next_alert_idempotency_key(
+                        session, queued_message.idempotency_key
+                    ),
+                )
                 inserted_id = (
                     await session.execute(
                         sqlite_insert(DeliveryOutbox)
@@ -974,6 +983,35 @@ def _with_alert_items(
         reply_to_message_id=message.reply_to_message_id,
         reply_in_thread=message.reply_in_thread,
     )
+
+
+async def _next_alert_idempotency_key(
+    session: AsyncSession, base_key: str
+) -> str:
+    lineage = list(
+        (
+            await session.execute(
+                select(DeliveryOutbox.id, DeliveryOutbox.idempotency_key)
+                .where(
+                    or_(
+                        DeliveryOutbox.idempotency_key == base_key,
+                        DeliveryOutbox.idempotency_key.startswith(
+                            f"{base_key}:r", autoescape=True
+                        ),
+                    )
+                )
+                .order_by(DeliveryOutbox.id)
+            )
+        ).all()
+    )
+    if not lineage:
+        return base_key
+    latest_id = lineage[-1].id
+    versioned = f"{base_key}:r{latest_id}"
+    if len(versioned) <= 256:
+        return versioned
+    digest = hashlib.sha256(base_key.encode("utf-8")).hexdigest()
+    return f"alert-requeue:{digest}:r{latest_id}"
 
 
 def _delivery_claim(row: DeliveryOutbox) -> DeliveryClaim:

@@ -408,6 +408,97 @@ async def test_outbox_retry_schedule_is_one_five_thirty_then_failed(tmp_path) ->
         await database.dispose()
 
 
+@pytest.mark.parametrize("status", ["pending", "sending", "retry_wait", "sent"])
+async def test_active_or_delivered_alert_still_suppresses_recent_event(
+    tmp_path, status: str
+) -> None:
+    database, repository, _, composer = await _services(tmp_path, f"suppress-{status}.db")
+    item = _analysis(1)
+    try:
+        (outbox_id,) = await composer.queue_batch("chat-one", (item,), now=NOW)
+        if status != "pending":
+            claim = await repository.claim_delivery_by_id(outbox_id, now=NOW)
+            assert claim is not None
+            if status == "retry_wait":
+                await repository.fail_delivery(claim, "transport_error", now=NOW)
+            elif status == "sent":
+                await repository.mark_delivery_sent(
+                    claim, message_id="om_delivered", now=NOW
+                )
+
+        row = (await repository.list_outbox((outbox_id,)))[0]
+        assert row.status == status
+        assert await composer.queue_batch(
+            "chat-one", (item,), now=NOW + timedelta(hours=1)
+        ) == ()
+    finally:
+        await database.dispose()
+
+
+async def test_no_active_binding_skip_can_queue_same_event_again(tmp_path) -> None:
+    database, repository, _, composer = await _services(tmp_path, "requeue-skip.db")
+    item = _analysis(1)
+    try:
+        (old_id,) = await composer.queue_batch("chat-one", (item,), now=NOW)
+        claim = await repository.claim_delivery_by_id(old_id, now=NOW)
+        assert claim is not None
+        old_key = claim.idempotency_key
+        old_payload = claim.payload
+        await repository.skip_delivery(claim, "no_active_binding")
+
+        (new_id,) = await composer.queue_batch(
+            "chat-one", (item,), now=NOW + timedelta(hours=1)
+        )
+
+        old, new = await repository.list_outbox((old_id, new_id))
+        assert old.status == "skipped"
+        assert old.safe_error_code == "no_active_binding"
+        assert old.payload == old_payload
+        assert old.idempotency_key == old_key
+        assert new.status == "pending"
+        assert new.payload == old_payload
+        assert new.idempotency_key == f"{old_key}:r{old_id}"
+    finally:
+        await database.dispose()
+
+
+async def test_terminal_failure_can_queue_same_event_again(tmp_path) -> None:
+    database, repository, _, composer = await _services(tmp_path, "requeue-failed.db")
+    item = _analysis(1)
+    try:
+        (old_id,) = await composer.queue_batch("chat-one", (item,), now=NOW)
+        attempt_at = NOW
+        for delay in (
+            timedelta(minutes=1),
+            timedelta(minutes=5),
+            timedelta(minutes=30),
+            timedelta(0),
+        ):
+            claim = await repository.claim_delivery_by_id(old_id, now=attempt_at)
+            assert claim is not None
+            old_key = claim.idempotency_key
+            old_payload = claim.payload
+            await repository.fail_delivery(claim, "transport_error", now=attempt_at)
+            attempt_at += delay
+
+        (new_id,) = await composer.queue_batch(
+            "chat-one", (item,), now=attempt_at + timedelta(hours=1)
+        )
+
+        old, new = await repository.list_outbox((old_id, new_id))
+        assert old.status == "failed"
+        assert old.attempt_count == 4
+        assert old.safe_error_code == "transport_error"
+        assert old.payload == old_payload
+        assert old.idempotency_key == old_key
+        assert new.status == "pending"
+        assert new.attempt_count == 0
+        assert new.payload == old_payload
+        assert new.idempotency_key == f"{old_key}:r{old_id}"
+    finally:
+        await database.dispose()
+
+
 async def test_marking_delivery_sent_marks_linked_report_in_same_transaction(
     tmp_path,
 ) -> None:
