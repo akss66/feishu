@@ -1147,7 +1147,7 @@ Add repository methods with exact signatures:
     async def queue_report(self, report_id: int, *, now: datetime) -> int: ...
 ```
 
-`queue_report` requires status `previewed`, creates Outbox key `daily:{group_id}:{report_date}`, and sets report status `queued` in one transaction. Existing `sent` report is never changed.
+`list_report_analyses` joins the current source row, requires `compliance='allowed'`, and applies the report window to `DocumentVersion.fetched_at`; it returns confidence `>=60` only. `queue_report` requires status `previewed`, creates Outbox key `daily:{group_id}:{report_date}`, and sets report status `queued` in one transaction. Existing `sent` report is never changed.
 
 Add a small application service so the CLI and scheduler share identical windowing and persistence:
 
@@ -1280,7 +1280,8 @@ def high_alert_message(
     bucket = int(now.timestamp() // (24 * 60 * 60))
     return DeliveryMessage(
         idempotency_key=(
-            f"alert:{group_id}:{item.event_fingerprint}:high:{bucket}"
+            f"alert:{group_id}:{item.event_fingerprint}:high:"
+            f"{item.candidate.content_hash[:16]}:{bucket}"
         ),
         group_id=group_id,
         kind=MessageKind.HIGH_ALERT,
@@ -1293,7 +1294,8 @@ def medium_alert_message(
 ) -> DeliveryMessage:
     bucket = int(now.timestamp() // (24 * 60 * 60))
     fingerprints = "|".join(sorted(item.event_fingerprint for item in items))
-    digest = hashlib.sha256(fingerprints.encode("utf-8")).hexdigest()
+    versions = "|".join(sorted(item.candidate.content_hash for item in items))
+    digest = hashlib.sha256(f"{fingerprints}|{versions}".encode("utf-8")).hexdigest()
     return DeliveryMessage(
         idempotency_key=f"alert-batch:{group_id}:{digest}:{bucket}",
         group_id=group_id,
@@ -2031,8 +2033,11 @@ def test_scheduler_registers_only_enabled_jobs() -> None:
     scheduler = IntelligenceScheduler(
         analysis=FakeAnalysis(),
         reports=FakeReports(),
+        alerts=FakeAlerts(),
         delivery=FakeDelivery(),
+        bindings=FakeBindings(),
         analysis_enabled=True,
+        alerts_enabled=False,
         daily_enabled=False,
         delivery_enabled=True,
         daily_hour=9,
@@ -2140,18 +2145,30 @@ class IntelligenceScheduler:
                 self._running.discard(task)
 
     async def _run_daily(self) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._running.add(task)
         try:
             group_id = await self._bindings.get_active_chat_id() or ""
             report_date = self._clock().astimezone(self._timezone).date()
             await self._reports.generate_and_queue(group_id, report_date)
         except Exception as error:
             logger.error("intelligence daily job failed (type=%s)", type(error).__name__)
+        finally:
+            if task is not None:
+                self._running.discard(task)
 
     async def _run_delivery(self) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._running.add(task)
         try:
             await self._delivery.drain(limit=20)
         except Exception as error:
             logger.error("intelligence delivery job failed (type=%s)", type(error).__name__)
+        finally:
+            if task is not None:
+                self._running.discard(task)
 
     async def aclose(self) -> None:
         if not self._started:
