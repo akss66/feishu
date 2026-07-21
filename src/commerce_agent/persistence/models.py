@@ -172,6 +172,98 @@ class DocumentVersion(Base):
     )
 
 
+class AnalysisJob(Base):
+    __tablename__ = "analysis_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    lease_token: Mapped[str | None] = mapped_column(String(32), unique=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (Index("ix_analysis_jobs_due", "status", "next_attempt_at"),)
+
+
+class DocumentAnalysis(Base):
+    __tablename__ = "document_analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    headline_zh: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_zh: Mapped[str] = mapped_column(Text, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    evidence_confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    structured_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    analyzed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_document_analyses_window", "analyzed_at", "risk_level"),
+        Index("ix_document_analyses_event", "event_fingerprint", "analyzed_at"),
+    )
+
+
+class DailyReport(Base):
+    __tablename__ = "daily_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False)
+    window_start: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
+    selected_analysis_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False)
+    report_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+    __table_args__ = (
+        UniqueConstraint("group_id", "report_date", name="uq_daily_group_date"),
+    )
+
+
+class DeliveryOutbox(Base):
+    __tablename__ = "delivery_outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True)
+    group_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    message_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    reply_to_message_id: Mapped[str | None] = mapped_column(String(128))
+    reply_in_thread: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    lease_token: Mapped[str | None] = mapped_column(String(32), unique=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    safe_error_code: Mapped[str | None] = mapped_column(String(128))
+    feishu_message_id: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+    __table_args__ = (Index("ix_delivery_outbox_due", "status", "next_attempt_at"),)
+
+
 class SourceHealth(Base):
     __tablename__ = "source_health"
 

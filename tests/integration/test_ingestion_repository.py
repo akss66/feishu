@@ -22,6 +22,7 @@ from commerce_agent.persistence.ingestion import (
     SqlAlchemyIngestionRepository,
 )
 from commerce_agent.persistence.models import (
+    AnalysisJob,
     Document,
     DocumentVersion,
     FetchRun,
@@ -377,6 +378,24 @@ async def test_persist_version_enforces_identity_and_immutable_version_uniquenes
         assert document_count == 2
         assert version_count == 3
         assert grouped_document_count == 2
+    finally:
+        await database.dispose()
+
+
+async def test_new_document_version_enqueues_exactly_one_analysis_job(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    try:
+        await repository.sync_sources([_source()])
+
+        first = await repository.persist_version(_candidate(content_hash="a" * 64))
+        second = await repository.persist_version(_candidate(content_hash="a" * 64))
+
+        async with database.session() as session:
+            rows = (await session.scalars(select(AnalysisJob))).all()
+
+        assert first.created_version is True
+        assert second.created_version is False
+        assert [row.document_version_id for row in rows] == [first.version_id]
     finally:
         await database.dispose()
 

@@ -17,6 +17,7 @@ from commerce_agent.ingestion.models import (
     Trigger,
 )
 from commerce_agent.persistence.models import (
+    AnalysisJob,
     Document,
     DocumentVersion,
     FetchRun,
@@ -240,6 +241,20 @@ class SqlAlchemyIngestionRepository:
             )
             if version_id is None:  # pragma: no cover - guarded by the unique insert above
                 raise RuntimeError("version insert did not produce a stored version")
+
+            if created_version:
+                now = datetime.now(UTC)
+                await session.execute(
+                    sqlite_insert(AnalysisJob)
+                    .values(
+                        document_version_id=version_id,
+                        status="pending",
+                        attempt_count=0,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["document_version_id"])
+                )
 
             if candidate.fetched_at >= document.last_seen_at:
                 document.last_seen_at = candidate.fetched_at
