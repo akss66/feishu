@@ -71,3 +71,31 @@ git diff --check: exit 0 (Git emitted only line-ending conversion warnings)
 
 The full test run emitted only pre-existing third-party `pkg_resources`
 deprecation warnings from `lark_channel`.
+
+## Follow-up: Consistent Three-State Coverage Wording
+
+- Fixed the non-empty B report path so an enabled platform with zero verified
+  updates says `无已验证更新` instead of `已验证 0 条`.
+- Consolidated B-report and health-report coverage wording into one helper with
+  three explicit states: no allowed enabled source, enabled with no verified
+  update, and one or more verified updates.
+- Added a parameterized regression test that runs all three states through both
+  non-empty B and empty health reports.
+
+TDD RED evidence:
+
+```text
+2 failed, 1 passed
+- B report: expected `ebay：无已验证更新`, got `ebay：已验证 0 条`
+- Health report: expected `ebay：已验证 2 条`, got `ebay：无已验证更新`
+```
+
+Follow-up focused verification:
+
+```text
+31 passed
+Full pytest: 449 passed, 1 skipped
+Ruff: All checks passed!
+compileall: exit 0
+git diff --check: exit 0 (Git emitted only line-ending conversion warnings)
+```

@@ -4,6 +4,8 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.models import (
     ActionItem,
@@ -172,6 +174,39 @@ def test_empty_day_builds_health_report_with_platform_source_coverage() -> None:
     assert draft.selected_analysis_ids == ()
     assert "ebay：无已验证更新" in encoded
     assert "temu：该平台尚无合规启用来源" in encoded
+
+
+@pytest.mark.parametrize(
+    ("enabled_sources", "verified_updates", "expected"),
+    [
+        (0, 0, "ebay：该平台尚无合规启用来源"),
+        (1, 0, "ebay：无已验证更新"),
+        (1, 2, "ebay：已验证 2 条"),
+    ],
+)
+def test_b_and_health_reports_share_three_state_coverage_wording(
+    enabled_sources: int,
+    verified_updates: int,
+    expected: str,
+) -> None:
+    coverage = (
+        CoverageRow(
+            Platform.EBAY,
+            enabled_source_count=enabled_sources,
+            verified_update_count=verified_updates,
+        ),
+    )
+    composer = DailyReportComposer()
+
+    b_report = composer.compose(
+        report_date=date(2026, 7, 21), analyses=(_analysis(1),), coverage=coverage
+    )
+    health_report = composer.compose(
+        report_date=date(2026, 7, 21), analyses=(), coverage=coverage
+    )
+
+    assert b_report.payload["sections"][-1]["items"][0] == expected
+    assert health_report.payload["sections"][-1]["items"][0] == expected
 
 
 def test_conservative_daily_hides_unreviewed_model_actions() -> None:

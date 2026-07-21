@@ -107,15 +107,16 @@ def _title(report_date: date, profile: RiskProfile) -> str:
     )
 
 
+def _coverage_line(row: CoverageRow) -> str:
+    if not row.enabled_source_count:
+        return f"{row.platform.value}：该平台尚无合规启用来源"
+    if not row.verified_update_count:
+        return f"{row.platform.value}：无已验证更新"
+    return f"{row.platform.value}：已验证 {row.verified_update_count} 条"
+
+
 def _coverage_lines(coverage: tuple[CoverageRow, ...]) -> list[str]:
-    return [
-        (
-            f"{row.platform.value}：已验证 {row.verified_update_count} 条"
-            if row.enabled_source_count
-            else f"{row.platform.value}：该平台尚无合规启用来源"
-        )
-        for row in coverage
-    ]
+    return [_coverage_line(row) for row in coverage]
 
 
 def build_health_payload(
@@ -123,21 +124,13 @@ def build_health_payload(
     coverage: tuple[CoverageRow, ...],
     profile: RiskProfile,
 ) -> dict[str, Any]:
-    lines = [
-        (
-            f"{row.platform.value}：无已验证更新"
-            if row.enabled_source_count
-            else f"{row.platform.value}：该平台尚无合规启用来源"
-        )
-        for row in coverage
-    ]
     return {
         "title": _title(report_date, profile),
         "theme": "blue",
         "risk_profile": profile.value,
         "sections": [
             {"title": "AI 今日提炼", "items": ["本窗口无已验证更新。"]},
-            {"title": "数据覆盖与来源", "items": lines},
+            {"title": "数据覆盖与来源", "items": _coverage_lines(coverage)},
         ],
     }
 
