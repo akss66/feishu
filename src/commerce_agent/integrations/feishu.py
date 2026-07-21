@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from typing import Any
@@ -5,6 +7,11 @@ from typing import Any
 from commerce_agent.application import BotService
 from commerce_agent.command_parser import parse_command
 from commerce_agent.domain import CommandKind, InboundMessage
+from commerce_agent.intelligence.delivery import (
+    DeliverySendError,
+    FeishuDeliveryPort,
+    safe_feishu_error_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +90,11 @@ class FeishuAdapter:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
             self._pending_tasks.difference_update(tasks)
+
+
+__all__ = [
+    "DeliverySendError",
+    "FeishuAdapter",
+    "FeishuDeliveryPort",
+    "safe_feishu_error_code",
+]

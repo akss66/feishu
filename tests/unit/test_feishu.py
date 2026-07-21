@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from commerce_agent.integrations.feishu import FeishuAdapter
+from commerce_agent.integrations.feishu import FeishuAdapter, FeishuDeliveryPort
+from commerce_agent.intelligence.delivery import FeishuMessageRenderer
+from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
 
 
 class FakeChannel:
@@ -210,3 +212,27 @@ async def test_close_cancels_and_awaits_pending_ai_test_tasks() -> None:
 
     assert service.cancelled.is_set()
     assert not adapter._pending_tasks
+
+
+async def test_delivery_port_is_available_from_feishu_integration() -> None:
+    class SuccessfulDeliveryChannel(FakeChannel):
+        async def send(self, chat_id, content, options) -> object:
+            self.sent.append((chat_id, content, options))
+            return SimpleNamespace(success=True, message_id="om_delivery", error=None)
+
+    channel = SuccessfulDeliveryChannel()
+    claim = DeliveryClaim(
+        id=1,
+        idempotency_key="delivery-one",
+        group_id="chat-one",
+        kind=MessageKind.QA_ANSWER,
+        payload={"text": "有据回答"},
+        reply_to_message_id="om_parent",
+        reply_in_thread=True,
+        attempt_count=1,
+        lease_token="lease-one",
+    )
+
+    message_id = await FeishuDeliveryPort(channel, FeishuMessageRenderer()).send(claim)
+
+    assert message_id == "om_delivery"
