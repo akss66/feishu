@@ -26,6 +26,7 @@ from commerce_agent.intelligence.reports import (
     DailyReportDraft,
     ReportAlreadySent,
 )
+from commerce_agent.intelligence.retrieval import CorpusCandidate
 from commerce_agent.persistence.models import (
     AnalysisJob,
     DailyReport,
@@ -230,6 +231,102 @@ class SqlAlchemyIntelligenceRepository:
                         select(DocumentAnalysis).order_by(DocumentAnalysis.id)
                     )
                 ).all()
+            )
+
+    async def list_corpus_candidates(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        platforms: tuple[Platform, ...],
+        regions: tuple[str, ...],
+        risk_levels: tuple[RiskLevel, ...],
+        limit: int,
+    ) -> tuple[CorpusCandidate, ...]:
+        candidate_limit = min(max(limit, 0), 100)
+        if candidate_limit == 0:
+            return ()
+
+        candidate_time = func.coalesce(
+            DocumentVersion.published_at,
+            DocumentVersion.fetched_at,
+        )
+        statement = (
+            select(DocumentAnalysis, DocumentVersion, Document, Source)
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == DocumentAnalysis.document_version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+            .where(
+                Document.current_version_id == DocumentVersion.id,
+                Source.compliance == "allowed",
+                candidate_time >= since,
+                candidate_time <= until,
+            )
+        )
+        if platforms:
+            statement = statement.where(
+                SourcePlatform.platform.in_(platform.value for platform in platforms)
+            )
+        if regions:
+            source_region = func.json_each(Source.regions).table_valued("key", "value")
+            statement = statement.where(
+                exists(
+                    select(literal(1))
+                    .select_from(source_region)
+                    .where(source_region.c.value.in_(regions))
+                )
+            )
+        if risk_levels:
+            statement = statement.where(
+                DocumentAnalysis.risk_level.in_(risk.value for risk in risk_levels)
+            )
+        statement = (
+            statement.distinct()
+            .order_by(
+                DocumentVersion.fetched_at.desc(),
+                DocumentAnalysis.id.desc(),
+            )
+            .limit(candidate_limit)
+        )
+
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+            if not rows:
+                return ()
+            source_ids = {source.id for _, _, _, source in rows}
+            platform_rows = (
+                await session.execute(
+                    select(SourcePlatform.source_id, SourcePlatform.platform)
+                    .where(SourcePlatform.source_id.in_(source_ids))
+                    .order_by(SourcePlatform.source_id, SourcePlatform.platform)
+                )
+            ).all()
+            platforms_by_source: dict[str, list[Platform]] = {}
+            for source_id, platform in platform_rows:
+                platforms_by_source.setdefault(source_id, []).append(Platform(platform))
+
+            return tuple(
+                CorpusCandidate(
+                    document_version_id=version.id,
+                    analysis_id=analysis.id,
+                    source_id=source.id,
+                    source_name=source.name,
+                    title=version.title,
+                    summary_zh=analysis.summary_zh,
+                    evidence_quotes=_evidence_quotes(analysis.structured_payload),
+                    canonical_url=document.canonical_url,
+                    published_at=version.published_at,
+                    fetched_at=version.fetched_at,
+                    platforms=tuple(platforms_by_source.get(source.id, ())),
+                    regions=tuple(region for region in source.regions if isinstance(region, str)),
+                    risk_level=RiskLevel(analysis.risk_level),
+                    evidence_confidence=analysis.evidence_confidence,
+                )
+                for analysis, version, document, source in rows
             )
 
     async def list_report_analyses(
@@ -914,6 +1011,20 @@ def _require_lease_token(claim: AnalysisCandidate) -> str:
     if claim.lease_token is None:
         raise StaleLeaseError("analysis claim has no lease token")
     return claim.lease_token
+
+
+def _evidence_quotes(payload: object) -> tuple[str, ...]:
+    if not isinstance(payload, dict):
+        return ()
+    rationale = payload.get("rationale")
+    if not isinstance(rationale, list):
+        return ()
+    return tuple(
+        quote
+        for item in rationale
+        if isinstance(item, dict)
+        if isinstance((quote := item.get("quote")), str) and quote
+    )
 
 
 def _payload_items(payload: dict[str, object]) -> list[dict[str, object]]:
