@@ -4,7 +4,7 @@
 
 **Goal:** 在现有公开来源采集和飞书机器人基础上，交付可审计的 AI 分析、每日 09:00 决策日报、中高风险预警，以及只依据合规入库资料回答的群内问答。
 
-**Architecture:** 新文章版本在同一 SQLite 事务中创建分析任务，由带租约的异步 worker 调用 DeepSeek 并持久化严格校验的结构化结果。日报、预警和问答都只读取这些结果，所有主动发送和异步问答回复进入幂等 Outbox，再由飞书发送端处理和重试。四项生产能力由独立、默认关闭的开关控制，现有采集与基础机器人命令保持可用。
+**Architecture:** 新文章版本在同一 SQLite 事务中创建分析任务，由带租约的异步 worker 调用 DeepSeek 并持久化严格校验的结构化结果。日报、预警和问答都只读取这些结果；群级“保守 / 默认 / 激进”策略只在确定性风险决策和消息组合层生效，不改变事实与证据底线。所有主动发送和异步问答回复进入幂等 Outbox，再由飞书发送端处理和重试。四项生产能力由独立、默认关闭的开关控制，现有采集与基础机器人命令保持可用。
 
 **Tech Stack:** Python 3.11/3.12、asyncio、Pydantic v2、SQLAlchemy 2.x async、SQLite/aiosqlite、APScheduler 3.x、OpenAI-compatible DeepSeek client、lark-channel-sdk、pytest、Ruff。
 
@@ -13,8 +13,10 @@
 - 所有模型事实只能来自当前入库、已分析且来源 `compliance=allowed` 的文章版本；问答不得开放互联网搜索。
 - `INTELLIGENCE_ANALYSIS_ENABLED`、`INTELLIGENCE_DAILY_REPORT_ENABLED`、`INTELLIGENCE_ALERTS_ENABLED`、`INTELLIGENCE_QA_ENABLED` 默认均为 `false`，实现不得修改用户 `.env`。
 - 日报时区固定 `Asia/Shanghai`，每天 09:00 生成上一日 09:00（含）至当日 09:00（不含）的内容，动态选 5–15 条且不得凑数。
-- 中高风险只有在证据可信度 `>=75` 时允许自动预警；60–74 只进入日报“待核实”；低风险不即时推送。
-- 高风险单独红卡，中风险同一分析轮次合并橙卡；同事件 24 小时去重，风险升级或实质新版本允许重发。
+- 风险策略固定为三档：保守档仅高风险且可信度 `>=85` 即时推送；默认档中高风险且 `>=75` 即时推送；激进档中高风险且 `>=60` 即时推送。
+- 激进档 `60–74` 必须标为橙色“早期信号·待核实”，只能给出可逆准备动作；高风险红卡只用于可信度 `>=75`，低风险永不即时推送。
+- 三档共享完全相同的 Schema、原文锚定、可信元数据范围、证据评分与合规过滤；规则和模型严重冲突时任何档位都不得即时推送。
+- 同事件 24 小时去重，风险升级或实质新版本允许重发；档位切换本身不重发已推送事件。
 - 证据可信度由代码按 30/25/15/10/10/10 六项确定性评分计算，不使用模型自报概率。
 - 问答上下文以 `(chat_id, thread_id)` 为键，最多 6 轮、闲置 30 分钟，仅在内存保存，进程重启即清空。
 - 飞书发送失败只重试已有 Outbox 消息，不重新调用 AI；重试间隔为 1、5、30 分钟。
@@ -29,7 +31,7 @@
 - `src/commerce_agent/intelligence/repository.py`：分析任务租约、分析结果、日报与 Outbox 的 SQLite 持久化协议和实现。
 - `src/commerce_agent/intelligence/analyzer.py`：受限提示词、严格 JSON 解析、一次修复和原文证据锚定。
 - `src/commerce_agent/intelligence/evidence.py`：六项证据可信度评分。
-- `src/commerce_agent/intelligence/risk.py`：确定性最低风险规则、冲突处理和事件指纹。
+- `src/commerce_agent/intelligence/risk.py`：确定性最低风险规则、三档资格决策、冲突处理和事件指纹。
 - `src/commerce_agent/intelligence/service.py`：分析任务 drain、并发限制和安全错误分类。
 - `src/commerce_agent/intelligence/reports.py`：B 型日报选择、健康日报、预警组合与卡片/纯文本渲染。
 - `src/commerce_agent/intelligence/delivery.py`：Outbox 领取、飞书发送、重试与幂等状态机。
@@ -37,7 +39,8 @@
 - `src/commerce_agent/intelligence/qa.py`：有据问答、引用校验、拒答和短期线程上下文。
 - `src/commerce_agent/intelligence/scheduler.py`：分析、日报和 Outbox 三个稳定 job。
 - `src/commerce_agent/intelligence_cli.py`：人工分析、日报预览/发送、预警预览和健康命令。
-- `src/commerce_agent/persistence/models.py`：新增四类持久化表。
+- `src/commerce_agent/persistence/models.py`：新增分析、日报、Outbox 与群级策略偏好表。
+- `src/commerce_agent/persistence/intelligence_preferences.py`：群级风险策略偏好的独立持久化接口。
 - `src/commerce_agent/integrations/deepseek.py`：新增通用 JSON 调用端口，保留现有连通性测试。
 - `src/commerce_agent/integrations/feishu.py`：主动发送适配和异步群问答路由。
 - `src/commerce_agent/config.py`、`.env.example`：安全默认配置。
@@ -683,19 +686,27 @@ git add src/commerce_agent/integrations/deepseek.py src/commerce_agent/intellige
 git commit -m "feat: validate structured DeepSeek intelligence output"
 ```
 
-### Task 4: Deterministic evidence score, risk floor and event identity
+### Task 4: Deterministic evidence score, three-profile risk policy and group preference
 
 **Files:**
+- Modify: `src/commerce_agent/intelligence/models.py`
 - Create: `src/commerce_agent/intelligence/evidence.py`
 - Create: `src/commerce_agent/intelligence/risk.py`
+- Modify: `src/commerce_agent/config.py`
+- Modify: `.env.example`
+- Modify: `src/commerce_agent/persistence/models.py`
+- Create: `src/commerce_agent/persistence/intelligence_preferences.py`
 - Create: `tests/unit/test_intelligence_evidence.py`
 - Create: `tests/unit/test_intelligence_risk.py`
+- Modify: `tests/unit/test_config.py`
+- Create: `tests/integration/test_intelligence_preferences.py`
 
 **Interfaces:**
-- Consumes: validated `AnalysisResult`, `AnalysisCandidate`, and corroborating source count.
-- Produces: `EvidenceScorer.score(...) -> int`, `RiskPolicy.assess(...) -> RiskDecision`, and `event_fingerprint(...) -> str`.
+- Consumes: validated `AnalysisResult`, `AnalysisCandidate`, corroborating source count, group id, and configured default profile.
+- Produces: `EvidenceScorer.score(...) -> int`, `RiskPolicy.assess(result, evidence_confidence, profile) -> RiskDecision`, `event_fingerprint(...) -> str`, and `SqlAlchemyIntelligencePreferenceStore.get/set`.
+- `RiskDecision.alert_qualification` is `none | verified | early_signal`; later alert composition must use it instead of re-deriving thresholds.
 
-- [ ] **Step 1: Write failing boundary and escalation tests**
+- [ ] **Step 1: Write failing score, profile-boundary, conflict and preference tests**
 
 ```python
 def test_official_single_source_can_reach_90_but_not_cross_source_points(candidate, result) -> None:
@@ -704,37 +715,167 @@ def test_official_single_source_can_reach_90_but_not_cross_source_points(candida
 
 
 @pytest.mark.parametrize(
-    ("score", "risk", "eligible"),
-    [(59, RiskLevel.HIGH, False), (60, RiskLevel.HIGH, False), (74, RiskLevel.HIGH, False),
-     (75, RiskLevel.MEDIUM, True), (75, RiskLevel.LOW, False)],
+    ("profile", "score", "risk", "eligible", "qualification"),
+    [
+        (RiskProfile.CONSERVATIVE, 84, RiskLevel.HIGH, False, AlertQualification.NONE),
+        (RiskProfile.CONSERVATIVE, 85, RiskLevel.HIGH, True, AlertQualification.VERIFIED),
+        (RiskProfile.CONSERVATIVE, 100, RiskLevel.MEDIUM, False, AlertQualification.NONE),
+        (RiskProfile.DEFAULT, 74, RiskLevel.HIGH, False, AlertQualification.NONE),
+        (RiskProfile.DEFAULT, 75, RiskLevel.MEDIUM, True, AlertQualification.VERIFIED),
+        (RiskProfile.AGGRESSIVE, 59, RiskLevel.HIGH, False, AlertQualification.NONE),
+        (RiskProfile.AGGRESSIVE, 60, RiskLevel.HIGH, True, AlertQualification.EARLY_SIGNAL),
+        (RiskProfile.AGGRESSIVE, 74, RiskLevel.MEDIUM, True, AlertQualification.EARLY_SIGNAL),
+        (RiskProfile.AGGRESSIVE, 75, RiskLevel.HIGH, True, AlertQualification.VERIFIED),
+        (RiskProfile.AGGRESSIVE, 100, RiskLevel.LOW, False, AlertQualification.NONE),
+    ],
 )
-def test_alert_threshold_boundaries(score, risk, eligible, result) -> None:
-    decision = RiskPolicy(threshold=75).assess(result.model_copy(update={"risk_level": risk}), score)
+def test_alert_profile_boundaries(profile, score, risk, eligible, qualification, result) -> None:
+    decision = RiskPolicy().assess(
+        result.model_copy(update={"risk_level": risk}), score, profile
+    )
     assert decision.eligible_for_alert is eligible
+    assert decision.alert_qualification is qualification
 
 
-def test_rule_can_raise_but_never_lower_model_risk(result) -> None:
-    high = result.model_copy(update={"risk_level": RiskLevel.HIGH, "event_type": EventType.MARKET_UPDATE})
-    assert RiskPolicy().assess(high, 90).risk_level is RiskLevel.HIGH
-    low_enforcement = result.model_copy(
+def test_severe_rule_model_conflict_never_alerts_in_any_profile(result) -> None:
+    conflicting = result.model_copy(
         update={"risk_level": RiskLevel.LOW, "event_type": EventType.ACCOUNT_ENFORCEMENT}
     )
-    assert RiskPolicy().assess(low_enforcement, 90).risk_level is RiskLevel.HIGH
+    for profile in RiskProfile:
+        decision = RiskPolicy().assess(conflicting, 100, profile)
+        assert decision.needs_review is True
+        assert decision.alert_qualification is AlertQualification.NONE
 
 
-def test_event_fingerprint_is_stable_for_whitespace_and_case(result) -> None:
-    first = event_fingerprint(result, subject="Seller Account")
-    second = event_fingerprint(result, subject=" seller   account ")
-    assert first == second
+async def test_group_profile_uses_default_then_persists_override(store) -> None:
+    assert await store.get("chat-one", default=RiskProfile.DEFAULT) is RiskProfile.DEFAULT
+    change = await store.set("chat-one", RiskProfile.AGGRESSIVE, now=NOW)
+    assert change.previous is RiskProfile.DEFAULT
+    assert change.current is RiskProfile.AGGRESSIVE
+    assert await store.get("chat-one", default=RiskProfile.DEFAULT) is RiskProfile.AGGRESSIVE
 ```
 
-- [ ] **Step 2: Run tests and verify missing modules**
+Also test that `Settings(INTELLIGENCE_RISK_PROFILE="unknown")` is rejected, `default` is the safe default, and the retained compatibility setting `INTELLIGENCE_EVIDENCE_THRESHOLD` accepts only `75` and does not enter `RiskPolicy`.
 
-Run: `python -m pytest tests/unit/test_intelligence_evidence.py tests/unit/test_intelligence_risk.py -v`
+- [ ] **Step 2: Run tests and verify the profile types and preference table are missing**
 
-Expected: FAIL because scoring and policy modules do not exist.
+Run: `python -m pytest tests/unit/test_intelligence_evidence.py tests/unit/test_intelligence_risk.py tests/unit/test_config.py tests/integration/test_intelligence_preferences.py -v`
 
-- [ ] **Step 3: Implement the six-component score**
+Expected: FAIL because the score/policy modules, profile enums and preference store do not exist.
+
+- [ ] **Step 3: Add profile contracts, safe configuration and the independent preference table**
+
+Add to `intelligence/models.py`:
+
+```python
+class RiskProfile(StrEnum):
+    CONSERVATIVE = "conservative"
+    DEFAULT = "default"
+    AGGRESSIVE = "aggressive"
+
+
+class AlertQualification(StrEnum):
+    NONE = "none"
+    VERIFIED = "verified"
+    EARLY_SIGNAL = "early_signal"
+
+
+@dataclass(frozen=True, slots=True)
+class RiskResolution:
+    risk_level: RiskLevel
+    rule_hits: tuple[str, ...]
+    needs_review: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RiskDecision:
+    resolution: RiskResolution
+    eligible_for_alert: bool
+    profile: RiskProfile
+    alert_qualification: AlertQualification
+
+    @property
+    def risk_level(self) -> RiskLevel:
+        return self.resolution.risk_level
+
+    @property
+    def rule_hits(self) -> tuple[str, ...]:
+        return self.resolution.rule_hits
+
+    @property
+    def needs_review(self) -> bool:
+        return self.resolution.needs_review
+
+
+@dataclass(frozen=True, slots=True)
+class RiskProfileChange:
+    previous: RiskProfile
+    current: RiskProfile
+
+
+@dataclass(frozen=True, slots=True)
+class ScoredAnalysis:
+    analysis_id: int
+    candidate: AnalysisCandidate
+    result: AnalysisResult
+    evidence_confidence: int
+    resolution: RiskResolution
+    event_fingerprint: str
+```
+
+Analysis and persistence remain group-independent; Task 7 derives a fresh `RiskDecision` from the current group profile every time it scans alert candidates.
+
+Add `intelligence_risk_profile: Literal["conservative", "default", "aggressive"] = "default"` to `Settings` and `INTELLIGENCE_RISK_PROFILE=default` to `.env.example`. Retain `intelligence_evidence_threshold` only as `Literal[75] = 75` so an existing `.env` containing the previously documented value continues to load; no policy code may consume it.
+
+Add the new table without altering the existing binding table:
+
+```python
+class GroupIntelligencePreference(Base):
+    __tablename__ = "group_intelligence_preferences"
+
+    group_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    risk_profile: Mapped[str] = mapped_column(String(20), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+```
+
+`SqlAlchemyIntelligencePreferenceStore.get(group_id, default)` returns the supplied default when no row exists. `set(group_id, profile, now)` inserts or updates in one transaction and returns `RiskProfileChange`; it stores no actor id, binding code or credentials. Add a real file-backed SQLite test proving persistence across sessions and independent defaults for two groups.
+
+```python
+class SqlAlchemyIntelligencePreferenceStore:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def get(self, group_id: str, *, default: RiskProfile) -> RiskProfile:
+        async with self._session_factory() as session:
+            row = await session.get(GroupIntelligencePreference, group_id)
+            return default if row is None else RiskProfile(row.risk_profile)
+
+    async def set(
+        self,
+        group_id: str,
+        profile: RiskProfile,
+        *,
+        now: datetime,
+        default: RiskProfile = RiskProfile.DEFAULT,
+    ) -> RiskProfileChange:
+        async with self._session_factory() as session, session.begin():
+            row = await session.get(GroupIntelligencePreference, group_id)
+            previous = default if row is None else RiskProfile(row.risk_profile)
+            if row is None:
+                session.add(
+                    GroupIntelligencePreference(
+                        group_id=group_id,
+                        risk_profile=profile.value,
+                        updated_at=now,
+                    )
+                )
+            else:
+                row.risk_profile = profile.value
+                row.updated_at = now
+        return RiskProfileChange(previous=previous, current=profile)
+```
+
+- [ ] **Step 4: Implement the six-component score**
 
 ```python
 class EvidenceScorer:
@@ -754,7 +895,7 @@ class EvidenceScorer:
         return min(100, source + anchors + extraction + specificity + corroboration + schema)
 ```
 
-- [ ] **Step 4: Implement deterministic risk floors and fingerprinting**
+- [ ] **Step 5: Implement deterministic risk floors, three qualifications and fingerprinting**
 
 ```python
 _RISK_ORDER = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
@@ -767,11 +908,24 @@ _MEDIUM_FLOOR = {
 }
 
 
-class RiskPolicy:
-    def __init__(self, threshold: int = 75) -> None:
-        self._threshold = threshold
+def _qualification(profile: RiskProfile, risk: RiskLevel, score: int) -> AlertQualification:
+    if risk is RiskLevel.LOW:
+        return AlertQualification.NONE
+    if profile is RiskProfile.CONSERVATIVE:
+        return (
+            AlertQualification.VERIFIED
+            if risk is RiskLevel.HIGH and score >= 85
+            else AlertQualification.NONE
+        )
+    if profile is RiskProfile.DEFAULT:
+        return AlertQualification.VERIFIED if score >= 75 else AlertQualification.NONE
+    if score >= 75:
+        return AlertQualification.VERIFIED
+    return AlertQualification.EARLY_SIGNAL if score >= 60 else AlertQualification.NONE
 
-    def assess(self, result: AnalysisResult, evidence_confidence: int) -> RiskDecision:
+
+class RiskPolicy:
+    def resolve(self, result: AnalysisResult) -> RiskResolution:
         floor = (
             RiskLevel.HIGH if result.event_type in _HIGH_FLOOR
             else RiskLevel.MEDIUM if result.event_type in _MEDIUM_FLOOR
@@ -779,12 +933,29 @@ class RiskPolicy:
         )
         risk = max((result.risk_level, floor), key=_RISK_ORDER.__getitem__)
         conflicts = result.risk_level is RiskLevel.LOW and floor is RiskLevel.HIGH
-        eligible = (
-            not conflicts
-            and evidence_confidence >= self._threshold
-            and risk in {RiskLevel.MEDIUM, RiskLevel.HIGH}
+        return RiskResolution(
+            risk_level=risk,
+            rule_hits=(f"event_floor:{floor.value}",),
+            needs_review=conflicts,
         )
-        return RiskDecision(risk, (f"event_floor:{floor.value}",), conflicts, eligible)
+
+    def assess(
+        self,
+        result: AnalysisResult,
+        evidence_confidence: int,
+        profile: RiskProfile = RiskProfile.DEFAULT,
+    ) -> RiskDecision:
+        resolution = self.resolve(result)
+        qualification = (
+            AlertQualification.NONE if resolution.needs_review
+            else _qualification(profile, resolution.risk_level, evidence_confidence)
+        )
+        return RiskDecision(
+            resolution=resolution,
+            eligible_for_alert=qualification is not AlertQualification.NONE,
+            profile=profile,
+            alert_qualification=qualification,
+        )
 
 
 def event_fingerprint(result: AnalysisResult, *, subject: str) -> str:
@@ -798,27 +969,28 @@ def event_fingerprint(result: AnalysisResult, *, subject: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 ```
 
-- [ ] **Step 5: Run tests and commit**
+- [ ] **Step 6: Run tests and commit**
 
-Run: `python -m pytest tests/unit/test_intelligence_evidence.py tests/unit/test_intelligence_risk.py -v`
+Run: `python -m pytest tests/unit/test_intelligence_evidence.py tests/unit/test_intelligence_risk.py tests/unit/test_config.py tests/integration/test_intelligence_preferences.py -v`
 
 Expected: PASS.
 
 ```powershell
-git add src/commerce_agent/intelligence/evidence.py src/commerce_agent/intelligence/risk.py tests/unit/test_intelligence_evidence.py tests/unit/test_intelligence_risk.py
-git commit -m "feat: score evidence and enforce risk policy"
+git add src/commerce_agent/intelligence/models.py src/commerce_agent/intelligence/evidence.py src/commerce_agent/intelligence/risk.py src/commerce_agent/config.py .env.example src/commerce_agent/persistence/models.py src/commerce_agent/persistence/intelligence_preferences.py tests/unit/test_intelligence_evidence.py tests/unit/test_intelligence_risk.py tests/unit/test_config.py tests/integration/test_intelligence_preferences.py
+git commit -m "feat: add three-profile risk policy"
 ```
 
 ### Task 5: Analysis drain service
 
 **Files:**
 - Create: `src/commerce_agent/intelligence/service.py`
+- Modify: `src/commerce_agent/intelligence/repository.py`
 - Create: `tests/unit/test_intelligence_service.py`
 - Modify: `tests/integration/test_intelligence_repository.py`
 
 **Interfaces:**
-- Consumes: `SqlAlchemyIntelligenceRepository`, `IntelligenceAnalyzer`, `EvidenceScorer`, `RiskPolicy`, concurrency limit, and a UTC clock.
-- Produces: `AnalysisService.drain(limit) -> AnalysisBatch`, where `AnalysisBatch.completed` is the exact tuple later used for alert batching.
+- Consumes: `SqlAlchemyIntelligenceRepository`, `IntelligenceAnalyzer`, `EvidenceScorer`, profile-independent `RiskPolicy.resolve`, concurrency limit, and a UTC clock.
+- Produces: `AnalysisService.drain(limit) -> AnalysisBatch`, where `AnalysisBatch.completed` contains `ScoredAnalysis.resolution` but no group profile; Task 7 applies the current group profile.
 
 - [ ] **Step 1: Write failing success, retry, idempotency and concurrency tests**
 
@@ -846,6 +1018,13 @@ async def test_drain_never_exceeds_configured_concurrency(blocking_analyzer, rep
     assert blocking_analyzer.maximum_active == 2
     blocking_analyzer.release.set()
     await task
+
+
+async def test_analysis_persists_resolved_floor_without_overwriting_model_payload(service, repository) -> None:
+    await service.drain(limit=1)
+    row = (await repository.list_analyses())[0]
+    assert row.risk_level == RiskLevel.HIGH.value
+    assert row.structured_payload["risk_level"] == RiskLevel.LOW.value
 ```
 
 - [ ] **Step 2: Run focused tests and verify missing service**
@@ -904,21 +1083,19 @@ class AnalysisService:
                     score = self._evidence.score(
                         claim, result, corroborating_sources=corroborating
                     )
-                    decision = self._risk.assess(result, score)
+                    resolution = self._risk.resolve(result)
                     fingerprint = event_fingerprint(result, subject=result.headline_zh)
-                    final_result = result.model_copy(
-                        update={"risk_level": decision.risk_level}
-                    )
                     analysis_id = await self._repository.complete_analysis(
                         claim,
-                        final_result,
+                        result,
                         score,
                         fingerprint,
+                        risk_level=resolution.risk_level,
                         now=self._clock(),
                         model_name=self._model_name,
                     )
                     return ScoredAnalysis(
-                        analysis_id, claim, final_result, score, decision, fingerprint
+                        analysis_id, claim, result, score, resolution, fingerprint
                     )
                 except asyncio.CancelledError:
                     raise
@@ -933,7 +1110,7 @@ class AnalysisService:
         return AnalysisBatch(len(claims), len(completed), len(errors), completed, errors)
 ```
 
-`controlled_analysis_error` returns only `invalid_model_output`, `model_timeout`, `model_unavailable`, `stale_lease`, or `unexpected_analysis_error` based on exception type, and logs only exception class, internal job id and elapsed time.
+`complete_analysis(..., risk_level=resolution.risk_level)` stores the resolved floor in the indexed `DocumentAnalysis.risk_level` column while preserving the validated model payload unchanged in `structured_payload`. This keeps rule/model conflict detection reproducible when another group profile is applied later. `controlled_analysis_error` returns only `invalid_model_output`, `model_timeout`, `model_unavailable`, `stale_lease`, or `unexpected_analysis_error` based on exception type, and logs only exception class, internal job id and elapsed time.
 
 - [ ] **Step 4: Run service tests and commit**
 
@@ -942,7 +1119,7 @@ Run: `python -m pytest tests/unit/test_intelligence_service.py tests/integration
 Expected: PASS.
 
 ```powershell
-git add src/commerce_agent/intelligence/service.py tests/unit/test_intelligence_service.py tests/integration/test_intelligence_repository.py
+git add src/commerce_agent/intelligence/service.py src/commerce_agent/intelligence/repository.py tests/unit/test_intelligence_service.py tests/integration/test_intelligence_repository.py
 git commit -m "feat: drain intelligence analysis jobs safely"
 ```
 
@@ -955,8 +1132,8 @@ git commit -m "feat: drain intelligence analysis jobs safely"
 - Modify: `tests/integration/test_intelligence_repository.py`
 
 **Interfaces:**
-- Consumes: report-window analyses, active group id, source coverage rows, and `ZoneInfo("Asia/Shanghai")`.
-- Produces: `DailyReportComposer.compose(report_date, analyses, coverage) -> DailyReportDraft`, immutable sent reports, and `daily:{group_id}:{report_date}` idempotency keys.
+- Consumes: report-window analyses, active group id, group risk preference/default, source coverage rows, and `ZoneInfo("Asia/Shanghai")`.
+- Produces: `DailyReportComposer.compose(report_date, analyses, coverage, profile) -> DailyReportDraft`, profile-safe recommendations, immutable sent reports, and `daily:{group_id}:{report_date}` idempotency keys.
 
 - [ ] **Step 1: Write failing ranking, dedup, empty-day and immutability tests**
 
@@ -982,6 +1159,28 @@ def test_empty_day_still_builds_health_report(composer) -> None:
 async def test_sent_report_cannot_be_overwritten(repository, sent_report) -> None:
     with pytest.raises(ReportAlreadySent):
         await repository.save_report(sent_report.model_copy(update={"payload": {"changed": True}}))
+
+
+def test_aggressive_pending_item_uses_reversible_daily_action(composer) -> None:
+    draft = composer.compose(
+        report_date=date(2026, 7, 21),
+        analyses=(scored_analysis(confidence=70),),
+        profile=RiskProfile.AGGRESSIVE,
+    )
+    encoded = json.dumps(draft.payload, ensure_ascii=False)
+    assert "早期信号·待核实" in encoded
+    assert "不执行不可逆操作" in encoded
+
+
+def test_conservative_daily_omits_unreviewed_model_actions(composer) -> None:
+    draft = composer.compose(
+        report_date=date(2026, 7, 21),
+        analyses=(scored_analysis(confidence=90, model_action="立即下架全部商品"),),
+        profile=RiskProfile.CONSERVATIVE,
+    )
+    encoded = json.dumps(draft.payload, ensure_ascii=False)
+    assert "人工复核原文和适用范围" in encoded
+    assert "立即下架全部商品" not in encoded
 ```
 
 - [ ] **Step 2: Run tests and verify missing report APIs**
@@ -1020,7 +1219,7 @@ def report_window(report_date: date, timezone: ZoneInfo) -> tuple[datetime, date
 
 
 def rank_key(item: ScoredAnalysis) -> tuple[int, int, int, datetime]:
-    risk = {RiskLevel.HIGH: 3, RiskLevel.MEDIUM: 2, RiskLevel.LOW: 1}[item.decision.risk_level]
+    risk = {RiskLevel.HIGH: 3, RiskLevel.MEDIUM: 2, RiskLevel.LOW: 1}[item.resolution.risk_level]
     official = int(item.candidate.trust_tier is TrustTier.OFFICIAL)
     return risk, item.evidence_confidence, official, item.candidate.fetched_at
 
@@ -1035,13 +1234,14 @@ class DailyReportComposer:
         report_date: date,
         analyses: tuple[ScoredAnalysis, ...],
         coverage: tuple[CoverageRow, ...] = (),
+        profile: RiskProfile = RiskProfile.DEFAULT,
     ) -> DailyReportDraft:
         by_event: dict[str, ScoredAnalysis] = {}
         for item in sorted(analyses, key=rank_key, reverse=True):
             by_event.setdefault(item.event_fingerprint, item)
         selected = tuple(list(by_event.values())[:15])
-        payload = build_health_payload(report_date, coverage) if not selected else build_b_payload(
-            report_date, selected, coverage
+        payload = build_health_payload(report_date, coverage, profile) if not selected else build_b_payload(
+            report_date, selected, coverage, profile
         )
         window_start, window_end = report_window(report_date, self._timezone)
         return DailyReportDraft(
@@ -1054,7 +1254,7 @@ class DailyReportComposer:
 
 
 def build_health_payload(
-    report_date: date, coverage: tuple[CoverageRow, ...]
+    report_date: date, coverage: tuple[CoverageRow, ...], profile: RiskProfile
 ) -> dict[str, object]:
     lines = [
         (
@@ -1067,6 +1267,7 @@ def build_health_payload(
     return {
         "title": f"跨境电商每日情报 · {report_date.isoformat()}",
         "theme": "blue",
+        "risk_profile": profile.value,
         "sections": [
             {"title": "AI 今日提炼", "items": ["本窗口无已验证更新。"]},
             {"title": "数据覆盖与来源", "items": lines},
@@ -1078,6 +1279,7 @@ def build_b_payload(
     report_date: date,
     selected: tuple[ScoredAnalysis, ...],
     coverage: tuple[CoverageRow, ...],
+    profile: RiskProfile,
 ) -> dict[str, object]:
     verified = tuple(item for item in selected if item.evidence_confidence >= 75)
     pending = tuple(item for item in selected if 60 <= item.evidence_confidence < 75)
@@ -1096,19 +1298,35 @@ def build_b_payload(
         )
         for row in coverage
     ]
+    conservative_actions = ["人工复核原文和适用范围后再决定业务变更"]
+    early_actions = ["指定负责人核对原文；准备影响清单，不执行不可逆操作"]
+    verified_actions = (
+        conservative_actions
+        if profile is RiskProfile.CONSERVATIVE
+        else [action.action for item in verified for action in item.result.action_items]
+    )
+    pending_lines = [
+        (
+            f"早期信号·待核实｜{item.result.headline_zh}｜{early_actions[0]}"
+            if profile is RiskProfile.AGGRESSIVE
+            else f"待核实｜{item.result.headline_zh}"
+        )
+        for item in pending
+    ]
     return {
         "title": f"跨境电商每日情报 · {report_date.isoformat()}",
         "theme": "blue",
+        "risk_profile": profile.value,
         "sections": [
             {"title": "AI 今日提炼", "items": [item.result.summary_zh for item in verified]},
             {
                 "title": "风险与待办",
                 "items": [
-                    f"{item.decision.risk_level.value}｜{item.result.impact}｜"
+                    f"{item.resolution.risk_level.value}｜{item.result.impact}｜"
                     + "；".join(action.action for action in item.result.action_items)
                     for item in verified
-                    if item.decision.risk_level in {RiskLevel.MEDIUM, RiskLevel.HIGH}
-                ] + [f"待核实｜{item.result.headline_zh}" for item in pending],
+                    if item.resolution.risk_level in {RiskLevel.MEDIUM, RiskLevel.HIGH}
+                ] + pending_lines,
             },
             {
                 "title": "平台动态",
@@ -1116,7 +1334,7 @@ def build_b_payload(
             },
             {
                 "title": "今日建议",
-                "items": [action.action for item in verified for action in item.result.action_items],
+                "items": verified_actions + (early_actions if profile is RiskProfile.AGGRESSIVE and pending else []),
             },
             {
                 "title": "数据覆盖与来源",
@@ -1127,7 +1345,7 @@ def build_b_payload(
     }
 ```
 
-The composer queries only analyses with confidence at least 60. `build_b_payload` emits the five section titles in the shown order; 60–74 appears only as “待核实”, and confidence below 60 never enters the report query.
+The composer queries only analyses with confidence at least 60. `build_b_payload` emits the five section titles in the shown order; 60–74 remains explicitly unverified, and confidence below 60 never enters the report query. Conservative reports suppress model-authored actions in favor of the fixed verification action; aggressive 60–74 entries use only the fixed reversible-preparation action.
 
 - [ ] **Step 4: Add report query/save/preview transitions**
 
@@ -1157,13 +1375,17 @@ class DailyReportService:
         self,
         repository: SqlAlchemyIntelligenceRepository,
         composer: DailyReportComposer,
+        preferences: SqlAlchemyIntelligencePreferenceStore,
         *,
         timezone: ZoneInfo,
+        default_profile: RiskProfile = RiskProfile.DEFAULT,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._repository = repository
         self._composer = composer
+        self._preferences = preferences
         self._timezone = timezone
+        self._default_profile = default_profile
         self._clock = clock
 
     async def preview(self, group_id: str, report_date: date) -> DailyReportDraft:
@@ -1174,8 +1396,12 @@ class DailyReportService:
         coverage = await self._repository.list_coverage(
             window_start=start, window_end=end
         )
+        profile = await self._preferences.get(group_id, default=self._default_profile)
         draft = self._composer.compose(
-            report_date=report_date, analyses=analyses, coverage=coverage
+            report_date=report_date,
+            analyses=analyses,
+            coverage=coverage,
+            profile=profile,
         )
         report_id = await self._repository.save_report(
             group_id, draft, now=self._clock()
@@ -1208,12 +1434,13 @@ git commit -m "feat: compose and persist decision daily reports"
 **Files:**
 - Modify: `src/commerce_agent/intelligence/reports.py`
 - Modify: `src/commerce_agent/intelligence/repository.py`
+- Modify: `src/commerce_agent/intelligence/risk.py`
 - Create: `tests/unit/test_intelligence_alerts.py`
 - Create: `tests/integration/test_intelligence_outbox.py`
 
 **Interfaces:**
-- Consumes: `AnalysisBatch.completed`, active group id, evidence threshold, and current time.
-- Produces: one Outbox row per high alert, one per medium batch, deterministic keys, and leased delivery records.
+- Consumes: `AnalysisBatch.completed`, active group id, `SqlAlchemyIntelligencePreferenceStore`, configured default profile, `RiskPolicy`, and current time.
+- Produces: one Outbox row per verified high alert, one orange batch for verified medium alerts and aggressive early signals, profile/status-labelled payloads, deterministic keys, and leased delivery records.
 
 - [ ] **Step 1: Write failing alert and retry-state tests**
 
@@ -1244,6 +1471,42 @@ async def test_completed_analysis_is_recovered_when_alert_queueing_was_interrupt
     await alert_service.repository.seed_completed_without_outbox(high_event())
     ids = await alert_service.queue_due("chat-one", now=NOW)
     assert len(ids) == 1
+
+
+@pytest.mark.parametrize(
+    ("profile", "score", "risk", "count", "title"),
+    [
+        (RiskProfile.CONSERVATIVE, 85, RiskLevel.HIGH, 1, "高风险预警"),
+        (RiskProfile.CONSERVATIVE, 100, RiskLevel.MEDIUM, 0, None),
+        (RiskProfile.DEFAULT, 75, RiskLevel.MEDIUM, 1, "中风险预警汇总"),
+        (RiskProfile.AGGRESSIVE, 60, RiskLevel.HIGH, 1, "早期信号·待核实"),
+    ],
+)
+async def test_alert_composition_uses_current_group_profile(
+    alert_service, preferences, profile, score, risk, count, title
+) -> None:
+    await preferences.set("chat-one", profile, now=NOW)
+    ids = await alert_service.queue_batch(
+        "chat-one", (scored_event(score=score, risk=risk),), now=NOW
+    )
+    assert len(ids) == count
+    if ids:
+        row = (await alert_service.repository.list_outbox(ids))[0]
+        assert row.payload["title"] == title
+        assert row.payload["items"][0]["risk_profile"] == profile.value
+
+
+async def test_profile_switch_does_not_resend_event_already_sent_in_24_hours(
+    alert_service, preferences
+) -> None:
+    await preferences.set("chat-one", RiskProfile.AGGRESSIVE, now=NOW)
+    event = scored_event(score=90, risk=RiskLevel.HIGH)
+    first = await alert_service.queue_batch("chat-one", (event,), now=NOW)
+    await alert_service.repository.mark_test_messages_sent(first, now=NOW)
+    await preferences.set("chat-one", RiskProfile.CONSERVATIVE, now=NOW + timedelta(hours=1))
+    assert await alert_service.queue_batch(
+        "chat-one", (event,), now=NOW + timedelta(hours=1)
+    ) == ()
 ```
 
 - [ ] **Step 2: Run tests and verify missing alert/outbox behavior**
@@ -1255,19 +1518,34 @@ Expected: FAIL because alert composition and Outbox claim transitions are absent
 - [ ] **Step 3: Implement alert eligibility, grouping and deterministic keys**
 
 ```python
-def alert_item(item: ScoredAnalysis) -> dict[str, object]:
+def _display_actions(item: ScoredAnalysis, decision: RiskDecision) -> list[dict[str, object]]:
+    if decision.alert_qualification is AlertQualification.EARLY_SIGNAL:
+        return [
+            {"action": "指定负责人核对原文、适用范围与生效时间", "owner_type": "运营负责人", "deadline": None},
+            {"action": "准备可逆的影响清单，不执行下架、改价等不可逆操作", "owner_type": "业务负责人", "deadline": None},
+        ]
+    if decision.profile is RiskProfile.CONSERVATIVE:
+        return [
+            {"action": "人工复核原文和适用范围后再决定业务变更", "owner_type": "合规负责人", "deadline": None}
+        ]
+    return [action.model_dump(mode="json") for action in item.result.action_items]
+
+
+def alert_item(item: ScoredAnalysis, decision: RiskDecision) -> dict[str, object]:
     return {
         "analysis_id": item.analysis_id,
         "document_version_id": item.candidate.document_version_id,
         "content_hash": item.candidate.content_hash,
         "event_fingerprint": item.event_fingerprint,
-        "risk_level": item.decision.risk_level.value,
+        "risk_level": decision.risk_level.value,
         "evidence_confidence": item.evidence_confidence,
+        "risk_profile": decision.profile.value,
+        "verification_status": decision.alert_qualification.value,
         "headline": item.result.headline_zh,
         "summary": item.result.summary_zh,
         "impact": item.result.impact,
         "rationale": [claim.model_dump(mode="json") for claim in item.result.rationale],
-        "actions": [action.model_dump(mode="json") for action in item.result.action_items],
+        "actions": _display_actions(item, decision),
         "uncertainties": list(item.result.uncertainties),
         "source_name": item.candidate.source_name,
         "source_url": item.candidate.canonical_url,
@@ -1275,7 +1553,7 @@ def alert_item(item: ScoredAnalysis) -> dict[str, object]:
 
 
 def high_alert_message(
-    group_id: str, item: ScoredAnalysis, now: datetime
+    group_id: str, item: ScoredAnalysis, decision: RiskDecision, now: datetime
 ) -> DeliveryMessage:
     bucket = int(now.timestamp() // (24 * 60 * 60))
     return DeliveryMessage(
@@ -1285,32 +1563,52 @@ def high_alert_message(
         ),
         group_id=group_id,
         kind=MessageKind.HIGH_ALERT,
-        payload={"title": "高风险预警", "theme": "red", "items": [alert_item(item)]},
+        payload={
+            "title": "高风险预警",
+            "theme": "red",
+            "items": [alert_item(item, decision)],
+        },
     )
 
 
 def medium_alert_message(
-    group_id: str, items: tuple[ScoredAnalysis, ...], now: datetime
+    group_id: str,
+    items: tuple[tuple[ScoredAnalysis, RiskDecision], ...],
+    now: datetime,
 ) -> DeliveryMessage:
     bucket = int(now.timestamp() // (24 * 60 * 60))
-    fingerprints = "|".join(sorted(item.event_fingerprint for item in items))
-    versions = "|".join(sorted(item.candidate.content_hash for item in items))
+    fingerprints = "|".join(sorted(item.event_fingerprint for item, _ in items))
+    versions = "|".join(sorted(item.candidate.content_hash for item, _ in items))
     digest = hashlib.sha256(f"{fingerprints}|{versions}".encode("utf-8")).hexdigest()
+    early = any(
+        decision.alert_qualification is AlertQualification.EARLY_SIGNAL
+        for _, decision in items
+    )
     return DeliveryMessage(
         idempotency_key=f"alert-batch:{group_id}:{digest}:{bucket}",
         group_id=group_id,
         kind=MessageKind.MEDIUM_ALERT_BATCH,
         payload={
-            "title": "中风险预警汇总",
+            "title": "早期信号·待核实" if early else "中风险预警汇总",
             "theme": "orange",
-            "items": [alert_item(item) for item in items],
+            "items": [alert_item(item, decision) for item, decision in items],
         },
     )
 
 
 class AlertComposer:
-    def __init__(self, repository: SqlAlchemyIntelligenceRepository) -> None:
+    def __init__(
+        self,
+        repository: SqlAlchemyIntelligenceRepository,
+        preferences: SqlAlchemyIntelligencePreferenceStore,
+        policy: RiskPolicy,
+        *,
+        default_profile: RiskProfile = RiskProfile.DEFAULT,
+    ) -> None:
         self._repository = repository
+        self._preferences = preferences
+        self._policy = policy
+        self._default_profile = default_profile
 
     async def queue_batch(
         self,
@@ -1319,12 +1617,24 @@ class AlertComposer:
         *,
         now: datetime,
     ) -> tuple[int, ...]:
-        eligible = tuple(item for item in analyses if item.decision.eligible_for_alert)
-        highs = tuple(item for item in eligible if item.decision.risk_level is RiskLevel.HIGH)
-        mediums = tuple(item for item in eligible if item.decision.risk_level is RiskLevel.MEDIUM)
-        messages = [high_alert_message(group_id, item, now) for item in highs]
-        if mediums:
-            messages.append(medium_alert_message(group_id, mediums, now))
+        profile = await self._preferences.get(group_id, default=self._default_profile)
+        evaluated = tuple(
+            (item, self._policy.assess(item.result, item.evidence_confidence, profile))
+            for item in analyses
+        )
+        eligible = tuple(pair for pair in evaluated if pair[1].eligible_for_alert)
+        highs = tuple(
+            pair for pair in eligible
+            if pair[1].risk_level is RiskLevel.HIGH
+            and pair[1].alert_qualification is AlertQualification.VERIFIED
+        )
+        orange = tuple(pair for pair in eligible if pair not in highs)
+        messages = [
+            high_alert_message(group_id, item, decision, now)
+            for item, decision in highs
+        ]
+        if orange:
+            messages.append(medium_alert_message(group_id, orange, now))
         return await self._repository.queue_alerts(messages, now=now, dedup_hours=24)
 
     async def queue_due(self, group_id: str, *, now: datetime) -> tuple[int, ...]:
@@ -1399,7 +1709,7 @@ git commit -m "feat: queue deduplicated risk alerts"
 
 **Interfaces:**
 - Consumes: leased `DeliveryClaim`, `FeishuChannel.send`, `SendResult.success/message_id/error`, and active binding store.
-- Produces: `FeishuDeliveryPort.send(claim) -> str`, `DeliveryWorker.drain(limit)`, thread replies, card-length degradation, and safe retry codes.
+- Produces: `FeishuDeliveryPort.send(claim) -> str`, `DeliveryWorker.drain(limit)`, strategy/status-labelled cards, thread replies, card-length degradation, and safe retry codes.
 
 - [ ] **Step 1: Write failing card, fallback and no-reanalysis tests**
 
@@ -1422,6 +1732,14 @@ async def test_send_failure_reuses_existing_payload(worker, channel, analyzer_co
     channel.result = failed_send_result("transport")
     await worker.drain(limit=1)
     assert analyzer_counter.calls == 0
+
+
+def test_early_signal_is_orange_and_never_rendered_as_verified_red(renderer, early_claim) -> None:
+    rendered = renderer.render(early_claim)
+    assert rendered["card"]["header"]["template"] == "orange"
+    encoded = json.dumps(rendered, ensure_ascii=False)
+    assert "早期信号·待核实" in encoded
+    assert "激进" in encoded
 ```
 
 - [ ] **Step 2: Run focused tests and verify missing worker**
@@ -1493,8 +1811,16 @@ def alert_markdown(item: dict[str, object]) -> str:
         for row in item["actions"]
     )
     uncertainties = "；".join(item["uncertainties"]) or "无"
+    profile = {"conservative": "保守", "default": "默认", "aggressive": "激进"}[
+        item["risk_profile"]
+    ]
+    status = {
+        "verified": "已验证预警",
+        "early_signal": "早期信号·待核实",
+    }[item["verification_status"]]
     return (
         f"**{item['headline']}**\n"
+        f"策略：{profile}｜状态：{status}\n"
         f"风险：{item['risk_level']}｜证据可信度：{item['evidence_confidence']}\n"
         f"摘要：{item['summary']}\n影响：{item['impact']}\n"
         f"判断依据：{rationale}\n建议动作：{actions}\n"
@@ -1504,6 +1830,20 @@ def alert_markdown(item: dict[str, object]) -> str:
 
 
 def semantic_to_card(payload: dict[str, object]) -> dict[str, object]:
+    if any(
+        item.get("verification_status") == "early_signal"
+        for item in payload.get("items", [])
+    ):
+        payload = {**payload, "theme": "orange"}
+    profile = payload.get("risk_profile")
+    profile_label = {
+        "conservative": "保守",
+        "default": "默认",
+        "aggressive": "激进",
+    }.get(profile)
+    title = str(payload["title"])
+    if profile_label:
+        title = f"{title} · 策略：{profile_label}"
     if "sections" in payload:
         blocks = [
             {"tag": "markdown", "content": f"**{section['title']}**\n" + "\n".join(
@@ -1521,7 +1861,7 @@ def semantic_to_card(payload: dict[str, object]) -> dict[str, object]:
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": payload.get("theme", "blue"),
-                "title": {"tag": "plain_text", "content": payload["title"]},
+                "title": {"tag": "plain_text", "content": title},
             },
             "elements": blocks,
         }
@@ -1529,7 +1869,14 @@ def semantic_to_card(payload: dict[str, object]) -> dict[str, object]:
 
 
 def semantic_to_text(payload: dict[str, object]) -> str:
+    profile_label = {
+        "conservative": "保守",
+        "default": "默认",
+        "aggressive": "激进",
+    }.get(payload.get("risk_profile"))
     lines = [str(payload["title"])]
+    if profile_label:
+        lines.append(f"策略：{profile_label}")
     if "sections" in payload:
         for section in payload["sections"]:
             lines.append(f"\n{section['title']}")
@@ -1599,7 +1946,7 @@ class DeliveryWorker:
         return "sent"
 ```
 
-The renderer preserves high red, medium orange and daily blue themes. The UTF-8 size check happens before the SDK call, and pure-text degradation keeps at most 15 items plus their source links.
+The renderer preserves verified high red, verified medium orange and daily blue themes. It forcibly downgrades any payload containing `early_signal` to orange even if a malformed upstream payload requested red. The UTF-8 size check happens before the SDK call, and pure-text degradation keeps at most 15 items plus their source links and strategy/status labels.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -2013,17 +2360,20 @@ git commit -m "feat: answer group questions from cited corpus"
 
 **Files:**
 - Create: `src/commerce_agent/intelligence/scheduler.py`
+- Modify: `src/commerce_agent/domain.py`
+- Modify: `src/commerce_agent/command_parser.py`
 - Modify: `src/commerce_agent/application.py`
 - Modify: `src/commerce_agent/integrations/feishu.py`
 - Modify: `src/commerce_agent/runtime.py`
 - Modify: `tests/unit/test_application.py`
+- Modify: `tests/unit/test_command_parser.py`
 - Modify: `tests/unit/test_feishu.py`
 - Create: `tests/unit/test_intelligence_scheduler.py`
 - Modify: `tests/unit/test_runtime.py`
 
 **Interfaces:**
-- Consumes: settings flags and all completed services.
-- Produces: three stable scheduler jobs, active-group report/alert delivery, background Q&A acknowledgement, and safe shutdown order.
+- Consumes: settings flags, configured default profile, group preference store, and all completed services.
+- Produces: three stable scheduler jobs, active-group profile-aware report/alert delivery, `策略 [保守|默认|激进]` routing, background Q&A acknowledgement, and safe shutdown order.
 
 - [ ] **Step 1: Write failing scheduler and routing tests**
 
@@ -2058,6 +2408,27 @@ async def test_disabled_qa_preserves_existing_unknown_command_reply(channel, ser
     service.qa_enabled = False
     await channel.handlers["message"](flat_event("你好"))
     assert channel.replies[-1][1]["text"] == "暂不支持该指令。发送“帮助”查看可用命令。"
+
+
+def test_parser_accepts_profile_query_and_three_chinese_names() -> None:
+    assert parse_command("策略").kind is CommandKind.RISK_PROFILE
+    for label in ("保守", "默认", "激进"):
+        command = parse_command(f"策略 {label}")
+        assert command.kind is CommandKind.RISK_PROFILE
+        assert command.argument == label
+
+
+async def test_bound_group_can_query_and_change_profile(service, preferences) -> None:
+    assert "当前策略：默认" in await service.handle(message("策略"))
+    reply = await service.handle(message("策略 激进"))
+    assert "默认 → 激进" in reply
+    assert await preferences.get("chat-one", default=RiskProfile.DEFAULT) is RiskProfile.AGGRESSIVE
+
+
+async def test_unbound_group_cannot_change_profile(service, preferences) -> None:
+    reply = await service.handle(message("策略 激进", chat_id="chat-other"))
+    assert reply == "❌ 仅当前已绑定群可以修改风险策略。"
+    assert await preferences.get("chat-other", default=RiskProfile.DEFAULT) is RiskProfile.DEFAULT
 ```
 
 - [ ] **Step 2: Run tests and verify missing scheduler/routing behavior**
@@ -2184,7 +2555,75 @@ class IntelligenceScheduler:
 
 The tests also cover idempotent `start/aclose` and cancellation of a running analysis task before database disposal.
 
-- [ ] **Step 4: Route Q&A as an acknowledged background Outbox reply**
+- [ ] **Step 4: Route group-scoped risk profile commands**
+
+Add `RISK_PROFILE = "risk_profile"` to `CommandKind`. In `parse_command`, map exact `策略` to a query and `策略 <argument>` to the same command kind; do not treat longer strings such as `策略激进` as valid.
+
+Add this optional protocol/dependency to `BotService` so all existing non-intelligence construction remains compatible:
+
+```python
+class RiskProfileStore(Protocol):
+    async def get(self, group_id: str, *, default: RiskProfile) -> RiskProfile: ...
+
+    async def set(
+        self,
+        group_id: str,
+        profile: RiskProfile,
+        *,
+        now: datetime,
+        default: RiskProfile,
+    ) -> RiskProfileChange: ...
+
+
+_PROFILE_LABELS = {
+    RiskProfile.CONSERVATIVE: "保守",
+    RiskProfile.DEFAULT: "默认",
+    RiskProfile.AGGRESSIVE: "激进",
+}
+_PROFILE_ARGUMENTS = {label: profile for profile, label in _PROFILE_LABELS.items()}
+
+
+def profile_status_text(profile: RiskProfile) -> str:
+    rules = {
+        RiskProfile.CONSERVATIVE: "仅高风险且可信度≥85 即时推送",
+        RiskProfile.DEFAULT: "中高风险且可信度≥75 即时推送",
+        RiskProfile.AGGRESSIVE: "中高风险且可信度≥60 即时推送；60–74 为早期信号·待核实",
+    }
+    return f"当前策略：{_PROFILE_LABELS[profile]}。{rules[profile]}。"
+```
+
+Append `risk_profiles: RiskProfileStore | None = None`, `default_risk_profile: RiskProfile = RiskProfile.DEFAULT`, and a UTC `clock` to `BotService.__init__`. Handle the command before `UNKNOWN`:
+
+```python
+        if command.kind is CommandKind.RISK_PROFILE:
+            if self._risk_profiles is None:
+                return "风险策略功能尚未启用。"
+            if not await self._bindings.is_active(message.chat_id):
+                return "❌ 仅当前已绑定群可以修改风险策略。"
+            current = await self._risk_profiles.get(
+                message.chat_id, default=self._default_risk_profile
+            )
+            if not command.argument:
+                return profile_status_text(current)
+            selected = _PROFILE_ARGUMENTS.get(command.argument)
+            if selected is None:
+                return "可选策略：保守、默认、激进。"
+            change = await self._risk_profiles.set(
+                message.chat_id,
+                selected,
+                now=self._clock(),
+                default=self._default_risk_profile,
+            )
+            return (
+                f"✅ 风险策略已更新：{_PROFILE_LABELS[change.previous]}"
+                f" → {_PROFILE_LABELS[change.current]}。\n"
+                f"{profile_status_text(change.current)}"
+            )
+```
+
+When profile support is injected, add `策略 [保守|默认|激进]` to help; when it is absent and all intelligence features are disabled, preserve the old help text exactly. The first version performs active-group authorization only and must not claim Feishu administrator verification.
+
+- [ ] **Step 5: Route Q&A as an acknowledged background Outbox reply**
 
 Add `qa: QaService | None = None` as the final `BotService.__init__` parameter, assign `self._qa = qa`, and add these exact members so existing construction stays compatible:
 
@@ -2234,7 +2673,7 @@ In `FeishuAdapter._on_message`, after AI-test handling:
 
 Add `delivery: DeliveryWorker | None = None` as the final `FeishuAdapter.__init__` dependency; construction rejects `service.qa_enabled=True` with no delivery worker, while existing non-Q&A tests remain compatible. A send failure remains in Outbox for scheduled retry. Background exceptions log only their class, and the direct safe failure reply is used only when no Outbox row was created.
 
-- [ ] **Step 5: Assemble resources without enabling production features**
+- [ ] **Step 6: Assemble resources without enabling production features**
 
 Extend `RuntimeResources` with `intelligence_scheduler` and build the intelligence graph after the channel, DeepSeek gateway and binding store exist:
 
@@ -2246,6 +2685,8 @@ class IntelligenceRuntime:
     analysis: AnalysisService
     reports: DailyReportService
     alerts: AlertComposer
+    preferences: SqlAlchemyIntelligencePreferenceStore
+    default_profile: RiskProfile
     qa: QaService | None
     delivery: DeliveryWorker
 
@@ -2258,21 +2699,31 @@ def _build_intelligence(
     bindings: SqlAlchemyGroupBindingStore,
 ) -> IntelligenceRuntime:
     repository = SqlAlchemyIntelligenceRepository(database.session)
+    preferences = SqlAlchemyIntelligencePreferenceStore(database.session)
+    risk_policy = RiskPolicy()
+    default_profile = RiskProfile(settings.intelligence_risk_profile)
     analyzer = IntelligenceAnalyzer(llm)
     analysis = AnalysisService(
         repository,
         analyzer,
         EvidenceScorer(),
-        RiskPolicy(settings.intelligence_evidence_threshold),
+        risk_policy,
         concurrency=settings.intelligence_ai_concurrency,
         model_name=settings.deepseek_model,
     )
     report_service = DailyReportService(
         repository,
         DailyReportComposer(ZoneInfo(settings.intelligence_timezone)),
+        preferences,
         timezone=ZoneInfo(settings.intelligence_timezone),
+        default_profile=default_profile,
     )
-    alerts = AlertComposer(repository)
+    alerts = AlertComposer(
+        repository,
+        preferences,
+        risk_policy,
+        default_profile=default_profile,
+    )
     delivery = DeliveryWorker(
         repository,
         FeishuDeliveryPort(channel, FeishuMessageRenderer()),
@@ -2315,11 +2766,19 @@ def _build_intelligence(
         timezone=settings.intelligence_timezone,
     ) if any_enabled else None
     return IntelligenceRuntime(
-        scheduler, repository, analysis, report_service, alerts, qa, delivery
+        scheduler,
+        repository,
+        analysis,
+        report_service,
+        alerts,
+        preferences,
+        default_profile,
+        qa,
+        delivery,
     )
 ```
 
-Pass `runtime.qa` into `BotService` and `runtime.delivery` into `FeishuAdapter`. Start `intelligence_scheduler` immediately before the ingestion scheduler, and close it before the ingestion scheduler. Pass flags directly from `Settings`; never write them. Shutdown order is:
+Construct the channel before `_build_intelligence`, then pass `runtime.qa`, `runtime.preferences`, and `RiskProfile(settings.intelligence_risk_profile)` into `BotService`; pass `runtime.delivery` into `FeishuAdapter`. Start `intelligence_scheduler` immediately before the ingestion scheduler, and close it before the ingestion scheduler. Pass flags directly from `Settings`; never write them. Shutdown order is:
 
 ```text
 intelligence scheduler -> ingestion scheduler -> Feishu adapter tasks -> Feishu channel
@@ -2328,14 +2787,14 @@ intelligence scheduler -> ingestion scheduler -> Feishu adapter tasks -> Feishu 
 
 When all four flags are false, no intelligence job is registered, no model analysis is called, and existing help/status/bind/AI-test behavior is byte-for-byte unchanged.
 
-- [ ] **Step 6: Run runtime/routing tests and commit**
+- [ ] **Step 7: Run runtime/routing tests and commit**
 
 Run: `python -m pytest tests/unit/test_intelligence_scheduler.py tests/unit/test_runtime.py tests/unit/test_feishu.py tests/unit/test_application.py -v`
 
 Expected: PASS.
 
 ```powershell
-git add src/commerce_agent/intelligence/scheduler.py src/commerce_agent/application.py src/commerce_agent/integrations/feishu.py src/commerce_agent/runtime.py tests/unit/test_intelligence_scheduler.py tests/unit/test_runtime.py tests/unit/test_feishu.py tests/unit/test_application.py
+git add src/commerce_agent/intelligence/scheduler.py src/commerce_agent/domain.py src/commerce_agent/command_parser.py src/commerce_agent/application.py src/commerce_agent/integrations/feishu.py src/commerce_agent/runtime.py tests/unit/test_intelligence_scheduler.py tests/unit/test_runtime.py tests/unit/test_feishu.py tests/unit/test_application.py tests/unit/test_command_parser.py
 git commit -m "feat: wire intelligence jobs and grounded qa"
 ```
 
@@ -2350,7 +2809,7 @@ git commit -m "feat: wire intelligence jobs and grounded qa"
 
 **Interfaces:**
 - Consumes: completed repositories/services and existing settings/database assembly patterns from `ingestion_cli.py`.
-- Produces: safe manual commands, an offline full-chain test and exact staged rollout/rollback instructions.
+- Produces: safe manual commands, profile-visible health output, an offline full-chain test and exact staged rollout/rollback instructions.
 
 - [ ] **Step 1: Write failing CLI and full-pipeline tests**
 
@@ -2370,6 +2829,7 @@ async def test_report_send_requires_confirm(cli_app, output) -> None:
 
 async def test_offline_pipeline_from_article_to_alert_report_and_qa(tmp_path) -> None:
     app = await build_offline_pipeline(tmp_path)
+    await app.preferences.set("chat-one", RiskProfile.AGGRESSIVE, now=NOW)
     await app.ingest_fixture("official-fee-change.html")
     batch = await app.analysis.drain(limit=10)
     await app.alerts.queue_batch("chat-one", batch.completed, now=NOW)
@@ -2380,6 +2840,14 @@ async def test_offline_pipeline_from_article_to_alert_report_and_qa(tmp_path) ->
     assert report.selected_analysis_ids
     assert "[1]" in (await app.repository.outbox_payload(qa_outbox))["text"]
     assert app.fake_feishu.sent
+    assert any("激进" in json.dumps(message, ensure_ascii=False) for message in app.fake_feishu.sent)
+
+
+async def test_health_reports_profile_without_exposing_group_id(cli_app, output) -> None:
+    code = await run_cli(["health"], cli_app, output)
+    assert code == 0
+    assert "risk_profile=default" in output.getvalue()
+    assert "chat-one" not in output.getvalue()
 ```
 
 - [ ] **Step 2: Run tests and verify missing CLI/pipeline**
@@ -2401,7 +2869,7 @@ alerts preview --since-hours N
 health
 ```
 
-Exit codes are 0 success, 2 invalid arguments/target/confirmation, 3 runtime or partial failure. Output contains counts, ids, statuses and safe error codes only; it never prints article body, model prompts/output, binding code, chat id, API key or URL query strings.
+Exit codes are 0 success, 2 invalid arguments/target/confirmation, 3 runtime or partial failure. Output contains counts, ids, statuses, current risk profile and safe error codes only; it never prints article body, model prompts/output, binding code, chat id, API key or URL query strings. `health` resolves the active group preference with the configured default but prints only `risk_profile=conservative|default|aggressive`, never the group id.
 
 Implement the parser, injected application port and dispatcher as follows:
 
@@ -2557,7 +3025,12 @@ class ProductionCliApplication:
         )
 
     async def health(self) -> dict[str, int | str]:
-        return await self._runtime.repository.health_summary(now=self._clock())
+        summary = await self._runtime.repository.health_summary(now=self._clock())
+        group_id = await self._bindings.get_active_chat_id() or ""
+        profile = await self._runtime.preferences.get(
+            group_id, default=self._runtime.default_profile
+        )
+        return {**summary, "risk_profile": profile.value}
 
     async def aclose(self) -> None:
         await self._channel.disconnect()
@@ -2605,10 +3078,12 @@ Document these exact gates in `docs/operations/intelligence-delivery-runbook.md`
 2. Run `analyze --backfill --limit 1`, then `analyze --pending --limit 1`; verify one real article’s summary, risk, confidence, rationale, action and source manually.
 3. Run `report preview --date <date>`; verify 5–15/no-padding behavior and empty-coverage wording without sending.
 4. Run `report send --date <date> --confirm` to the current bound test group; verify one Outbox and one Feishu message.
-5. Use fixture/manual data to verify high red card, medium orange batch, 24-hour dedup, upgrade resend and citation links.
-6. Set only `INTELLIGENCE_QA_ENABLED=true`, restart, test same-thread follow-ups and refusal, then roll back to false if needed.
-7. Ask the user separately before enabling `INTELLIGENCE_ANALYSIS_ENABLED`, `INTELLIGENCE_DAILY_REPORT_ENABLED`, or `INTELLIGENCE_ALERTS_ENABLED`.
-8. Rollback is setting the affected flag false and restarting; queued rows remain auditable and can be marked skipped through a documented SQL-safe CLI action, never by deleting the database.
+5. In the bound test group run `策略 保守`, `策略 默认`, and `策略 激进`; verify exact threshold text, persistence after restart, and rejection from an unbound group.
+6. Use fixture/manual data to verify conservative high-only `>=85`, default medium/high `>=75`, aggressive medium/high `>=60`, orange early-signal labeling for 60–74, high red only at `>=75`, 24-hour dedup, upgrade resend and citation links.
+7. Verify conservative and aggressive-early payloads show only the fixed safe action sets; neither may expose unreviewed irreversible model actions.
+8. Set only `INTELLIGENCE_QA_ENABLED=true`, restart, test same-thread follow-ups and refusal, then roll back to false if needed.
+9. Ask the user separately before enabling `INTELLIGENCE_ANALYSIS_ENABLED`, `INTELLIGENCE_DAILY_REPORT_ENABLED`, or `INTELLIGENCE_ALERTS_ENABLED`.
+10. Rollback is setting the affected flag false and restarting; queued rows remain auditable and can be marked skipped through a documented SQL-safe CLI action, never by deleting the database.
 
 - [ ] **Step 5: Run complete verification**
 
@@ -2642,5 +3117,7 @@ git commit -m "docs: add intelligence operations and offline acceptance"
 
 - [ ] Map every acceptance criterion in the design spec to at least one named test above.
 - [ ] Confirm all four production flags remain false in `.env.example` and the user `.env` was never read, printed or edited.
+- [ ] Confirm all three risk profiles share the same analyzer/evidence/compliance path, and profile switching never appears in analyzer code.
+- [ ] Confirm aggressive 60–74 messages are orange, explicitly unverified, and contain only reversible preparation actions; conservative medium alerts never enter Outbox.
 - [ ] Confirm the real rollout stops after report preview/manual send until the user explicitly approves each automatic capability.
 - [ ] Run `superpowers:requesting-code-review`, resolve Critical and Important findings, then rerun the full verification commands.

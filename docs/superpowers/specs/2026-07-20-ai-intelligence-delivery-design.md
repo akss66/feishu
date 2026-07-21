@@ -264,6 +264,8 @@ class AnalysisResult(BaseModel):
 4. 今日建议；
 5. 数据覆盖说明与原文链接。
 
+日报标题显示当前群策略档位。保守档用固定“先核实再操作”建议替代未经人工复核的模型动作；激进档对 60–74 分内容只显示可逆准备动作，并继续标注“早期信号·待核实”。
+
 卡片明确区分“无已验证更新”和“该平台尚无合规启用来源”。卡片超长时保留 Top 15；仍超过飞书限制时退化为安全纯文本摘要与链接列表。
 
 日报幂等键为 `daily:{group_id}:{report_date}`。一天内同一群只能成功发送一次。
@@ -341,12 +343,13 @@ INTELLIGENCE_QA_ENABLED=false
 INTELLIGENCE_TIMEZONE=Asia/Shanghai
 INTELLIGENCE_DAILY_HOUR=9
 INTELLIGENCE_AI_CONCURRENCY=2
+INTELLIGENCE_EVIDENCE_THRESHOLD=75
 INTELLIGENCE_RISK_PROFILE=default
 INTELLIGENCE_CONTEXT_TTL_MINUTES=30
 INTELLIGENCE_QA_MAX_TURNS=6
 ```
 
-`INTELLIGENCE_RISK_PROFILE` 只定义尚未保存群级偏好时的初始值，允许值为 `conservative | default | aggressive`。群内命令修改后的值保存到独立的 `group_intelligence_preferences` 表，避免修改现有 `group_bindings` 表或用户 `.env`。修改其他 `.env` 配置后必须重启。实现和测试不得读取、显示或自动修改现有凭据值。
+`INTELLIGENCE_RISK_PROFILE` 只定义尚未保存群级偏好时的初始值，允许值为 `conservative | default | aggressive`。`INTELLIGENCE_EVIDENCE_THRESHOLD=75` 仅为兼容已经按旧规格创建的 `.env`，固定接受 75，不再参与三档策略计算。群内命令修改后的值保存到独立的 `group_intelligence_preferences` 表，避免修改现有 `group_bindings` 表或用户 `.env`。修改其他 `.env` 配置后必须重启。实现和测试不得读取、显示或自动修改现有凭据值。
 
 ## 14. 管理员与群内命令
 
