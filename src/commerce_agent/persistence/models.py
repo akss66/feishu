@@ -57,7 +57,7 @@ class GroupIntelligencePreference(Base):
 
     group_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     risk_profile: Mapped[str] = mapped_column(String(20), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 class Source(Base):

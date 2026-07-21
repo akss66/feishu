@@ -5,6 +5,7 @@ from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.intelligence_preferences import (
     SqlAlchemyIntelligencePreferenceStore,
 )
+from commerce_agent.persistence.models import GroupIntelligencePreference
 
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
 
@@ -37,6 +38,13 @@ async def test_group_profile_uses_default_then_persists_override_across_sessions
             await reopened_store.get("chat-two", default=RiskProfile.CONSERVATIVE)
             is RiskProfile.CONSERVATIVE
         )
+
+        async with database.session() as session:
+            stored = await session.get(GroupIntelligencePreference, "chat-one")
+
+        assert stored is not None
+        assert stored.updated_at.tzinfo is UTC
+        assert stored.updated_at == NOW
     finally:
         await database.dispose()
 
