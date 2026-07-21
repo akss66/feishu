@@ -6,6 +6,7 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from commerce_agent.intelligence.errors import EmptyModelOutput
 from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult
 
 
@@ -28,10 +29,6 @@ class InvalidModelOutput(RuntimeError):
     pass
 
 
-class EmptyModelOutput(RuntimeError):
-    """Safe, provider-independent signal for an empty structured response."""
-
-
 class EvidenceAnchorError(ValueError):
     pass
 
@@ -42,63 +39,117 @@ class GroundingError(ValueError):
         self.safe_code = safe_code
 
 
-_CONCRETE_AMOUNT_PATTERN = re.compile(
-    r"(?:"
-    r"\d+(?:[.,]\d+)?\s*[%％]"
-    r"|(?:US|AU|CA|HK|NZ|SG)\$\s*\d+(?:,\d{3})*(?:\.\d+)?"
-    r"|[$€£¥￥]\s*\d+(?:,\d{3})*(?:\.\d+)?"
-    r"|(?:USD|EUR|GBP|CNY|RMB|JPY|AUD|CAD|HKD)\s*\d+(?:,\d{3})*(?:\.\d+)?"
-    r"|\d+(?:,\d{3})*(?:\.\d+)?\s*"
-    r"(?:USD|EUR|GBP|CNY|RMB|JPY|AUD|CAD|HKD|(?:US\s+)?dollars?|euros?|pounds?"
-    r"|yuan|yen|美元|欧元|英镑|人民币|日元|元)"
-    r"|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
-    r"|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty"
-    r"|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)"
-    r"(?:[- ](?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven"
-    r"|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
-    r"|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand))*"
-    r"\s+(?:(?:US\s+)?dollars?|euros?|pounds?|yuan|yen)"
-    r"|[零一二三四五六七八九十百千万两]+(?:美元|欧元|英镑|人民币|日元|元)"
-    r")",
+_MIN_SUBSTANTIVE_QUOTE_CHARS = 6
+_CURRENCY_SYMBOLS = frozenset(
+    "$€£¥￥₩₹₽₺₫฿₴₦₱₪₡₲₵₸₭₮₼"
+)
+_CURRENCY_CODES = (
+    "AED",
+    "AUD",
+    "BRL",
+    "CAD",
+    "CHF",
+    "CNY",
+    "CZK",
+    "DKK",
+    "EUR",
+    "GBP",
+    "HKD",
+    "HUF",
+    "IDR",
+    "ILS",
+    "INR",
+    "JPY",
+    "KRW",
+    "KZT",
+    "MXN",
+    "MYR",
+    "NGN",
+    "NOK",
+    "NZD",
+    "PHP",
+    "PLN",
+    "RMB",
+    "RUB",
+    "SAR",
+    "SEK",
+    "SGD",
+    "THB",
+    "TRY",
+    "TWD",
+    "UAH",
+    "USD",
+    "VND",
+    "ZAR",
+)
+_CURRENCY_WORDS = (
+    "baht",
+    "bucks?",
+    "cents?",
+    "dollars?",
+    "dong",
+    "euros?",
+    "francs?",
+    "grand",
+    "hryvnia",
+    "naira",
+    "pence",
+    "pennies",
+    "pesos?",
+    "pounds?",
+    "quid",
+    "reais",
+    "renminbi",
+    "riyal",
+    "rubles?",
+    "rupees?",
+    "shekels?",
+    "sterling",
+    "tenge",
+    "won",
+    "yen",
+    "yuan",
+)
+_CURRENCY_UNITS_ZH = (
+    "人民币",
+    "美元",
+    "欧元",
+    "英镑",
+    "日元",
+    "韩元",
+    "卢布",
+    "卢比",
+    "加元",
+    "澳元",
+    "港元",
+    "新元",
+    "泰铢",
+    "越南盾",
+    "比索",
+    "法郎",
+    "里拉",
+    "元",
+)
+_CURRENCY_CODE_PATTERN = re.compile(
+    rf"(?<![A-Za-z])(?:{'|'.join(_CURRENCY_CODES)})(?![A-Za-z])",
     re.IGNORECASE,
 )
-_MIN_SUBSTANTIVE_QUOTE_CHARS = 6
-_CONTROLLED_REGIONS = frozenset(
-    {
-        "全球",
-        "美国",
-        "加拿大",
-        "墨西哥",
-        "欧盟",
-        "英国",
-        "德国",
-        "法国",
-        "意大利",
-        "西班牙",
-        "日本",
-        "韩国",
-        "澳大利亚",
-        "global",
-        "worldwide",
-        "us",
-        "usa",
-        "united states",
-        "canada",
-        "mexico",
-        "eu",
-        "european union",
-        "uk",
-        "united kingdom",
-        "germany",
-        "france",
-        "italy",
-        "spain",
-        "japan",
-        "south korea",
-        "australia",
-    }
+_CURRENCY_WORD_PATTERN = re.compile(
+    rf"\b(?:{'|'.join(_CURRENCY_WORDS)})\b",
+    re.IGNORECASE,
 )
-_SELLER_SCOPE_UNCERTAINTY_MARKERS = ("卖家", "适用对象", "范围", "seller", "scope")
+_PERCENTAGE_PATTERN = re.compile(
+    r"[%％]|\b(?:percent(?:age)?|basis points?|bps)\b|百分之|百分点",
+    re.IGNORECASE,
+)
+_SCOPE_UNKNOWN_ZH = ("卖家范围未知", "适用卖家范围未知", "适用对象未知", "卖家类型未知")
+_SCOPE_UNKNOWN_EN_PATTERN = re.compile(
+    r"\b(?:seller scope|affected seller types?|applicable sellers?)\b"
+    r".{0,20}\b(?:unknown|unclear|unspecified|not specified)\b"
+    r"|\b(?:unknown|unclear|unspecified)\b.{0,20}"
+    r"\b(?:seller scope|affected seller types?|applicable sellers?)\b",
+    re.IGNORECASE,
+)
 
 
 def candidate_payload(candidate: AnalysisCandidate) -> dict[str, object]:
@@ -137,18 +188,10 @@ def require_grounded_facts(result: AnalysisResult, candidate: AnalysisCandidate)
         raise GroundingError("platform_not_grounded")
 
     candidate_regions = set(candidate.regions)
-    evidence_quotes = tuple(claim.quote for claim in result.rationale)
-    if any(
-        not region.strip()
-        or (
-            region not in candidate_regions
-            and not _region_has_structured_evidence(region, evidence_quotes)
-        )
-        for region in result.regions
-    ):
+    if any(region not in candidate_regions for region in result.regions):
         raise GroundingError("region_not_grounded")
 
-    _require_grounded_seller_scope(result, evidence_quotes)
+    _require_unknown_seller_scope(result)
 
     if result.effective_at is not None:
         _require_grounded_effective_at(result.effective_at, candidate.body)
@@ -160,83 +203,35 @@ def require_grounded_facts(result: AnalysisResult, candidate: AnalysisCandidate)
         *(claim.claim for claim in result.rationale),
         *(item.action for item in result.action_items),
     )
-    concrete_amounts = {
-        match.group(0).strip()
+    if any(
+        _contains_amount_marker(text) and text not in candidate.body
         for text in factual_prose
-        for match in _CONCRETE_AMOUNT_PATTERN.finditer(text)
-    }
-    if any(amount not in candidate.body for amount in concrete_amounts):
+    ):
         raise GroundingError("amount_not_grounded")
 
 
-def _region_has_structured_evidence(region: str, evidence_quotes: tuple[str, ...]) -> bool:
-    normalized_region = region.casefold()
-    if normalized_region not in _CONTROLLED_REGIONS:
-        return False
-    escaped_region = re.escape(region)
-    structured_patterns = (
-        re.compile(
-            rf"(?:^|[\r\n])\s*(?:适用地区|地区|区域|region|market)"
-            rf"\s*[:：]\s*{escaped_region}"
-            rf"(?=$|[\s,，。;；])",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            rf"(?:^|[\r\n])\s*{escaped_region}站(?=$|[\s,，。;；])",
-            re.IGNORECASE,
-        ),
-    )
-    return any(
-        pattern.search(quote)
-        for quote in evidence_quotes
-        for pattern in structured_patterns
-    )
-
-
-def _require_grounded_seller_scope(
-    result: AnalysisResult, evidence_quotes: tuple[str, ...]
-) -> None:
-    if not result.affected_seller_types:
-        if not any(
-            marker in uncertainty.casefold()
-            for uncertainty in result.uncertainties
-            for marker in _SELLER_SCOPE_UNCERTAINTY_MARKERS
-        ):
-            raise GroundingError("seller_scope_uncertain")
-        return
-
-    if any(
-        not _seller_scope_has_structured_evidence(seller_type, evidence_quotes)
-        for seller_type in result.affected_seller_types
-    ):
+def _require_unknown_seller_scope(result: AnalysisResult) -> None:
+    if result.affected_seller_types:
         raise GroundingError("seller_scope_not_grounded")
+    if not any(_is_scope_unknown(uncertainty) for uncertainty in result.uncertainties):
+        raise GroundingError("seller_scope_uncertain")
 
 
-def _seller_scope_has_structured_evidence(
-    seller_type: str, evidence_quotes: tuple[str, ...]
-) -> bool:
-    normalized_type = seller_type.strip().casefold()
-    if not normalized_type:
-        return False
-    if normalized_type == "all":
-        all_scope_pattern = re.compile(
-            r"(?:^|[\r\n])\s*(?:适用卖家|卖家范围|affected sellers?|seller scope)"
-            r"\s*[:：]\s*(?:(?:所有|全部)卖家|all seller(?: account)?s?)"
-            r"(?=$|[\s,，。;；])",
-            re.IGNORECASE,
-        )
-        return any(
-            all_scope_pattern.search(quote)
-            for quote in evidence_quotes
-        )
-    escaped_type = re.escape(seller_type.strip())
-    scope_pattern = re.compile(
-        rf"(?:^|[\r\n])\s*(?:适用卖家|卖家类型|affected sellers?|seller scope)"
-        rf"\s*[:：]\s*{escaped_type}"
-        rf"(?=$|[\s,，。;；])",
-        re.IGNORECASE,
+def _is_scope_unknown(uncertainty: str) -> bool:
+    normalized = " ".join(uncertainty.split())
+    return any(marker in normalized for marker in _SCOPE_UNKNOWN_ZH) or bool(
+        _SCOPE_UNKNOWN_EN_PATTERN.search(normalized)
     )
-    return any(scope_pattern.search(quote) for quote in evidence_quotes)
+
+
+def _contains_amount_marker(text: str) -> bool:
+    return (
+        any(symbol in text for symbol in _CURRENCY_SYMBOLS)
+        or bool(_CURRENCY_CODE_PATTERN.search(text))
+        or bool(_CURRENCY_WORD_PATTERN.search(text))
+        or any(unit in text for unit in _CURRENCY_UNITS_ZH)
+        or bool(_PERCENTAGE_PATTERN.search(text))
+    )
 
 
 def _require_grounded_effective_at(effective_at: datetime, body: str) -> None:

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from commerce_agent.integrations.deepseek import DeepSeekGateway
-from commerce_agent.intelligence.analyzer import EmptyModelOutput
+from commerce_agent.intelligence.errors import EmptyModelOutput
 
 
 async def test_answer_test_calls_the_configured_model() -> None:

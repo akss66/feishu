@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from commerce_agent.intelligence.analyzer import EmptyModelOutput
+from commerce_agent.intelligence.errors import EmptyModelOutput
 
 
 class DeepSeekGateway:
