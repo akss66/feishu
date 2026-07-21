@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,7 +48,8 @@ class Settings(BaseSettings):
     intelligence_timezone: str = "Asia/Shanghai"
     intelligence_daily_hour: int = Field(default=9, ge=0, le=23)
     intelligence_ai_concurrency: int = Field(default=2, ge=1, le=8)
-    intelligence_evidence_threshold: int = Field(default=75, ge=0, le=100)
+    intelligence_evidence_threshold: Literal[75] = 75
+    intelligence_risk_profile: Literal["conservative", "default", "aggressive"] = "default"
     intelligence_context_ttl_minutes: int = Field(default=30, ge=1, le=1440)
     intelligence_qa_max_turns: int = Field(default=6, ge=1, le=20)
 

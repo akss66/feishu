@@ -27,6 +27,18 @@ class RiskLevel(StrEnum):
     HIGH = "high"
 
 
+class RiskProfile(StrEnum):
+    CONSERVATIVE = "conservative"
+    DEFAULT = "default"
+    AGGRESSIVE = "aggressive"
+
+
+class AlertQualification(StrEnum):
+    NONE = "none"
+    VERIFIED = "verified"
+    EARLY_SIGNAL = "early_signal"
+
+
 class MessageKind(StrEnum):
     DAILY_REPORT = "daily_report"
     MEDIUM_ALERT_BATCH = "medium_alert_batch"
@@ -86,11 +98,36 @@ class AnalysisCandidate:
 
 
 @dataclass(frozen=True, slots=True)
-class RiskDecision:
+class RiskResolution:
     risk_level: RiskLevel
     rule_hits: tuple[str, ...]
     needs_review: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RiskDecision:
+    resolution: RiskResolution
     eligible_for_alert: bool
+    profile: RiskProfile
+    alert_qualification: AlertQualification
+
+    @property
+    def risk_level(self) -> RiskLevel:
+        return self.resolution.risk_level
+
+    @property
+    def rule_hits(self) -> tuple[str, ...]:
+        return self.resolution.rule_hits
+
+    @property
+    def needs_review(self) -> bool:
+        return self.resolution.needs_review
+
+
+@dataclass(frozen=True, slots=True)
+class RiskProfileChange:
+    previous: RiskProfile
+    current: RiskProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +136,7 @@ class ScoredAnalysis:
     candidate: AnalysisCandidate
     result: AnalysisResult
     evidence_confidence: int
-    decision: RiskDecision
+    resolution: RiskResolution
     event_fingerprint: str
 
 

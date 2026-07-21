@@ -42,8 +42,31 @@ def test_intelligence_flags_are_safe_by_default(monkeypatch: pytest.MonkeyPatch)
     assert settings.intelligence_daily_hour == 9
     assert settings.intelligence_ai_concurrency == 2
     assert settings.intelligence_evidence_threshold == 75
+    assert settings.intelligence_risk_profile == "default"
     assert settings.intelligence_context_ttl_minutes == 30
     assert settings.intelligence_qa_max_turns == 6
+
+
+def test_settings_reject_unknown_intelligence_risk_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv("INTELLIGENCE_RISK_PROFILE", "unknown")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("invalid_threshold", ["0", "74", "76", "100"])
+def test_legacy_evidence_threshold_only_accepts_75(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_threshold: str,
+) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv("INTELLIGENCE_EVIDENCE_THRESHOLD", invalid_threshold)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 @pytest.mark.parametrize(

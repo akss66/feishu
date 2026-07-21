@@ -52,6 +52,14 @@ class GroupBinding(Base):
     )
 
 
+class GroupIntelligencePreference(Base):
+    __tablename__ = "group_intelligence_preferences"
+
+    group_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    risk_profile: Mapped[str] = mapped_column(String(20), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Source(Base):
     __tablename__ = "sources"
 
