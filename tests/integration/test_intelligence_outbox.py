@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from commerce_agent.ingestion.models import (
     CollectorKind,
@@ -149,6 +151,38 @@ async def _queue_raw(repository: SqlAlchemyIntelligenceRepository) -> int:
         dedup_hours=24,
     )
     return ids[0]
+
+
+def _requeue_key(base_key: str, terminal_id: int) -> str:
+    digest = hashlib.sha256(base_key.encode("utf-8")).hexdigest()
+    return f"alert-requeue:{digest}:r{terminal_id}"
+
+
+async def _make_terminal(
+    repository: SqlAlchemyIntelligenceRepository,
+    outbox_id: int,
+    status: str,
+    *,
+    now: datetime,
+) -> datetime:
+    if status == "skipped":
+        claim = await repository.claim_delivery_by_id(outbox_id, now=now)
+        assert claim is not None
+        await repository.skip_delivery(claim, "no_active_binding")
+        return now
+
+    attempt_at = now
+    for delay in (
+        timedelta(minutes=1),
+        timedelta(minutes=5),
+        timedelta(minutes=30),
+        timedelta(0),
+    ):
+        claim = await repository.claim_delivery_by_id(outbox_id, now=attempt_at)
+        assert claim is not None
+        await repository.fail_delivery(claim, "transport_error", now=attempt_at)
+        attempt_at += delay
+    return attempt_at
 
 
 async def test_same_event_is_suppressed_for_rolling_24_hours_but_upgrade_is_allowed(
@@ -457,7 +491,7 @@ async def test_no_active_binding_skip_can_queue_same_event_again(tmp_path) -> No
         assert old.idempotency_key == old_key
         assert new.status == "pending"
         assert new.payload == old_payload
-        assert new.idempotency_key == f"{old_key}:r{old_id}"
+        assert new.idempotency_key == _requeue_key(old_key, old_id)
     finally:
         await database.dispose()
 
@@ -494,7 +528,111 @@ async def test_terminal_failure_can_queue_same_event_again(tmp_path) -> None:
         assert new.status == "pending"
         assert new.attempt_count == 0
         assert new.payload == old_payload
-        assert new.idempotency_key == f"{old_key}:r{old_id}"
+        assert new.idempotency_key == _requeue_key(old_key, old_id)
+    finally:
+        await database.dispose()
+
+
+async def test_overlong_base_key_supports_multiple_terminal_requeues(tmp_path) -> None:
+    database, repository, _, _ = await _services(tmp_path, "long-key-requeues.db")
+    base_key = f"alert:{'long-segment-' * 30}"
+    payload = {
+        "title": "中风险预警汇总",
+        "theme": "orange",
+        "items": [
+            {
+                "event_fingerprint": "long-key-event",
+                "risk_level": "medium",
+                "document_version_id": 1,
+                "content_hash": "a" * 64,
+            }
+        ],
+    }
+    message = DeliveryMessage(
+        idempotency_key=base_key,
+        group_id="chat-one",
+        kind=MessageKind.MEDIUM_ALERT_BATCH,
+        payload=payload,
+    )
+    try:
+        (first_id,) = await repository.queue_alerts(
+            (message,), now=NOW, dedup_hours=24
+        )
+        await _make_terminal(repository, first_id, "skipped", now=NOW)
+        (second_id,) = await repository.queue_alerts(
+            (message,), now=NOW + timedelta(hours=1), dedup_hours=24
+        )
+        await _make_terminal(
+            repository, second_id, "skipped", now=NOW + timedelta(hours=1)
+        )
+
+        (third_id,) = await repository.queue_alerts(
+            (message,), now=NOW + timedelta(hours=2), dedup_hours=24
+        )
+
+        first, second, third = await repository.list_outbox(
+            (first_id, second_id, third_id)
+        )
+        assert [first.status, second.status, third.status] == [
+            "skipped",
+            "skipped",
+            "pending",
+        ]
+        assert first.idempotency_key == base_key
+        assert second.idempotency_key == _requeue_key(base_key, first_id)
+        assert third.idempotency_key == _requeue_key(base_key, second_id)
+        assert first.payload == second.payload == third.payload == payload
+        assert len(second.idempotency_key) <= 256
+        assert len(third.idempotency_key) <= 256
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.parametrize("terminal_status", ["skipped", "failed"])
+async def test_concurrent_terminal_requeue_creates_one_pending_attempt(
+    tmp_path, terminal_status: str
+) -> None:
+    database, repository, preferences, composer = await _services(
+        tmp_path, f"concurrent-{terminal_status}.db"
+    )
+    competing_repository = SqlAlchemyIntelligenceRepository(database.session)
+    competing_composer = AlertComposer(
+        competing_repository, preferences, RiskPolicy()
+    )
+    item = _analysis(1)
+    try:
+        (terminal_id,) = await composer.queue_batch("chat-one", (item,), now=NOW)
+        terminal_time = await _make_terminal(
+            repository, terminal_id, terminal_status, now=NOW
+        )
+        terminal = (await repository.list_outbox((terminal_id,)))[0]
+
+        first, second = await asyncio.gather(
+            composer.queue_batch(
+                "chat-one", (item,), now=terminal_time + timedelta(hours=1)
+            ),
+            competing_composer.queue_batch(
+                "chat-one", (item,), now=terminal_time + timedelta(hours=1)
+            ),
+        )
+
+        new_ids = first + second
+        assert len(new_ids) == 1
+        async with database.session() as session:
+            rows = (
+                await session.scalars(
+                    select(DeliveryOutbox).order_by(DeliveryOutbox.id)
+                )
+            ).all()
+        assert len(rows) == 2
+        assert rows[0].id == terminal_id
+        assert rows[0].status == terminal_status
+        assert rows[0].payload == terminal.payload
+        assert rows[1].id == new_ids[0]
+        assert rows[1].status == "pending"
+        assert rows[1].idempotency_key == _requeue_key(
+            terminal.idempotency_key, terminal_id
+        )
     finally:
         await database.dispose()
 

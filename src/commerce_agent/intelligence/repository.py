@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
@@ -514,7 +515,7 @@ class SqlAlchemyIntelligenceRepository:
                 queued_message = replace(
                     queued_message,
                     idempotency_key=await _next_alert_idempotency_key(
-                        session, queued_message.idempotency_key
+                        session, queued_message
                     ),
                 )
                 inserted_id = (
@@ -986,32 +987,61 @@ def _with_alert_items(
 
 
 async def _next_alert_idempotency_key(
-    session: AsyncSession, base_key: str
+    session: AsyncSession, message: DeliveryMessage
 ) -> str:
-    lineage = list(
+    terminal_rows = list(
         (
-            await session.execute(
-                select(DeliveryOutbox.id, DeliveryOutbox.idempotency_key)
+            await session.scalars(
+                select(DeliveryOutbox)
                 .where(
-                    or_(
-                        DeliveryOutbox.idempotency_key == base_key,
-                        DeliveryOutbox.idempotency_key.startswith(
-                            f"{base_key}:r", autoescape=True
-                        ),
-                    )
+                    DeliveryOutbox.group_id == message.group_id,
+                    DeliveryOutbox.message_kind == message.kind.value,
+                    DeliveryOutbox.status.in_({"skipped", "failed"}),
                 )
-                .order_by(DeliveryOutbox.id)
+                .order_by(DeliveryOutbox.id.desc())
             )
         ).all()
     )
-    if not lineage:
-        return base_key
-    latest_id = lineage[-1].id
-    versioned = f"{base_key}:r{latest_id}"
-    if len(versioned) <= 256:
-        return versioned
-    digest = hashlib.sha256(base_key.encode("utf-8")).hexdigest()
-    return f"alert-requeue:{digest}:r{latest_id}"
+    identity = _alert_message_identity(message.payload)
+    terminal = next(
+        (
+            row
+            for row in terminal_rows
+            if _alert_message_identity(row.payload) == identity
+        ),
+        None,
+    )
+    if terminal is None:
+        return message.idempotency_key
+    digest = hashlib.sha256(message.idempotency_key.encode("utf-8")).hexdigest()
+    return f"alert-requeue:{digest}:r{terminal.id}"
+
+
+def _alert_message_identity(payload: dict[str, object]) -> str:
+    items = _payload_items(payload)
+    if items:
+        identity: object = sorted(
+            (
+                {
+                    "event_fingerprint": item.get("event_fingerprint"),
+                    "risk_level": item.get("risk_level"),
+                    "document_version_id": item.get("document_version_id"),
+                    "content_hash": item.get("content_hash"),
+                }
+                for item in items
+            ),
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
+    else:
+        identity = payload
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _delivery_claim(row: DeliveryOutbox) -> DeliveryClaim:
