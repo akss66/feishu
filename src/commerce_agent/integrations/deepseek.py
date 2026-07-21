@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 
@@ -18,6 +19,25 @@ class DeepSeekGateway:
                     ),
                 },
                 {"role": "user", "content": prompt},
+            ],
+            stream=False,
+        )
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise RuntimeError("DeepSeek returned an empty response")
+        return content.strip()
+
+    async def complete_json(self, system_prompt: str, user_payload: dict[str, object]) -> str:
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        user_payload, ensure_ascii=False, separators=(",", ":")
+                    ),
+                },
             ],
             stream=False,
         )
