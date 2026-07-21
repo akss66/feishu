@@ -293,7 +293,18 @@ def semantic_to_text(payload: dict[str, object]) -> str:
 class FeishuMessageRenderer:
     def render(self, claim: DeliveryClaim) -> dict[str, object]:
         if claim.kind is MessageKind.QA_ANSWER:
-            return claim.payload
+            if set(claim.payload) != {"text"}:
+                raise DeliverySendError("format_error")
+            text = claim.payload["text"]
+            if not isinstance(text, str):
+                raise DeliverySendError("format_error")
+            try:
+                encoded = text.encode("utf-8")
+            except UnicodeEncodeError:
+                raise DeliverySendError("format_error") from None
+            if len(encoded) > TEXT_UTF8_LIMIT:
+                raise DeliverySendError("format_error")
+            return {"text": text}
         card = semantic_to_card(claim.payload, kind=claim.kind)
         encoded = json.dumps(card, ensure_ascii=False).encode("utf-8")
         if len(encoded) <= CARD_UTF8_LIMIT:

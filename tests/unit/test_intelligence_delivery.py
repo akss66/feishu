@@ -2,10 +2,12 @@ import json
 import logging
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import commerce_agent
 from commerce_agent.intelligence.delivery import (
     DeliverySendError,
     DeliveryWorker,
@@ -16,6 +18,13 @@ from commerce_agent.intelligence.delivery import (
 from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
 
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
+
+
+def test_pytest_imports_commerce_agent_from_current_worktree() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    expected = (repository_root / "src" / "commerce_agent" / "__init__.py").resolve()
+
+    assert Path(commerce_agent.__file__).resolve() == expected
 
 
 def _alert_item(
@@ -261,11 +270,53 @@ def test_text_fallback_never_truncates_an_alert_before_its_source_link() -> None
     assert rendered["text"].count("**平台规则更新") == rendered["text"].count("原文：[平台公告")
 
 
-def test_qa_answer_payload_is_forwarded_without_card_conversion() -> None:
+def test_qa_answer_is_validated_as_plain_text_without_card_conversion() -> None:
     payload = {"text": "有据回答\n原文：https://example.com/evidence"}
     claim = _claim(kind=MessageKind.QA_ANSWER, payload=payload)
 
-    assert FeishuMessageRenderer().render(claim) is payload
+    rendered = FeishuMessageRenderer().render(claim)
+
+    assert rendered == payload
+    assert rendered is not payload
+
+
+def test_qa_answer_accepts_text_at_utf8_limit() -> None:
+    text = f"{'界' * 6666}aa"
+    assert len(text.encode("utf-8")) == 20_000
+
+    rendered = FeishuMessageRenderer().render(
+        _claim(kind=MessageKind.QA_ANSWER, payload={"text": text})
+    )
+
+    assert rendered == {"text": text}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"card": {}},
+        {"text": "回答", "card": {}},
+        {"text": {"nested": "回答"}},
+        {"text": 123},
+        {"text": "x" * 20_001},
+        {"text": "界" * 6667},
+    ],
+)
+async def test_qa_answer_rejects_non_text_or_oversized_payload_as_format_error(
+    payload: dict[str, object],
+) -> None:
+    claim = replace(
+        _claim(kind=MessageKind.QA_ANSWER, payload={"text": "valid"}),
+        payload=payload,
+    )
+    channel = FakeChannel()
+
+    with pytest.raises(DeliverySendError) as raised:
+        await FeishuDeliveryPort(channel, FeishuMessageRenderer()).send(claim)
+
+    assert raised.value.code == "format_error"
+    assert channel.sent == []
 
 
 class FakeChannel:

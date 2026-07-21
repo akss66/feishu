@@ -3,8 +3,16 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from lark_channel import FeishuChannelErrorCode, SendResult
+from lark_channel.channel._coerce import coerce_outbound, coerce_send_opts
+from lark_channel.channel.errors import SendError
+from lark_channel.channel.types import OutboundText, SendOpts
 
-from commerce_agent.integrations.feishu import FeishuAdapter, FeishuDeliveryPort
+from commerce_agent.integrations.feishu import (
+    DeliverySendError,
+    FeishuAdapter,
+    FeishuDeliveryPort,
+)
 from commerce_agent.intelligence.delivery import FeishuMessageRenderer
 from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
 
@@ -236,3 +244,75 @@ async def test_delivery_port_is_available_from_feishu_integration() -> None:
     message_id = await FeishuDeliveryPort(channel, FeishuMessageRenderer()).send(claim)
 
     assert message_id == "om_delivery"
+
+
+async def test_delivery_port_accepts_real_sdk_send_result_and_send_options() -> None:
+    class SdkContractChannel(FakeChannel):
+        async def send(self, chat_id, content, options) -> SendResult:
+            self.sent.append((chat_id, content, options))
+            return SendResult.ok(message_id="om_sdk")
+
+    channel = SdkContractChannel()
+    claim = DeliveryClaim(
+        id=1,
+        idempotency_key="delivery-sdk-one",
+        group_id="chat-one",
+        kind=MessageKind.QA_ANSWER,
+        payload={"text": "有据回答"},
+        reply_to_message_id="om_parent",
+        reply_in_thread=True,
+        attempt_count=1,
+        lease_token="lease-one",
+    )
+
+    message_id = await FeishuDeliveryPort(channel, FeishuMessageRenderer()).send(claim)
+    sdk_message = coerce_outbound(channel.sent[0][1])
+    sdk_options = coerce_send_opts(channel.sent[0][2])
+
+    assert message_id == "om_sdk"
+    assert isinstance(sdk_message, OutboundText)
+    assert sdk_message.text == "有据回答"
+    assert isinstance(sdk_options, SendOpts)
+    assert sdk_options.reply_to == "om_parent"
+    assert sdk_options.reply_in_thread is True
+    assert sdk_options.uuid == "delivery-sdk-one"
+
+
+async def test_delivery_port_reduces_real_sdk_send_error_without_logging_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailedSdkChannel(FakeChannel):
+        async def send(self, chat_id, content, options) -> SendResult:
+            self.sent.append((chat_id, content, options))
+            error = SendError(
+                code=FeishuChannelErrorCode.RATE_LIMITED,
+                retryable=True,
+                hint="secret sdk hint",
+                raw_code=999_999,
+            )
+            return SendResult.fail(error, raw={"token": "secret sdk token"})
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(DeliverySendError) as raised:
+        await FeishuDeliveryPort(FailedSdkChannel(), FeishuMessageRenderer()).send(
+            DeliveryClaim(
+                id=1,
+                idempotency_key="delivery-sdk-failure",
+                group_id="chat-sensitive",
+                kind=MessageKind.QA_ANSWER,
+                payload={"text": "sensitive answer"},
+                reply_to_message_id=None,
+                reply_in_thread=False,
+                attempt_count=1,
+                lease_token="lease-one",
+            )
+        )
+
+    assert raised.value.code == "rate_limited"
+    for forbidden in (
+        "secret sdk hint",
+        "secret sdk token",
+        "chat-sensitive",
+        "sensitive answer",
+        "999999",
+    ):
+        assert forbidden not in caplog.text
