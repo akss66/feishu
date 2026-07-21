@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult, RiskLevel
-from commerce_agent.intelligence.risk import event_fingerprint
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
@@ -146,20 +145,53 @@ class SqlAlchemyIntelligenceRepository:
             await session.flush()
             return analysis.id
 
-    async def count_corroborating_sources(self, result: AnalysisResult) -> int:
-        fingerprint = event_fingerprint(result, subject=result.headline_zh)
+    async def count_corroborating_sources(
+        self,
+        fingerprint: str,
+        claim: AnalysisCandidate,
+        *,
+        batch_claims: tuple[AnalysisCandidate, ...] = (),
+    ) -> int:
+        candidate_version_ids = {
+            candidate.document_version_id for candidate in (claim, *batch_claims)
+        }
         async with self._session_factory() as session:
-            count = await session.scalar(
-                select(func.count(func.distinct(Document.source_id)))
-                .select_from(DocumentAnalysis)
-                .join(
-                    DocumentVersion,
-                    DocumentVersion.id == DocumentAnalysis.document_version_id,
+            persisted_source_ids = set(
+                await session.scalars(
+                    select(func.distinct(Document.source_id))
+                    .select_from(DocumentAnalysis)
+                    .join(
+                        DocumentVersion,
+                        DocumentVersion.id == DocumentAnalysis.document_version_id,
+                    )
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .join(Source, Source.id == Document.source_id)
+                    .join(
+                        AnalysisJob,
+                        AnalysisJob.document_version_id == DocumentVersion.id,
+                    )
+                    .where(
+                        DocumentAnalysis.event_fingerprint == fingerprint,
+                        Document.current_version_id == DocumentVersion.id,
+                        Source.compliance == "allowed",
+                        AnalysisJob.status == "completed",
+                    )
                 )
-                .join(Document, Document.id == DocumentVersion.document_id)
-                .where(DocumentAnalysis.event_fingerprint == fingerprint)
             )
-        return int(count or 0)
+            batch_source_ids = set(
+                await session.scalars(
+                    select(func.distinct(Document.source_id))
+                    .select_from(DocumentVersion)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .join(Source, Source.id == Document.source_id)
+                    .where(
+                        DocumentVersion.id.in_(candidate_version_ids),
+                        Document.current_version_id == DocumentVersion.id,
+                        Source.compliance == "allowed",
+                    )
+                )
+            )
+        return len(persisted_source_ids | batch_source_ids)
 
     async def list_analyses(self) -> list[DocumentAnalysis]:
         async with self._session_factory() as session:

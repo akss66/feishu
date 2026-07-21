@@ -15,6 +15,7 @@ from commerce_agent.ingestion.models import (
     SourceDefinition,
     TrustTier,
 )
+from commerce_agent.intelligence.evidence import EvidenceScorer
 from commerce_agent.intelligence.models import (
     ActionItem,
     AnalysisResult,
@@ -26,7 +27,8 @@ from commerce_agent.intelligence.repository import (
     SqlAlchemyIntelligenceRepository,
     StaleLeaseError,
 )
-from commerce_agent.intelligence.risk import event_fingerprint
+from commerce_agent.intelligence.risk import RiskPolicy, event_fingerprint
+from commerce_agent.intelligence.service import AnalysisService
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.ingestion import (
     PersistableDocument,
@@ -38,11 +40,13 @@ NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
 
 
 def _source(
-    *, compliance: ComplianceStatus = ComplianceStatus.ALLOWED
+    *,
+    source_id: str = "amazon-news",
+    compliance: ComplianceStatus = ComplianceStatus.ALLOWED,
 ) -> SourceDefinition:
     return SourceDefinition(
-        source_id="amazon-news",
-        name="Amazon Seller News",
+        source_id=source_id,
+        name=f"Seller News {source_id}",
         entry_url="https://example.com/news",
         platforms=(Platform.AMAZON, Platform.EBAY),
         trust_tier=TrustTier.OFFICIAL,
@@ -61,13 +65,17 @@ def _source(
 
 
 def _candidate(
-    *, content_hash: str, canonical_url: str = "https://example.com/news/fee-update"
+    *,
+    content_hash: str,
+    canonical_url: str = "https://example.com/news/fee-update",
+    source_id: str = "amazon-news",
+    body: str = "Amazon changed a seller fee.",
 ) -> PersistableDocument:
     return PersistableDocument(
-        source_id="amazon-news",
+        source_id=source_id,
         canonical_url=canonical_url,
         title="Fee update",
-        body="Amazon changed a seller fee.",
+        body=body,
         language="en",
         language_confidence=0.99,
         content_hash=content_hash,
@@ -296,7 +304,164 @@ async def test_complete_analysis_indexes_resolved_risk_but_preserves_model_paylo
         assert len(rows) == 1
         assert rows[0].risk_level == RiskLevel.HIGH.value
         assert rows[0].structured_payload["risk_level"] == RiskLevel.LOW.value
-        assert await repository.count_corroborating_sources(result) == 1
+        assert (
+            await repository.count_corroborating_sources(
+                event_fingerprint(result, subject=result.headline_zh),
+                claim,
+            )
+            == 1
+        )
+    finally:
+        await database.dispose()
+
+
+class _StaticAnalyzer:
+    def __init__(self, result: AnalysisResult) -> None:
+        self._result = result
+
+    async def analyze(self, candidate) -> AnalysisResult:
+        del candidate
+        return self._result
+
+
+async def test_drain_scores_two_batch_sources_as_corroborating(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'two-sources.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    body = "fees will change on 2026-07-22. " + "Policy detail. " * 35
+    try:
+        await ingestion.sync_sources(
+            [_source(source_id="source-one"), _source(source_id="source-two")]
+        )
+        await ingestion.persist_version(
+            _candidate(
+                source_id="source-one",
+                content_hash="1" * 64,
+                canonical_url="https://example.com/source-one",
+                body=body,
+            )
+        )
+        await ingestion.persist_version(
+            _candidate(
+                source_id="source-two",
+                content_hash="2" * 64,
+                canonical_url="https://example.com/source-two",
+                body=body,
+            )
+        )
+
+        batch = await AnalysisService(
+            repository,
+            _StaticAnalyzer(_valid_result()),
+            EvidenceScorer(),
+            RiskPolicy(),
+            concurrency=2,
+            model_name="test-model",
+            clock=lambda: NOW,
+        ).drain(limit=2)
+
+        assert batch.succeeded == 2
+        assert [item.evidence_confidence for item in batch.completed] == [100, 100]
+    finally:
+        await database.dispose()
+
+
+async def test_same_source_batch_rows_do_not_add_corroboration_points(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'same-source.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    body = "fees will change on 2026-07-22. " + "Policy detail. " * 35
+    try:
+        await ingestion.sync_sources([_source(source_id="only-source")])
+        for index in (1, 2):
+            await ingestion.persist_version(
+                _candidate(
+                    source_id="only-source",
+                    content_hash=str(index) * 64,
+                    canonical_url=f"https://example.com/only-source/{index}",
+                    body=body,
+                )
+            )
+
+        batch = await AnalysisService(
+            repository,
+            _StaticAnalyzer(_valid_result()),
+            EvidenceScorer(),
+            RiskPolicy(),
+            concurrency=2,
+            model_name="test-model",
+            clock=lambda: NOW,
+        ).drain(limit=2)
+
+        assert batch.succeeded == 2
+        assert [item.evidence_confidence for item in batch.completed] == [90, 90]
+    finally:
+        await database.dispose()
+
+
+async def test_superseded_analysis_is_excluded_from_corroborating_sources(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'superseded.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    try:
+        await ingestion.sync_sources(
+            [_source(source_id="old-source"), _source(source_id="current-source")]
+        )
+        await ingestion.persist_version(
+            _candidate(
+                source_id="old-source",
+                content_hash="a" * 64,
+                canonical_url="https://example.com/old-source",
+            )
+        )
+        old_claim = await repository.claim_next(now=NOW)
+        assert old_claim is not None
+        result = _valid_result()
+        fingerprint = event_fingerprint(result, subject=result.headline_zh)
+        await repository.complete_analysis(
+            old_claim,
+            result,
+            90,
+            fingerprint,
+            now=NOW,
+            model_name="test-model",
+        )
+
+        await ingestion.persist_version(
+            _candidate(
+                source_id="old-source",
+                content_hash="b" * 64,
+                canonical_url="https://example.com/old-source",
+            )
+        )
+        await ingestion.persist_version(
+            _candidate(
+                source_id="current-source",
+                content_hash="c" * 64,
+                canonical_url="https://example.com/current-source",
+            )
+        )
+        pending_claims = [
+            await repository.claim_next(now=NOW),
+            await repository.claim_next(now=NOW),
+        ]
+        current_claim = next(
+            claim
+            for claim in pending_claims
+            if claim is not None and claim.source_id == "current-source"
+        )
+
+        count = await repository.count_corroborating_sources(
+            fingerprint,
+            current_claim,
+        )
+
+        assert count == 1
     finally:
         await database.dispose()
 

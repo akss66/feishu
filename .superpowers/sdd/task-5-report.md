@@ -35,3 +35,37 @@ Focused result: `27 passed`.
 The local Python installation has a fixed path entry for the parent checkout, so
 pytest was launched with the task worktree's `src` inserted first in `sys.path`.
 No network calls or environment-file reads were used.
+
+## Important review correction: corroborating source counting
+
+The review found that source corroboration was counted before the current analysis
+was inserted. A second source therefore observed only one persisted source and lost
+the 10-point multi-source component. Historical analyses for superseded document
+versions were also not excluded.
+
+The correction changes drain to two deterministic phases:
+
+1. Analyze each bounded claim and compute its event fingerprint.
+2. Group successful batch claims by fingerprint, then score and persist them.
+
+For each score, the repository unions distinct sources from the successful persisted
+corpus with distinct current batch sources. Persisted rows count only when their job
+is completed, their source remains `allowed`, and their version is the document's
+current version. Batch claims are checked against the same current-version and
+compliance rules, and repeated documents from one source still count once.
+
+Review-fix TDD evidence:
+
+- RED: 7 expected failures, including the two-source service path scoring 90 instead
+  of 100 and the old repository signature rejecting fingerprint/claim context.
+- Focused GREEN: 31 passed.
+- Real SQLite coverage proves two current sources receive the +10 component, two
+  same-source rows do not, and a superseded matching analysis is excluded.
+
+Review-fix final verification:
+
+- Full pytest: `432 passed, 1 skipped` with the same 5 existing third-party
+  `pkg_resources` warnings.
+- Ruff: `All checks passed!`
+- Compileall: exit code 0.
+- `git diff --check`: exit code 0 with only Windows LF-to-CRLF warnings.

@@ -11,7 +11,11 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from commerce_agent.intelligence.analyzer import IntelligenceAnalyzer, InvalidModelOutput
 from commerce_agent.intelligence.evidence import EvidenceScorer
-from commerce_agent.intelligence.models import AnalysisCandidate, ScoredAnalysis
+from commerce_agent.intelligence.models import (
+    AnalysisCandidate,
+    AnalysisResult,
+    ScoredAnalysis,
+)
 from commerce_agent.intelligence.repository import (
     SqlAlchemyIntelligenceRepository,
     StaleLeaseError,
@@ -28,6 +32,13 @@ class AnalysisBatch:
     failed: int
     completed: tuple[ScoredAnalysis, ...]
     error_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Analyzed:
+    claim: AnalysisCandidate
+    result: AnalysisResult
+    fingerprint: str
 
 
 def controlled_analysis_error(error: Exception) -> str:
@@ -75,57 +86,91 @@ class AnalysisService:
 
         semaphore = asyncio.Semaphore(self._concurrency)
 
-        async def analyze_one(claim: AnalysisCandidate) -> ScoredAnalysis | str:
+        async def handle_failure(
+            claim: AnalysisCandidate,
+            error: Exception,
+            started_at: float,
+        ) -> str:
+            code = controlled_analysis_error(error)
+            _log_analysis_failure(error, claim.job_id, started_at)
+            if code == "stale_lease":
+                return code
+            try:
+                await self._repository.fail_analysis(
+                    claim,
+                    code,
+                    now=self._clock(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as failure_error:
+                _log_analysis_failure(failure_error, claim.job_id, started_at)
+                return controlled_analysis_error(failure_error)
+            return code
+
+        async def analyze_one(claim: AnalysisCandidate) -> _Analyzed | str:
             async with semaphore:
                 started_at = monotonic()
                 try:
                     result = await self._analyzer.analyze(claim)
-                    corroborating = await self._repository.count_corroborating_sources(result)
+                    fingerprint = event_fingerprint(result, subject=result.headline_zh)
+                    return _Analyzed(claim, result, fingerprint)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    return await handle_failure(claim, error, started_at)
+
+        analyzed_results = await asyncio.gather(*(analyze_one(claim) for claim in claims))
+        grouped_claims: dict[str, list[AnalysisCandidate]] = {}
+        for item in analyzed_results:
+            if isinstance(item, _Analyzed):
+                grouped_claims.setdefault(item.fingerprint, []).append(item.claim)
+
+        async def score_one(item: _Analyzed) -> ScoredAnalysis | str:
+            async with semaphore:
+                started_at = monotonic()
+                try:
+                    corroborating = await self._repository.count_corroborating_sources(
+                        item.fingerprint,
+                        item.claim,
+                        batch_claims=tuple(grouped_claims[item.fingerprint]),
+                    )
                     score = self._evidence.score(
-                        claim,
-                        result,
+                        item.claim,
+                        item.result,
                         corroborating_sources=corroborating,
                     )
-                    resolution = self._risk.resolve(result)
-                    fingerprint = event_fingerprint(result, subject=result.headline_zh)
+                    resolution = self._risk.resolve(item.result)
                     analysis_id = await self._repository.complete_analysis(
-                        claim,
-                        result,
+                        item.claim,
+                        item.result,
                         score,
-                        fingerprint,
+                        item.fingerprint,
                         risk_level=resolution.risk_level,
                         now=self._clock(),
                         model_name=self._model_name,
                     )
                     return ScoredAnalysis(
                         analysis_id,
-                        claim,
-                        result,
+                        item.claim,
+                        item.result,
                         score,
                         resolution,
-                        fingerprint,
+                        item.fingerprint,
                     )
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    code = controlled_analysis_error(error)
-                    _log_analysis_failure(error, claim.job_id, started_at)
-                    if code == "stale_lease":
-                        return code
-                    try:
-                        await self._repository.fail_analysis(
-                            claim,
-                            code,
-                            now=self._clock(),
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as failure_error:
-                        _log_analysis_failure(failure_error, claim.job_id, started_at)
-                        return controlled_analysis_error(failure_error)
-                    return code
+                    return await handle_failure(item.claim, error, started_at)
 
-        results = await asyncio.gather(*(analyze_one(claim) for claim in claims))
+        scored_results = await asyncio.gather(
+            *(score_one(item) for item in analyzed_results if isinstance(item, _Analyzed))
+        )
+        scored = iter(scored_results)
+        results = tuple(
+            next(scored) if isinstance(item, _Analyzed) else item
+            for item in analyzed_results
+        )
         completed = tuple(item for item in results if isinstance(item, ScoredAnalysis))
         errors = tuple(item for item in results if isinstance(item, str))
         return AnalysisBatch(

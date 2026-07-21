@@ -92,9 +92,15 @@ class FakeRepository:
         del now
         return self.claims.pop(0) if self.claims else None
 
-    async def count_corroborating_sources(self, result: AnalysisResult) -> int:
-        del result
-        return 1
+    async def count_corroborating_sources(
+        self,
+        fingerprint: str,
+        claim: AnalysisCandidate,
+        *,
+        batch_claims: tuple[AnalysisCandidate, ...] = (),
+    ) -> int:
+        del fingerprint
+        return len({item.source_id for item in (claim, *batch_claims)})
 
     async def complete_analysis(
         self,
@@ -236,6 +242,14 @@ async def test_analysis_uses_resolved_floor_without_overwriting_model_result() -
     assert repository.completed[0][3] is RiskLevel.HIGH
     assert repository.completed[0][1].risk_level is RiskLevel.LOW
     assert not hasattr(batch.completed[0].resolution, "profile")
+
+
+async def test_same_fingerprint_batch_sources_receive_cross_source_evidence_points() -> None:
+    repository = FakeRepository([_candidate(1), _candidate(2)])
+
+    batch = await _service(repository, StaticAnalyzer(_result())).drain(limit=2)
+
+    assert [item.evidence_confidence for item in batch.completed] == [100, 100]
 
 
 @pytest.mark.parametrize(
