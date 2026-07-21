@@ -35,11 +35,20 @@ class SqlAlchemyIntelligenceRepository:
         due = or_(
             AnalysisJob.status == "pending",
             (AnalysisJob.status == "retry_wait") & (AnalysisJob.next_attempt_at <= now),
-            (AnalysisJob.status == "running") & (AnalysisJob.lease_expires_at <= now),
+            (AnalysisJob.status == "running")
+            & (AnalysisJob.lease_expires_at <= now)
+            & (AnalysisJob.attempt_count < 2),
         )
         next_job_id = (
             select(AnalysisJob.id)
+            .join(
+                DocumentVersion,
+                DocumentVersion.id == AnalysisJob.document_version_id,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
             .where(due)
+            .where(Source.compliance == "allowed")
             .order_by(AnalysisJob.created_at, AnalysisJob.id)
             .limit(1)
             .scalar_subquery()
@@ -60,6 +69,22 @@ class SqlAlchemyIntelligenceRepository:
         )
 
         async with self._session_factory.begin() as session:
+            await session.execute(
+                update(AnalysisJob)
+                .where(
+                    AnalysisJob.status == "running",
+                    AnalysisJob.lease_expires_at <= now,
+                    AnalysisJob.attempt_count >= 2,
+                )
+                .values(
+                    status="failed",
+                    next_attempt_at=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    error_code="lease_expired",
+                    updated_at=now,
+                )
+            )
             job_id = (await session.execute(claim)).scalar_one_or_none()
             if job_id is None:
                 return None

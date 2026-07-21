@@ -127,3 +127,89 @@ All checks passed!
 - The full suite is green but not warning-free because the existing Feishu SDK emits
   five `pkg_resources` deprecation warnings. No task-owned code can remove those
   warnings without an out-of-scope dependency change.
+
+## Reviewer fixes
+
+The review findings were verified against the committed implementation. The atomic
+selector did not inspect current source compliance, and an expired running job at
+`attempt_count == 2` could be reclaimed and incremented to a third attempt. The stale
+failure guard and completion transaction rollback were already present, so those two
+findings required real-database regression coverage rather than production changes.
+
+### RED evidence
+
+Four integration tests were added before changing production code: denied-source
+filtering, terminalization of an expired second lease, stale old-token failure, and
+rollback when the unique `DocumentAnalysis` insert fails.
+
+```powershell
+python -c "import sys,pytest; sys.path.insert(0, r'C:\Users\AKSSINA\Desktop\feishu\.worktrees\ai-intelligence-delivery\src'); raise SystemExit(pytest.main(['tests/integration/test_intelligence_repository.py','-v']))"
+```
+
+```text
+collected 10 items
+tests\integration\test_intelligence_repository.py .F.F......             [100%]
+FAILED tests/integration/test_intelligence_repository.py::test_claim_skips_jobs_from_denied_sources
+E AssertionError: assert AnalysisCandidate(...) is None
+FAILED tests/integration/test_intelligence_repository.py::test_expired_second_lease_is_failed_without_a_third_claim
+E AssertionError: assert AnalysisCandidate(...) is None
+========================= 2 failed, 8 passed in 1.24s =========================
+```
+
+The two passing regression tests in this RED run established that stale
+`fail_analysis` already raises without mutating the fresh lease, and a forced analysis
+insert integrity error already rolls back the guarded completed/token transition.
+
+### GREEN evidence
+
+The atomic scalar subquery now joins through `DocumentVersion` and `Document` to
+`Source` and filters `Source.compliance == 'allowed'`. In the same SQLite write
+transaction, exhausted expired running jobs are atomically changed to `failed` with
+`error_code='lease_expired'` before the bounded `UPDATE ... RETURNING` claim runs;
+expired running jobs are reclaimable only while `attempt_count < 2`.
+
+Focused command (same as RED):
+
+```text
+collected 10 items
+tests\integration\test_intelligence_repository.py ..........             [100%]
+============================= 10 passed in 1.05s ==============================
+```
+
+Covering integration command:
+
+```powershell
+python -c "import sys,pytest; sys.path.insert(0, r'C:\Users\AKSSINA\Desktop\feishu\.worktrees\ai-intelligence-delivery\src'); raise SystemExit(pytest.main(['tests/integration/test_intelligence_repository.py','tests/integration/test_ingestion_repository.py','tests/integration/test_ingestion_pipeline.py','-v']))"
+```
+
+```text
+collected 24 items
+tests\integration\test_intelligence_repository.py ..........             [ 41%]
+tests\integration\test_ingestion_repository.py .........                 [ 79%]
+tests\integration\test_ingestion_pipeline.py .....                       [100%]
+============================= 24 passed in 2.74s ==============================
+```
+
+Static verification:
+
+```powershell
+python -m ruff check src/commerce_agent/intelligence/repository.py tests/integration/test_intelligence_repository.py
+git diff --check
+```
+
+```text
+All checks passed!
+```
+
+Final full-suite command:
+
+```powershell
+python -c "import sys,pytest; sys.path.insert(0, r'C:\Users\AKSSINA\Desktop\feishu\.worktrees\ai-intelligence-delivery\src'); raise SystemExit(pytest.main([]))"
+```
+
+```text
+343 passed, 1 skipped, 5 warnings in 7.76s
+```
+
+The five warnings remain the same out-of-scope third-party `lark_channel` /
+`pkg_resources` deprecations documented above.

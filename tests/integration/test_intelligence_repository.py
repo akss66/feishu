@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from commerce_agent.ingestion.models import (
     CollectorKind,
@@ -35,7 +36,9 @@ from commerce_agent.persistence.models import AnalysisJob, DocumentAnalysis, Doc
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
 
 
-def _source() -> SourceDefinition:
+def _source(
+    *, compliance: ComplianceStatus = ComplianceStatus.ALLOWED
+) -> SourceDefinition:
     return SourceDefinition(
         source_id="amazon-news",
         name="Amazon Seller News",
@@ -43,7 +46,7 @@ def _source() -> SourceDefinition:
         platforms=(Platform.AMAZON, Platform.EBAY),
         trust_tier=TrustTier.OFFICIAL,
         collector=CollectorKind.RSS,
-        compliance=ComplianceStatus.ALLOWED,
+        compliance=compliance,
         enabled=True,
         regions=("global",),
         language_hint="en",
@@ -122,6 +125,36 @@ async def test_two_workers_cannot_claim_the_same_analysis_job(tmp_path) -> None:
         await database.dispose()
 
 
+async def test_claim_skips_jobs_from_denied_sources(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'denied-source.db'}")
+    await database.create_schema()
+    ingestion_repository = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    try:
+        await ingestion_repository.sync_sources(
+            [_source(compliance=ComplianceStatus.DENIED)]
+        )
+        outcome = await ingestion_repository.persist_version(
+            _candidate(content_hash="d" * 64)
+        )
+
+        assert await repository.claim_next(now=NOW) is None
+
+        async with database.session() as session:
+            job = await session.scalar(
+                select(AnalysisJob).where(
+                    AnalysisJob.document_version_id == outcome.version_id
+                )
+            )
+
+        assert job is not None
+        assert job.status == "pending"
+        assert job.attempt_count == 0
+        assert job.lease_token is None
+    finally:
+        await database.dispose()
+
+
 async def test_stale_worker_cannot_complete_reclaimed_lease(tmp_path) -> None:
     database, _, repository = await _repositories(tmp_path)
     try:
@@ -139,6 +172,59 @@ async def test_stale_worker_cannot_complete_reclaimed_lease(tmp_path) -> None:
                 now=NOW + timedelta(seconds=3),
                 model_name="test-model",
             )
+    finally:
+        await database.dispose()
+
+
+async def test_expired_second_lease_is_failed_without_a_third_claim(tmp_path) -> None:
+    database, _, repository = await _repositories(tmp_path)
+    try:
+        first = await repository.claim_next(now=NOW, lease_seconds=1)
+        assert first is not None
+        second = await repository.claim_next(
+            now=NOW + timedelta(seconds=2), lease_seconds=1
+        )
+        assert second is not None
+
+        third = await repository.claim_next(now=NOW + timedelta(seconds=4))
+
+        async with database.session() as session:
+            job = await session.get(AnalysisJob, first.job_id)
+
+        assert third is None
+        assert job is not None
+        assert job.status == "failed"
+        assert job.attempt_count == 2
+        assert job.error_code == "lease_expired"
+        assert job.lease_token is None
+        assert job.lease_expires_at is None
+    finally:
+        await database.dispose()
+
+
+async def test_stale_worker_cannot_fail_reclaimed_lease(tmp_path) -> None:
+    database, _, repository = await _repositories(tmp_path)
+    try:
+        old = await repository.claim_next(now=NOW, lease_seconds=1)
+        assert old is not None
+        fresh = await repository.claim_next(
+            now=NOW + timedelta(seconds=2), lease_seconds=60
+        )
+        assert fresh is not None
+
+        with pytest.raises(StaleLeaseError):
+            await repository.fail_analysis(
+                old, "stale_worker_failure", now=NOW + timedelta(seconds=3)
+            )
+
+        async with database.session() as session:
+            job = await session.get(AnalysisJob, old.job_id)
+
+        assert job is not None
+        assert job.status == "running"
+        assert job.attempt_count == 2
+        assert job.lease_token == fresh.lease_token
+        assert job.error_code is None
     finally:
         await database.dispose()
 
@@ -177,6 +263,51 @@ async def test_complete_analysis_persists_payload_after_guarded_transition(tmp_p
             "3",
             "test-model",
         )
+    finally:
+        await database.dispose()
+
+
+async def test_analysis_insert_failure_rolls_back_completed_job_transition(tmp_path) -> None:
+    database, _, repository = await _repositories(tmp_path)
+    try:
+        claim = await repository.claim_next(now=NOW)
+        assert claim is not None
+        result = _valid_result()
+        async with database.session.begin() as session:
+            session.add(
+                DocumentAnalysis(
+                    document_version_id=claim.document_version_id,
+                    schema_version="existing",
+                    prompt_version="existing",
+                    model_name="existing-model",
+                    headline_zh=result.headline_zh,
+                    summary_zh=result.summary_zh,
+                    event_type=result.event_type.value,
+                    risk_level=result.risk_level.value,
+                    evidence_confidence=50,
+                    event_fingerprint="existing-event",
+                    structured_payload=result.model_dump(mode="json"),
+                    analyzed_at=NOW,
+                )
+            )
+
+        with pytest.raises(IntegrityError):
+            await repository.complete_analysis(
+                claim,
+                result,
+                90,
+                "duplicate-analysis",
+                now=NOW + timedelta(seconds=1),
+                model_name="test-model",
+            )
+
+        async with database.session() as session:
+            job = await session.get(AnalysisJob, claim.job_id)
+
+        assert job is not None
+        assert job.status == "running"
+        assert job.lease_token == claim.lease_token
+        assert job.lease_expires_at == NOW + timedelta(minutes=5)
     finally:
         await database.dispose()
 
