@@ -23,6 +23,10 @@ from commerce_agent.intelligence.models import (
     EvidenceClaim,
     RiskLevel,
 )
+from commerce_agent.intelligence.reports import (
+    DailyReportComposer,
+    ReportAlreadySent,
+)
 from commerce_agent.intelligence.repository import (
     SqlAlchemyIntelligenceRepository,
     StaleLeaseError,
@@ -34,7 +38,13 @@ from commerce_agent.persistence.ingestion import (
     PersistableDocument,
     SqlAlchemyIngestionRepository,
 )
-from commerce_agent.persistence.models import AnalysisJob, DocumentAnalysis, DocumentVersion
+from commerce_agent.persistence.models import (
+    AnalysisJob,
+    DailyReport,
+    DeliveryOutbox,
+    DocumentAnalysis,
+    DocumentVersion,
+)
 
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
 
@@ -556,6 +566,198 @@ async def test_lease_transitions_reject_claim_without_token(tmp_path) -> None:
                 now=NOW,
                 model_name="test-model",
             )
+    finally:
+        await database.dispose()
+
+
+async def test_report_query_uses_current_allowed_versions_and_exact_window(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'report-query.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    start = datetime(2026, 7, 20, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 21, 1, tzinfo=UTC)
+    try:
+        await ingestion.sync_sources(
+            [
+                _source(source_id="allowed"),
+                _source(source_id="denied", compliance=ComplianceStatus.DENIED),
+            ]
+        )
+
+        async def add_analysis(
+            source_id: str,
+            url: str,
+            fetched_at: datetime,
+            confidence: int,
+            fingerprint: str,
+        ) -> int:
+            outcome = await ingestion.persist_version(
+                replace(
+                    _candidate(
+                        source_id=source_id,
+                        content_hash=fingerprint[0] * 64,
+                        canonical_url=url,
+                    ),
+                    fetched_at=fetched_at,
+                )
+            )
+            async with database.session.begin() as session:
+                analysis = DocumentAnalysis(
+                    document_version_id=outcome.version_id,
+                    schema_version="1",
+                    prompt_version="1",
+                    model_name="test-model",
+                    headline_zh=_valid_result().headline_zh,
+                    summary_zh=_valid_result().summary_zh,
+                    event_type=_valid_result().event_type.value,
+                    risk_level=_valid_result().risk_level.value,
+                    evidence_confidence=confidence,
+                    event_fingerprint=fingerprint,
+                    structured_payload=_valid_result().model_dump(mode="json"),
+                    analyzed_at=NOW,
+                )
+                session.add(analysis)
+                await session.flush()
+                return analysis.id
+
+        expected_id = await add_analysis("allowed", "https://example.com/start", start, 60, "a")
+        await add_analysis("allowed", "https://example.com/end", end, 90, "b")
+        await add_analysis(
+            "denied", "https://example.com/denied", start + timedelta(hours=1), 90, "c"
+        )
+        await add_analysis(
+            "allowed", "https://example.com/low", start + timedelta(hours=2), 59, "d"
+        )
+        old_id = await add_analysis(
+            "allowed", "https://example.com/current", start + timedelta(hours=3), 90, "e"
+        )
+        await ingestion.persist_version(
+            replace(
+                _candidate(
+                    source_id="allowed",
+                    content_hash="f" * 64,
+                    canonical_url="https://example.com/current",
+                ),
+                fetched_at=end + timedelta(hours=1),
+            )
+        )
+
+        rows = await repository.list_report_analyses(window_start=start, window_end=end)
+
+        assert [row.analysis_id for row in rows] == [expected_id]
+        assert old_id not in {row.analysis_id for row in rows}
+        assert rows[0].candidate.fetched_at == start
+    finally:
+        await database.dispose()
+
+
+async def test_coverage_lists_every_platform_and_counts_enabled_verified_sources(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'coverage.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    start = datetime(2026, 7, 20, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 21, 1, tzinfo=UTC)
+    try:
+        await ingestion.sync_sources([_source(source_id="enabled")])
+        outcome = await ingestion.persist_version(
+            replace(
+                _candidate(source_id="enabled", content_hash="7" * 64),
+                fetched_at=start,
+            )
+        )
+        async with database.session.begin() as session:
+            session.add(
+                DocumentAnalysis(
+                    document_version_id=outcome.version_id,
+                    schema_version="1",
+                    prompt_version="1",
+                    model_name="test-model",
+                    headline_zh=_valid_result().headline_zh,
+                    summary_zh=_valid_result().summary_zh,
+                    event_type=_valid_result().event_type.value,
+                    risk_level=_valid_result().risk_level.value,
+                    evidence_confidence=75,
+                    event_fingerprint="coverage-event",
+                    structured_payload=_valid_result().model_dump(mode="json"),
+                    analyzed_at=NOW,
+                )
+            )
+
+        rows = await repository.list_coverage(window_start=start, window_end=end)
+        by_platform = {row.platform: row for row in rows}
+
+        assert set(by_platform) == set(Platform)
+        assert by_platform[Platform.EBAY].enabled_source_count == 1
+        assert by_platform[Platform.EBAY].verified_update_count == 1
+        assert by_platform[Platform.TEMU].enabled_source_count == 0
+        assert by_platform[Platform.TEMU].verified_update_count == 0
+    finally:
+        await database.dispose()
+
+
+async def test_report_preview_and_queue_transitions_are_idempotent(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'report-save.db'}")
+    await database.create_schema()
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    now = datetime(2026, 7, 21, 1, 5, tzinfo=UTC)
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=())
+    try:
+        report_id = await repository.save_report("chat-one", draft, now=now)
+        assert await repository.save_report("chat-one", draft, now=now) == report_id
+
+        await repository.mark_report_previewed(report_id)
+        await repository.mark_report_previewed(report_id)
+        first_outbox_id = await repository.queue_report(report_id, now=now)
+        second_outbox_id = await repository.queue_report(report_id, now=now)
+
+        async with database.session() as session:
+            report = await session.get(DailyReport, report_id)
+            outbox_rows = (
+                await session.scalars(select(DeliveryOutbox).order_by(DeliveryOutbox.id))
+            ).all()
+
+        assert first_outbox_id == second_outbox_id
+        assert report is not None and report.status == "queued"
+        assert len(outbox_rows) == 1
+        assert outbox_rows[0].idempotency_key == "daily:chat-one:2026-07-21"
+        assert outbox_rows[0].payload == draft.payload
+
+        changed = replace(draft, payload={"changed": True})
+        with pytest.raises(RuntimeError, match="already queued"):
+            await repository.save_report("chat-one", changed, now=now)
+    finally:
+        await database.dispose()
+
+
+async def test_sent_report_cannot_be_overwritten(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'sent-report.db'}")
+    await database.create_schema()
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    now = datetime(2026, 7, 21, 1, 5, tzinfo=UTC)
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=())
+    try:
+        report_id = await repository.save_report("chat-one", draft, now=now)
+        async with database.session.begin() as session:
+            report = await session.get(DailyReport, report_id)
+            assert report is not None
+            report.status = "sent"
+            report.sent_at = now
+
+        changed = replace(draft, payload={"changed": True})
+        with pytest.raises(ReportAlreadySent):
+            await repository.save_report("chat-one", changed, now=now)
+        with pytest.raises(ReportAlreadySent):
+            await repository.queue_report(report_id, now=now)
+
+        async with database.session() as session:
+            stored = await session.get(DailyReport, report_id)
+
+        assert stored is not None
+        assert stored.report_payload == draft.payload
     finally:
         await database.dispose()
 

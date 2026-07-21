@@ -1,0 +1,266 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from commerce_agent.ingestion.models import Platform, TrustTier
+from commerce_agent.intelligence.models import (
+    ActionItem,
+    AnalysisCandidate,
+    AnalysisResult,
+    EventType,
+    EvidenceClaim,
+    RiskLevel,
+    RiskProfile,
+    RiskResolution,
+    ScoredAnalysis,
+)
+from commerce_agent.intelligence.reports import (
+    CoverageRow,
+    DailyReportComposer,
+    DailyReportService,
+    report_window,
+)
+
+
+def _analysis(
+    analysis_id: int,
+    *,
+    fingerprint: str | None = None,
+    confidence: int = 90,
+    risk: RiskLevel = RiskLevel.MEDIUM,
+    trust_tier: TrustTier = TrustTier.MEDIA,
+    fetched_at: datetime | None = None,
+    model_action: str | None = None,
+) -> ScoredAnalysis:
+    action = model_action or f"模型建议 {analysis_id}"
+    candidate = AnalysisCandidate(
+        job_id=analysis_id,
+        lease_token=None,
+        document_version_id=analysis_id,
+        source_id=f"source-{analysis_id}",
+        source_name=f"来源 {analysis_id}",
+        trust_tier=trust_tier,
+        canonical_url=f"https://example.com/{analysis_id}",
+        content_hash=str(analysis_id).zfill(64),
+        title=f"Source title {analysis_id}",
+        body="Source body",
+        language="en",
+        language_confidence=0.99,
+        author=None,
+        published_at=None,
+        fetched_at=fetched_at or datetime(2026, 7, 20, 12, tzinfo=UTC),
+        platforms=(Platform.EBAY,),
+        regions=("global",),
+    )
+    result = AnalysisResult(
+        headline_zh=f"eBay 政策更新 {analysis_id}",
+        summary_zh=(
+            f"eBay 发布政策更新 {analysis_id}，卖家需要核对适用站点、商品类别、生效日期与账户范围，"
+            "重新评估对定价、库存和运营流程的影响，并在采取业务动作前核实官方原文，"
+            "同时将结论同步给负责人持续跟进。"
+        ),
+        event_type=EventType.FEES,
+        platforms=(Platform.EBAY,),
+        regions=("global",),
+        affected_seller_types=("all",),
+        effective_at=None,
+        risk_level=risk,
+        impact=f"影响 {analysis_id}",
+        rationale=(EvidenceClaim(claim="政策发生变化", quote="policy changed"),),
+        action_items=(ActionItem(action=action, owner_type="运营"),),
+        uncertainties=(),
+        tags=("政策",),
+    )
+    return ScoredAnalysis(
+        analysis_id=analysis_id,
+        candidate=candidate,
+        result=result,
+        evidence_confidence=confidence,
+        resolution=RiskResolution(risk_level=risk, rule_hits=(), needs_review=False),
+        event_fingerprint=fingerprint or f"event-{analysis_id}",
+    )
+
+
+def test_report_window_is_previous_0900_inclusive_to_current_0900_exclusive() -> None:
+    start, end = report_window(date(2026, 7, 21), ZoneInfo("Asia/Shanghai"))
+
+    assert start == datetime(2026, 7, 20, 1, tzinfo=UTC)
+    assert end == datetime(2026, 7, 21, 1, tzinfo=UTC)
+
+
+def test_report_selects_at_most_15_unique_events_and_does_not_pad() -> None:
+    composer = DailyReportComposer()
+    three = tuple(_analysis(index) for index in range(1, 4))
+
+    short_draft = composer.compose(report_date=date(2026, 7, 21), analyses=three)
+    long_draft = composer.compose(
+        report_date=date(2026, 7, 21),
+        analyses=tuple(_analysis(index) for index in range(1, 17)),
+    )
+
+    assert len(short_draft.selected_analysis_ids) == 3
+    assert len(long_draft.selected_analysis_ids) == 15
+    assert short_draft.payload["sections"][0]["title"] == "AI 今日提炼"
+
+
+def test_report_prefers_official_source_for_same_event() -> None:
+    media = _analysis(
+        1,
+        fingerprint="same-event",
+        confidence=99,
+        risk=RiskLevel.HIGH,
+        trust_tier=TrustTier.MEDIA,
+    )
+    official = _analysis(
+        2,
+        fingerprint="same-event",
+        confidence=60,
+        risk=RiskLevel.LOW,
+        trust_tier=TrustTier.OFFICIAL,
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21), analyses=(media, official)
+    )
+
+    assert draft.selected_analysis_ids == (official.analysis_id,)
+
+
+def test_report_ranks_by_risk_then_confidence_then_recency() -> None:
+    older = datetime(2026, 7, 20, 10, tzinfo=UTC)
+    newer = older + timedelta(hours=1)
+    analyses = (
+        _analysis(1, risk=RiskLevel.LOW, confidence=99, fetched_at=newer),
+        _analysis(2, risk=RiskLevel.HIGH, confidence=60, fetched_at=older),
+        _analysis(3, risk=RiskLevel.MEDIUM, confidence=80, fetched_at=older),
+        _analysis(4, risk=RiskLevel.MEDIUM, confidence=80, fetched_at=newer),
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21), analyses=analyses
+    )
+
+    assert draft.selected_analysis_ids == (2, 4, 3, 1)
+
+
+def test_report_uses_official_source_before_recency_for_tied_events() -> None:
+    older = datetime(2026, 7, 20, 10, tzinfo=UTC)
+    newer = older + timedelta(hours=1)
+    official = _analysis(1, trust_tier=TrustTier.OFFICIAL, fetched_at=older)
+    media = _analysis(2, trust_tier=TrustTier.MEDIA, fetched_at=newer)
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21), analyses=(media, official)
+    )
+
+    assert draft.selected_analysis_ids == (official.analysis_id, media.analysis_id)
+
+
+def test_empty_day_builds_health_report_with_platform_source_coverage() -> None:
+    coverage = (
+        CoverageRow(Platform.EBAY, enabled_source_count=1, verified_update_count=0),
+        CoverageRow(Platform.TEMU, enabled_source_count=0, verified_update_count=0),
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21), analyses=(), coverage=coverage
+    )
+    encoded = json.dumps(draft.payload, ensure_ascii=False)
+
+    assert draft.selected_analysis_ids == ()
+    assert "ebay：无已验证更新" in encoded
+    assert "temu：该平台尚无合规启用来源" in encoded
+
+
+def test_conservative_daily_hides_unreviewed_model_actions() -> None:
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(_analysis(1, model_action="立即下架全部商品"),),
+        profile=RiskProfile.CONSERVATIVE,
+    )
+    encoded = json.dumps(draft.payload, ensure_ascii=False)
+
+    assert "策略：保守" in draft.payload["title"]
+    assert draft.payload["risk_profile"] == "conservative"
+    assert "人工复核原文和适用范围后再决定业务变更" in encoded
+    assert "立即下架全部商品" not in encoded
+
+
+def test_aggressive_pending_item_is_labeled_and_uses_only_reversible_action() -> None:
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(
+            _analysis(1, confidence=70, model_action="立即删除全部列表"),
+        ),
+        profile=RiskProfile.AGGRESSIVE,
+    )
+    encoded = json.dumps(draft.payload, ensure_ascii=False)
+
+    assert "策略：激进" in draft.payload["title"]
+    assert "早期信号·待核实" in encoded
+    assert "准备影响清单，不执行不可逆操作" in encoded
+    assert "立即删除全部列表" not in encoded
+
+
+def test_default_profile_keeps_verified_model_action() -> None:
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(_analysis(1, model_action="复核成本表"),),
+    )
+
+    assert "复核成本表" in json.dumps(draft.payload, ensure_ascii=False)
+
+
+class _RepositorySpy:
+    def __init__(self, analyses: tuple[ScoredAnalysis, ...], coverage: tuple[CoverageRow, ...]):
+        self.analyses = analyses
+        self.coverage = coverage
+        self.saved: tuple[str, object, datetime] | None = None
+        self.previewed: int | None = None
+
+    async def list_report_analyses(self, *, window_start, window_end):
+        self.window = (window_start, window_end)
+        return self.analyses
+
+    async def list_coverage(self, *, window_start, window_end):
+        assert (window_start, window_end) == self.window
+        return self.coverage
+
+    async def save_report(self, group_id, draft, *, now):
+        self.saved = (group_id, draft, now)
+        return 41
+
+    async def mark_report_previewed(self, report_id):
+        self.previewed = report_id
+
+
+class _PreferenceSpy:
+    def __init__(self, profile: RiskProfile):
+        self.profile = profile
+        self.request: tuple[str, RiskProfile] | None = None
+
+    async def get(self, group_id: str, *, default: RiskProfile) -> RiskProfile:
+        self.request = (group_id, default)
+        return self.profile
+
+
+async def test_preview_loads_current_group_profile_and_persists_that_payload() -> None:
+    repository = _RepositorySpy((_analysis(1),), ())
+    preferences = _PreferenceSpy(RiskProfile.CONSERVATIVE)
+    now = datetime(2026, 7, 21, 1, 5, tzinfo=UTC)
+    service = DailyReportService(
+        repository,
+        DailyReportComposer(),
+        preferences,
+        timezone=ZoneInfo("Asia/Shanghai"),
+        clock=lambda: now,
+    )
+
+    draft = await service.preview("chat-one", date(2026, 7, 21))
+
+    assert preferences.request == ("chat-one", RiskProfile.DEFAULT)
+    assert draft.payload["risk_profile"] == "conservative"
+    assert repository.saved == ("chat-one", draft, now)
+    assert repository.previewed == 41
