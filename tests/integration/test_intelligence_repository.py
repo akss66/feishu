@@ -26,6 +26,7 @@ from commerce_agent.intelligence.repository import (
     SqlAlchemyIntelligenceRepository,
     StaleLeaseError,
 )
+from commerce_agent.intelligence.risk import event_fingerprint
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.ingestion import (
     PersistableDocument,
@@ -263,6 +264,39 @@ async def test_complete_analysis_persists_payload_after_guarded_transition(tmp_p
             "3",
             "test-model",
         )
+    finally:
+        await database.dispose()
+
+
+async def test_complete_analysis_indexes_resolved_risk_but_preserves_model_payload(
+    tmp_path,
+) -> None:
+    database, _, repository = await _repositories(tmp_path)
+    try:
+        claim = await repository.claim_next(now=NOW)
+        assert claim is not None
+        result = _valid_result().model_copy(
+            update={
+                "event_type": EventType.ACCOUNT_ENFORCEMENT,
+                "risk_level": RiskLevel.LOW,
+            }
+        )
+
+        await repository.complete_analysis(
+            claim,
+            result,
+            90,
+            event_fingerprint(result, subject=result.headline_zh),
+            risk_level=RiskLevel.HIGH,
+            now=NOW,
+            model_name="test-model",
+        )
+
+        rows = await repository.list_analyses()
+        assert len(rows) == 1
+        assert rows[0].risk_level == RiskLevel.HIGH.value
+        assert rows[0].structured_payload["risk_level"] == RiskLevel.LOW.value
+        assert await repository.count_corroborating_sources(result) == 1
     finally:
         await database.dispose()
 

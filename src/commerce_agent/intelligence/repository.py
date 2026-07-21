@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import case, exists, literal, or_, select, update
+from sqlalchemy import case, exists, func, literal, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from commerce_agent.ingestion.models import Platform, TrustTier
-from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult
+from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult, RiskLevel
+from commerce_agent.intelligence.risk import event_fingerprint
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
@@ -97,6 +98,7 @@ class SqlAlchemyIntelligenceRepository:
         evidence_confidence: int,
         event_fingerprint: str,
         *,
+        risk_level: RiskLevel | None = None,
         now: datetime,
         model_name: str,
         schema_version: str = "1",
@@ -134,7 +136,7 @@ class SqlAlchemyIntelligenceRepository:
                 headline_zh=result.headline_zh,
                 summary_zh=result.summary_zh,
                 event_type=result.event_type.value,
-                risk_level=result.risk_level.value,
+                risk_level=(risk_level or result.risk_level).value,
                 evidence_confidence=evidence_confidence,
                 event_fingerprint=event_fingerprint,
                 structured_payload=result.model_dump(mode="json"),
@@ -143,6 +145,31 @@ class SqlAlchemyIntelligenceRepository:
             session.add(analysis)
             await session.flush()
             return analysis.id
+
+    async def count_corroborating_sources(self, result: AnalysisResult) -> int:
+        fingerprint = event_fingerprint(result, subject=result.headline_zh)
+        async with self._session_factory() as session:
+            count = await session.scalar(
+                select(func.count(func.distinct(Document.source_id)))
+                .select_from(DocumentAnalysis)
+                .join(
+                    DocumentVersion,
+                    DocumentVersion.id == DocumentAnalysis.document_version_id,
+                )
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(DocumentAnalysis.event_fingerprint == fingerprint)
+            )
+        return int(count or 0)
+
+    async def list_analyses(self) -> list[DocumentAnalysis]:
+        async with self._session_factory() as session:
+            return list(
+                (
+                    await session.scalars(
+                        select(DocumentAnalysis).order_by(DocumentAnalysis.id)
+                    )
+                ).all()
+            )
 
     async def fail_analysis(
         self, claim: AnalysisCandidate, error_code: str, *, now: datetime
