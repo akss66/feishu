@@ -58,6 +58,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "network_retry_exhausted",
         "path_outside_root",
         "port_not_allowed",
+        "rate_limited",
         "redirect_missing_location",
         "redirect_status_not_supported",
         "renderer_failed",
@@ -161,6 +162,20 @@ class IngestionService:
         source_id: str,
         trigger: Trigger = Trigger.MANUAL,
     ) -> RunSummary:
+        return await self._execute_source(source_id, trigger, probe=False)
+
+    async def probe_source(self, source_id: str) -> RunSummary:
+        """Probe a reviewed source once without persisting an enabled state."""
+
+        return await self._execute_source(source_id, Trigger.MANUAL, probe=True)
+
+    async def _execute_source(
+        self,
+        source_id: str,
+        trigger: Trigger,
+        *,
+        probe: bool,
+    ) -> RunSummary:
         source = self._registry.require(source_id)
         await self._ensure_sources_synced()
         started_at = self._clock()
@@ -198,7 +213,13 @@ class IngestionService:
             )
             metrics = FetchMetrics()
             try:
-                summary = await self._run_started(source, trigger, started_at, metrics)
+                summary = await self._run_started(
+                    source,
+                    trigger,
+                    started_at,
+                    metrics,
+                    probe=probe,
+                )
             except asyncio.CancelledError:
                 summary = self._summary(
                     source,
@@ -260,10 +281,15 @@ class IngestionService:
         trigger: Trigger,
         started_at: datetime,
         metrics: FetchMetrics,
+        *,
+        probe: bool = False,
     ) -> RunSummary:
         counts = _RunCounts()
         try:
-            self._compliance.require_collectable(source)
+            if probe:
+                self._compliance.require_probeable(source)
+            else:
+                self._compliance.require_collectable(source)
         except CompliancePolicyError as error:
             counts.error_code = _error_code(error)
             return self._summary(

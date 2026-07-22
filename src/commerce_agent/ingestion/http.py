@@ -289,7 +289,7 @@ class IngestionHttpClient:
             if status_code == 429 or 500 <= status_code < 600:
                 if attempt == self._max_retries:
                     raise FetchError(
-                        "retry_exhausted",
+                        "rate_limited" if status_code == 429 else "retry_exhausted",
                         status_code=status_code,
                         retryable=True,
                     )

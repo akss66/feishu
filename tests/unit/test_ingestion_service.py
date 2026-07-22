@@ -345,6 +345,46 @@ async def test_disabled_source_is_finished_as_skipped_without_collection() -> No
     assert repository.lease_tokens == {}
 
 
+async def test_explicit_probe_collects_a_disabled_but_allowed_source_once() -> None:
+    collector = FakeCollector([item()])
+    ingestion, repository, _ = service(
+        [source(enabled=False)],
+        {CollectorKind.RSS: collector},
+    )
+
+    summary = await ingestion.probe_source("amazon-news")
+
+    assert summary.status is RunStatus.SUCCESS
+    assert len(collector.calls) == 1
+    assert repository.persisted
+    assert repository.synced[0][0].enabled is False
+
+
+@pytest.mark.parametrize(
+    "compliance",
+    [
+        ComplianceStatus.PENDING_REVIEW,
+        ComplianceStatus.AUTHORIZATION_REQUIRED,
+        ComplianceStatus.DENIED,
+    ],
+)
+async def test_probe_never_bypasses_a_nonallowed_compliance_decision(
+    compliance: ComplianceStatus,
+) -> None:
+    collector = FakeCollector([item()])
+    ingestion, repository, _ = service(
+        [source(enabled=False, compliance=compliance)],
+        {CollectorKind.RSS: collector},
+    )
+
+    summary = await ingestion.probe_source("amazon-news")
+
+    assert summary.status is RunStatus.SKIPPED
+    assert summary.error_code == "compliance_not_allowed"
+    assert collector.calls == []
+    assert repository.persisted == []
+
+
 async def test_scheduled_suspended_source_skips_without_starting_a_run_or_collecting() -> None:
     collector = FakeCollector([item()])
     repository = FakeRepository()

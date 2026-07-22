@@ -333,6 +333,32 @@ async def test_429_retry_respects_retry_after() -> None:
     assert fake_time.sleeps == [3.0]
 
 
+async def test_exhausted_429_is_reported_as_rate_limited() -> None:
+    metrics = FetchMetrics()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "30"})
+
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(FetchError) as caught:
+            await client.get(
+                FetchRequest(
+                    "https://news.example.com/items",
+                    ("news.example.com",),
+                    metrics=metrics,
+                )
+            )
+
+    assert caught.value.code == "rate_limited"
+    assert caught.value.status_code == 429
+    assert caught.value.retryable is True
+    assert metrics == FetchMetrics(http_requests=1)
+
+
 async def test_retry_after_delta_is_clamped_to_sixty_seconds() -> None:
     fake_time = FakeTime()
     calls = 0

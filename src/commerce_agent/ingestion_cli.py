@@ -77,6 +77,8 @@ class CliApplication(Protocol):
 
     async def run_source(self, source_id: str) -> RunSummary: ...
 
+    async def probe_source(self, source_id: str) -> RunSummary: ...
+
     async def health(self) -> tuple[HealthRow, ...]: ...
 
     async def aclose(self) -> None: ...
@@ -107,6 +109,9 @@ class _ProductionApplication:
 
     async def run_source(self, source_id: str) -> RunSummary:
         return await self._service.run_source(source_id, Trigger.MANUAL)
+
+    async def probe_source(self, source_id: str) -> RunSummary:
+        return await self._service.probe_source(source_id)
 
     async def health(self) -> tuple[HealthRow, ...]:
         async with self._database.session() as session:
@@ -237,6 +242,9 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--all", action="store_true", dest="run_all")
     target.add_argument("--source", metavar="SOURCE_ID")
 
+    probe_parser = commands.add_parser("probe")
+    probe_parser.add_argument("--source", metavar="SOURCE_ID", required=True)
+
     commands.add_parser("health")
     return parser
 
@@ -259,9 +267,14 @@ async def run_cli(
     except SystemExit as exc:
         return int(exc.code or 0)
 
-    if arguments.command == "run" and not arguments.run_all:
+    source_id = None
+    if arguments.command == "probe":
+        source_id = arguments.source
+    elif arguments.command == "run" and not arguments.run_all:
+        source_id = arguments.source
+    if source_id is not None:
         try:
-            registry_factory().require(arguments.source)
+            registry_factory().require(source_id)
         except KeyError:
             errors.write("error: unknown source_id\n")
             return 2
@@ -289,7 +302,9 @@ async def run_cli(
             _write_health(await application.health(), output)
         else:
             summaries: tuple[RunSummary, ...]
-            if arguments.run_all:
+            if arguments.command == "probe":
+                summaries = (await application.probe_source(arguments.source),)
+            elif arguments.run_all:
                 summaries = await application.run_all()
             else:
                 summaries = (await application.run_source(arguments.source),)

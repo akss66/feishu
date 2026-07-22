@@ -86,6 +86,7 @@ class FakeApplication:
     health_rows: Sequence[HealthRow] = ()
     run_all_calls: int = 0
     run_source_calls: list[str] = field(default_factory=list)
+    probe_source_calls: list[str] = field(default_factory=list)
     closed: bool = False
 
     async def run_all(self) -> tuple[RunSummary, ...]:
@@ -94,6 +95,10 @@ class FakeApplication:
 
     async def run_source(self, source_id: str) -> RunSummary:
         self.run_source_calls.append(source_id)
+        return self.source_summaries[source_id]
+
+    async def probe_source(self, source_id: str) -> RunSummary:
+        self.probe_source_calls.append(source_id)
         return self.source_summaries[source_id]
 
     async def health(self) -> tuple[HealthRow, ...]:
@@ -277,6 +282,29 @@ async def test_run_source_success_reports_counts_and_exits_zero() -> None:
     assert "success" in stdout
     assert "2" in stdout
     assert "42" in stdout
+
+
+async def test_probe_source_runs_the_explicit_probe_path() -> None:
+    registry = SourceRegistry(
+        [source("media-gdelt", platform="temu", enabled=False)]
+    )
+    app = FakeApplication(
+        registry,
+        source_summaries={"media-gdelt": summary("media-gdelt", RunStatus.SUCCESS)},
+    )
+
+    exit_code, stdout, stderr = await invoke(
+        app,
+        "probe",
+        "--source",
+        "media-gdelt",
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    assert app.probe_source_calls == ["media-gdelt"]
+    assert app.run_source_calls == []
+    assert "media-gdelt" in stdout
 
 
 async def test_run_all_partial_failure_is_reported_and_exits_three() -> None:
