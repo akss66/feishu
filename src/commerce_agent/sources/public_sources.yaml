@@ -217,9 +217,9 @@ sources:
     terms_url: https://www.ebayinc.com/terms-of-use/
     robots_url: https://www.ebayinc.com/robots.txt
     reviewed_at: 2026-07-22
-    compliance_notes: Anonymous access reaches the public press room without a redirect; eBay Inc. terms show no automation prohibition; robots returned 403 and is not treated as permission; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance_notes: Anonymous access reaches the public press room without a redirect; eBay Inc. terms show no automation prohibition and robots returned 403 without being treated as permission. The 2026-07-22 live smoke initially found no links; a fixture-backed selector correction to a.article-listing was verified before one retry, which collected six public announcements without login, redirects, or bypasses.
     collector_config:
-      link_selector: "article a"
+      link_selector: "a.article-listing"
       article_selector: article
       item_limit: 20
 
@@ -233,7 +233,7 @@ sources:
     enabled: false
     compliance_notes: Anonymous access reaches Seller News without a redirect; eBay terms require express prior permission for automation; robots also prohibits unapproved automated access; no login or redirect bypass was used, so authorization is required.
 
-  # Coupang public seller resources may be collected conservatively at low frequency.
+  # Coupang public seller resources are enabled only where the 2026-07-22 live smoke produced usable content.
   - &coupang
     source_id: coupang-rules-and-policies
     name: Coupang Global Seller Rules and Policies
@@ -241,15 +241,15 @@ sources:
     platforms: [coupang]
     trust_tier: official
     collector: html
-    compliance: allowed
-    enabled: true
+    compliance: pending_review
+    enabled: false
     regions: [global]
     language_hint: en
     interval_minutes: 120
     terms_url: https://globalsellers.coupang.com/en/rules-and-policies/
     robots_url: https://globalsellers.coupang.com/robots.txt
     reviewed_at: 2026-07-22
-    compliance_notes: Anonymous access reaches the Rules and Policies list without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance_notes: Anonymous access reaches the Rules and Policies list without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow. The 2026-07-22 live smoke found ten public links but each detail response produced blank_content, so no retry, login, redirect bypass, or alternative identity was used and review remains pending.
     collector_config:
       link_selector: "article a"
       article_selector: article
@@ -259,13 +259,15 @@ sources:
     source_id: coupang-seller-university
     name: Coupang Seller University Before You Start
     entry_url: https://globalsellers.coupang.com/en/seller-university/category/before-you-start/
-    compliance_notes: Anonymous access reaches Seller University without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance: allowed
+    enabled: true
+    compliance_notes: Anonymous access reaches Seller University without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow. The 2026-07-22 live smoke collected twenty public items without login, redirect bypass, or other circumvention, so low-frequency collection remains allowed.
 
   - <<: *coupang
     source_id: coupang-global-news
     name: Coupang Global Seller Step-by-Step Guide
     entry_url: https://globalsellers.coupang.com/en/step-by-step-guide/
-    compliance_notes: Anonymous access reaches the Step-by-step Guide without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance_notes: Anonymous access reaches the Step-by-step Guide without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow. The 2026-07-22 live smoke returned a public HTTP 200 response but no usable content; structure diagnosis found no article-list selector to correct safely, so no retry or bypass was used and review remains pending.
 
   # Ozon regional redirects and publisher terms require review before collection.
   - &ozon
@@ -298,7 +300,7 @@ sources:
     entry_url: https://seller.ozon.ru/media/tags/dokumenty/
     compliance_notes: Anonymous access to the dokumenty topic entry enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
 
-  # Joybuy public newsrooms may be collected conservatively at low frequency.
+  # Joybuy public newsrooms passed their 2026-07-22 live smokes at low frequency.
   - &joybuy
     source_id: joybuy-news
     name: Joybuy Newsroom
@@ -314,7 +316,7 @@ sources:
     terms_url: https://about.joybuy.com/
     robots_url: https://about.joybuy.com/robots.txt
     reviewed_at: 2026-07-22
-    compliance_notes: Anonymous access reaches the English newsroom without a redirect; the official site shows no automation terms prohibition; robots permits /news/; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance_notes: Anonymous access reaches the English newsroom without a redirect; the official site shows no automation terms prohibition and robots permits /news/. The 2026-07-22 live smoke collected twelve public items without login, redirect bypass, or other circumvention, so low-frequency collection remains allowed.
     collector_config:
       link_selector: "article a"
       article_selector: article
@@ -326,7 +328,7 @@ sources:
     entry_url: https://about.joybuy.com/de/news/
     regions: [de]
     language_hint: de
-    compliance_notes: Anonymous access reaches the German newsroom without a redirect; the official site shows no automation terms prohibition; robots permits /de/news/; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance_notes: Anonymous access reaches the German newsroom without a redirect; the official site shows no automation terms prohibition and robots permits /de/news/. The 2026-07-22 live smoke collected eleven public items without login, redirect bypass, or other circumvention, so low-frequency collection remains allowed.
 
   - <<: *joybuy
     source_id: joybuy-dutch-news
@@ -334,7 +336,7 @@ sources:
     entry_url: https://about.joybuy.com/nl/news/
     regions: [nl]
     language_hint: nl
-    compliance_notes: Anonymous access reaches the Dutch newsroom without a redirect; the official site shows no automation terms prohibition; robots permits /nl/news/; no login or redirect bypass was used, so low-frequency collection is allowed.
+    compliance_notes: Anonymous access reaches the Dutch newsroom without a redirect; the official site shows no automation terms prohibition and robots permits /nl/news/. The 2026-07-22 live smoke collected nine public items without login, redirect bypass, or other circumvention, so low-frequency collection remains allowed.
 
   # TikTok Shop seller terms require express written permission for automated access.
   - &tiktok

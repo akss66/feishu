@@ -27,6 +27,7 @@ from commerce_agent.ingestion.collectors import (
     SitemapCollector,
 )
 from commerce_agent.ingestion.collectors.base import candidate_url
+from commerce_agent.ingestion.collectors.html import links_from_html
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
     CollectedFailure,
@@ -43,9 +44,13 @@ from commerce_agent.ingestion.models import (
     Trigger,
     TrustTier,
 )
+from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.security import UrlSafetyPolicy
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "ingestion"
+PUBLIC_SOURCES = (
+    Path(__file__).parents[2] / "src" / "commerce_agent" / "sources" / "public_sources.yaml"
+)
 
 
 class FakeHttpPort:
@@ -523,6 +528,23 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
         http_requests=3,
         bytes_received=len(response.body) + len(detail_body) * 2,
     )
+
+
+def test_ebay_press_room_registry_selector_matches_public_announcement_links() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    source_definition = registry.require("ebay-press-room")
+
+    items = links_from_html(
+        (FIXTURES / "ebay_press_room_selector.html").read_bytes(),
+        base_url=source_definition.entry_url,
+        selector=source_definition.collector_config["link_selector"],
+        limit=20,
+    )
+
+    assert [item.url for item in items] == [
+        "https://www.ebayinc.com/stories/company-update/",
+        "https://www.ebayinc.com/stories/marketplace-update/",
+    ]
 
 
 @pytest.mark.asyncio

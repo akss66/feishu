@@ -45,3 +45,18 @@
 2. 逐个执行真实生产采集器测试；任何 401、403、验证码、登录跳转、异常跨域、结构不匹配或零有效内容都在同一批次回滚到 `pending_review + disabled`。
 3. Amazon 等待能够直接核实的 Conditions of Use / Agent Policy 与采集器身份声明要求；Ozon 等待无需绕过的稳定公开入口。
 4. Shopee 与 eBay Seller News 仅在取得发布方明确书面许可或改用官方授权 API 后再复核。
+## Live-smoke amendment (2026-07-22)
+
+The following persisted runs supersede the provisional `Live smoke` values below. All commands ran sequentially from the configured root with the project's `cloudflare_doh` DNS safety mode; no proxies, cookies, login sessions, alternate identity, or request-rate increase were used.
+
+| Source ID | Exit | Status | discovered / new / duplicate | Error / boundary | Final decision |
+|---|---:|---|---|---|---|
+| `ebay-press-room` | 0 | `success` | 6 / 6 / 0 | Initial HTTP 200 returned zero candidates; read-only structure diagnosis confirmed selector mismatch. Fixture-TDD changed only the selector, and the one permitted retry succeeded. | `allowed`, enabled |
+| `coupang-rules-and-policies` | 3 | `failed` | 10 / 0 / 0 | `blank_content`; public listing links resolved but detail bodies had no usable content. | `pending_review`, disabled |
+| `coupang-seller-university` | 0 | `success` | 20 / 20 / 0 | No redirect or login boundary. | `allowed`, enabled |
+| `coupang-global-news` | 0 | `success` | 0 / 0 / 0 | HTTP 200 but no usable content; structure diagnosis found no safe article-list selector to correct. | `pending_review`, disabled |
+| `joybuy-news` | 0 | `success` | 12 / 12 / 0 | No redirect or login boundary. | `allowed`, enabled |
+| `joybuy-german-news` | 0 | `success` | 11 / 11 / 0 | No redirect or login boundary. | `allowed`, enabled |
+| `joybuy-dutch-news` | 0 | `success` | 9 / 9 / 0 | No redirect or login boundary. | `allowed`, enabled |
+
+The initial `destination_not_public` preflight results were caused by omitting the project-configured DNS safety mode; they did not issue HTTP requests and are not source access failures. The final runs above are the controlling outcomes.
