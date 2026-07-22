@@ -30,6 +30,24 @@
       "title": "Mismatched publisher",
       "seendate": "20260722T081900Z",
       "domain": "reuters.com"
+    },
+    {
+      "url": "https://news.example.com/unknown-publisher",
+      "title": "Unknown publisher",
+      "seendate": "20260722T082000Z",
+      "domain": "news.example.com"
+    },
+    {
+      "url": "https://reuters.com.example/deceptive-suffix",
+      "title": "Deceptive publisher suffix",
+      "seendate": "20260722T082100Z",
+      "domain": "reuters.com.example"
+    },
+    {
+      "url": "https://www.marketplacepulse.com/denied-story",
+      "title": "Denied publisher",
+      "seendate": "20260722T082200Z",
+      "domain": "marketplacepulse.com"
     }
   ]
 }

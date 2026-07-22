@@ -23,6 +23,7 @@ from commerce_agent.ingestion.models import (
     SourceAdapter,
     SourceDefinition,
 )
+from commerce_agent.media.catalog import ArticleAccess, publisher_profile
 
 
 class ApiCollector:
@@ -67,6 +68,10 @@ class ApiCollector:
                 )
                 if url is None or not url.startswith("https://") or publisher_key is None:
                     continue
+                profile = publisher_profile(publisher_key)
+                if profile is None or profile.article_access is ArticleAccess.DENIED:
+                    continue
+                publisher_key = profile.publisher_key
             if url is None or url in seen:
                 continue
             seen.add(url)
