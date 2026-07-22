@@ -207,6 +207,7 @@ class CollectedItem:
     etag: str | None = None
     last_modified: str | None = None
     artifact: ResponseArtifact | None = None
+    content_scope: ContentScope | None = None
 
 
 @dataclass(frozen=True, slots=True)

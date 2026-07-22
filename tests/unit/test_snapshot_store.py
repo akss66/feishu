@@ -3,7 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -114,3 +114,36 @@ async def test_reference_metadata_never_contains_request_query_or_sensitive_head
     assert "token" not in rendered_metadata.lower()
     assert "authorization" not in rendered_metadata.lower()
     assert "cookie" not in rendered_metadata.lower()
+
+
+async def test_prunes_only_old_snapshots_for_the_exact_source(tmp_path: Path) -> None:
+    old_store = SnapshotStore(tmp_path, clock=lambda: NOW - timedelta(days=31))
+    recent_store = SnapshotStore(tmp_path, clock=lambda: NOW - timedelta(days=29))
+    old_media = await old_store.save("media-gdelt-cross-border", response(b"old media"))
+    recent_media = await recent_store.save(
+        "media-gdelt-cross-border", response(b"recent media")
+    )
+    other_source = await old_store.save("amazon-news", response(b"old official"))
+
+    removed = await recent_store.prune_source_before(
+        "media-gdelt-cross-border", NOW - timedelta(days=30)
+    )
+
+    assert removed == 1
+    assert not (tmp_path / old_media.relative_path).exists()
+    assert (tmp_path / recent_media.relative_path).exists()
+    assert (tmp_path / other_source.relative_path).exists()
+
+
+async def test_prune_rejects_escape_source_id_without_touching_outside_file(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "outside-snapshot.bin.gz"
+    outside.write_bytes(b"do not delete")
+    store = SnapshotStore(tmp_path, clock=lambda: NOW)
+
+    with pytest.raises(SnapshotStoreError) as caught:
+        await store.prune_source_before("../outside", NOW)
+
+    assert caught.value.code == "invalid_source_id"
+    assert outside.read_bytes() == b"do not delete"

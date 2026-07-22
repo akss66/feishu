@@ -17,6 +17,7 @@ from commerce_agent.ingestion.http import FetchResponse
 
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
+_SNAPSHOT_NAME = re.compile(r"^[a-f0-9]{64}\.bin\.gz$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,64 @@ class SnapshotStore:
         async with self._lock:
             await asyncio.to_thread(self._save_atomic, relative_path, body)
         return reference
+
+    async def prune_source_before(self, source_id: str, cutoff: datetime) -> int:
+        """Delete dated raw snapshots for one exact source before ``cutoff``."""
+
+        if not _SOURCE_ID.fullmatch(source_id):
+            raise SnapshotStoreError("invalid_source_id")
+        if cutoff.tzinfo is None:
+            raise ValueError("snapshot cutoff must be timezone-aware")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._prune_source_before,
+                source_id,
+                cutoff.astimezone(UTC),
+            )
+
+    def _prune_source_before(self, source_id: str, cutoff: datetime) -> int:
+        if not self._root.exists():
+            return 0
+        removed = 0
+        for year_dir in self._root.iterdir():
+            if not year_dir.is_dir() or not year_dir.name.isdecimal():
+                continue
+            for month_dir in year_dir.iterdir():
+                if not month_dir.is_dir() or not month_dir.name.isdecimal():
+                    continue
+                for day_dir in month_dir.iterdir():
+                    if not day_dir.is_dir() or not day_dir.name.isdecimal():
+                        continue
+                    try:
+                        snapshot_date = datetime(
+                            int(year_dir.name),
+                            int(month_dir.name),
+                            int(day_dir.name),
+                            tzinfo=UTC,
+                        ).date()
+                    except ValueError:
+                        continue
+                    if snapshot_date >= cutoff.date():
+                        continue
+                    source_dir = day_dir / source_id
+                    if not source_dir.is_dir():
+                        continue
+                    try:
+                        source_dir.resolve().relative_to(self._root)
+                    except ValueError:
+                        raise SnapshotStoreError("path_outside_root") from None
+                    for candidate in source_dir.iterdir():
+                        if not candidate.is_file() or not _SNAPSHOT_NAME.fullmatch(
+                            candidate.name
+                        ):
+                            continue
+                        try:
+                            candidate.resolve().relative_to(self._root)
+                        except ValueError:
+                            raise SnapshotStoreError("path_outside_root") from None
+                        candidate.unlink()
+                        removed += 1
+        return removed
 
     def _save_atomic(self, relative_path: Path, body: bytes) -> None:
         self._root.mkdir(parents=True, exist_ok=True)

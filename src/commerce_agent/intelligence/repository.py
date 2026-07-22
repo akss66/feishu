@@ -10,7 +10,7 @@ from sqlalchemy import case, exists, func, literal, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from commerce_agent.ingestion.models import Platform, TrustTier
+from commerce_agent.ingestion.models import ContentScope, Platform, TrustTier
 from commerce_agent.intelligence.models import (
     AnalysisCandidate,
     AnalysisResult,
@@ -118,8 +118,19 @@ class SqlAlchemyIntelligenceRepository:
             )
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
+            .outerjoin(
+                DocumentProvenance,
+                DocumentProvenance.document_version_id == DocumentVersion.id,
+            )
             .where(due)
             .where(Source.compliance == "allowed")
+            .where(
+                or_(
+                    DocumentProvenance.content_scope.is_(None),
+                    DocumentProvenance.content_scope
+                    != ContentScope.METADATA_ONLY.value,
+                )
+            )
             .order_by(AnalysisJob.created_at, AnalysisJob.id)
             .limit(1)
             .scalar_subquery()

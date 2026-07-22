@@ -413,6 +413,43 @@ async def test_same_source_batch_rows_do_not_add_corroboration_points(tmp_path) 
         await database.dispose()
 
 
+async def test_claim_skips_metadata_only_documents(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'metadata-only.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    media_source = replace(
+        _source(source_id="media-gdelt-cross-border"),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index; original publisher shown per item",
+        publisher_key=None,
+    )
+    try:
+        await ingestion.sync_sources([media_source])
+        outcome = await ingestion.persist_version(
+            replace(
+                _candidate(
+                    source_id=media_source.source_id,
+                    content_hash="m" * 64,
+                    canonical_url="https://www.reuters.com/example",
+                ),
+                publisher_key="reuters.com",
+                attribution=media_source.attribution,
+                content_scope="metadata_only",
+            )
+        )
+
+        assert await repository.claim_next(now=NOW) is None
+        async with database.session() as session:
+            job = await session.get(AnalysisJob, outcome.version_id)
+        assert job is not None
+        assert job.status == "pending"
+    finally:
+        await database.dispose()
+
+
 @pytest.mark.parametrize(
     ("publishers", "expected_count"),
     [(("reuters.com", "reuters.com"), 1), (("reuters.com", "apnews.com"), 2)],
@@ -431,7 +468,7 @@ async def test_media_corroboration_counts_publishers_not_collection_channels(
             _source(source_id=f"media-{index}"),
             trust_tier=TrustTier.MEDIA,
             adapter=SourceAdapter.GENERIC,
-            content_scope=ContentScope.METADATA_ONLY,
+            content_scope=ContentScope.FEED_SUMMARY,
             attribution=f"Publisher {index}",
             publisher_key=publisher,
         )
@@ -449,7 +486,7 @@ async def test_media_corroboration_counts_publishers_not_collection_channels(
                     ),
                     publisher_key=publisher,
                     attribution=f"Publisher {index}",
-                    content_scope="metadata_only",
+                    content_scope="feed_summary",
                 )
             )
 

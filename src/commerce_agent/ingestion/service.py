@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from commerce_agent.ingestion.collectors import Collector, CollectorError
 from commerce_agent.ingestion.compliance import CompliancePolicy, CompliancePolicyError
@@ -34,6 +34,7 @@ from commerce_agent.persistence.ingestion import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_GDELT_MEDIA_SOURCE_ID = "media-gdelt-cross-border"
 _KNOWN_ERROR_CODES = frozenset(
     {
         "blank_content",
@@ -284,6 +285,12 @@ class IngestionService:
                 RunStatus.FAILED,
                 counts,
                 metrics,
+            )
+
+        if source.source_id == _GDELT_MEDIA_SOURCE_ID:
+            await self._snapshot_store.prune_source_before(
+                source.source_id,
+                started_at - timedelta(days=30),
             )
 
         etag, last_modified = self._conditionals.get(source.source_id, (None, None))

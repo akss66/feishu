@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -22,6 +22,7 @@ from commerce_agent.ingestion.models import (
     ResponseArtifact,
     RunStatus,
     RunSummary,
+    SourceAdapter,
     SourceDefinition,
     Trigger,
     TrustTier,
@@ -140,6 +141,11 @@ class FakeSnapshotStore:
     def __init__(self, events: list[str] | None = None) -> None:
         self.events = events
         self.saved: list[tuple[str, bytes]] = []
+        self.pruned: list[tuple[str, datetime]] = []
+
+    async def prune_source_before(self, source_id: str, cutoff: datetime) -> int:
+        self.pruned.append((source_id, cutoff))
+        return 0
 
     async def save(self, source_id: str, response) -> SnapshotRef:
         if self.events is not None:
@@ -151,6 +157,22 @@ class FakeSnapshotStore:
             media_type="text/plain",
             byte_count=len(response.body),
         )
+
+
+async def test_gdelt_run_prunes_raw_snapshots_older_than_thirty_days() -> None:
+    gdelt = replace(
+        source("media-gdelt-cross-border", collector=CollectorKind.API),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+    )
+    ingestion, _, snapshots = service(
+        [gdelt],
+        {CollectorKind.API: FakeCollector()},
+    )
+
+    await ingestion.run_source(gdelt.source_id)
+
+    assert snapshots.pruned == [(gdelt.source_id, NOW - timedelta(days=30))]
 
 
 class FakeRepository:

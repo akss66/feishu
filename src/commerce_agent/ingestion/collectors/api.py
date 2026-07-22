@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -17,18 +17,32 @@ from commerce_agent.ingestion.collectors.base import (
     response_artifact,
 )
 from commerce_agent.ingestion.collectors.feed import _parse_datetime
+from commerce_agent.ingestion.http import FetchRequest
 from commerce_agent.ingestion.models import (
     CollectedItem,
+    ContentScope,
     FetchContext,
     SourceAdapter,
     SourceDefinition,
 )
-from commerce_agent.media.catalog import ArticleAccess, publisher_profile
+from commerce_agent.media.catalog import (
+    ArticleAccess,
+    PublisherProfile,
+    publisher_profile,
+)
+
+PublisherLookup = Callable[[str], PublisherProfile | None]
 
 
 class ApiCollector:
-    def __init__(self, http_port: HttpPort) -> None:
+    def __init__(
+        self,
+        http_port: HttpPort,
+        *,
+        publisher_lookup: PublisherLookup = publisher_profile,
+    ) -> None:
         self._http = http_port
+        self._publisher_lookup = publisher_lookup
 
     async def collect(
         self,
@@ -60,6 +74,7 @@ class ApiCollector:
             raw_url = _path_value(raw_item, url_field)
             url = candidate_url(response.url, raw_url if isinstance(raw_url, str) else None)
             publisher_key: str | None = None
+            profile: PublisherProfile | None = None
             if source.adapter is SourceAdapter.GDELT:
                 publisher_field = _config_string(source, "publisher_field")
                 publisher_key = _gdelt_publisher_key(
@@ -68,7 +83,7 @@ class ApiCollector:
                 )
                 if url is None or not url.startswith("https://") or publisher_key is None:
                     continue
-                profile = publisher_profile(publisher_key)
+                profile = self._publisher_lookup(publisher_key)
                 if profile is None or profile.article_access is ArticleAccess.DENIED:
                     continue
                 publisher_key = profile.publisher_key
@@ -86,6 +101,10 @@ class ApiCollector:
                 raw_published if isinstance(raw_published, str) else None
             )
             stored_item: Mapping[str, Any] = raw_item
+            item_body: bytes
+            content_type = "application/json"
+            item_artifact = artifact
+            content_scope: ContentScope | None = None
             if source.adapter is SourceAdapter.GDELT:
                 stored_item = {
                     "url": url,
@@ -93,21 +112,42 @@ class ApiCollector:
                     "seendate": raw_published if isinstance(raw_published, str) else None,
                     "domain": publisher_key,
                 }
+                content_scope = ContentScope.METADATA_ONLY
+            item_body = json.dumps(
+                stored_item,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            if (
+                source.adapter is SourceAdapter.GDELT
+                and profile is not None
+                and profile.article_access is ArticleAccess.ALLOWED_PUBLIC
+            ):
+                article_response = await self._http.get(
+                    FetchRequest(
+                        url=url,
+                        allowed_hosts=profile.allowed_hosts,
+                        metrics=context.metrics,
+                    )
+                )
+                if not require_success(article_response):
+                    continue
+                item_body = article_response.body
+                content_type = article_response.headers.get("content-type")
+                item_artifact = response_artifact(article_response)
+                content_scope = ContentScope.FULL_TEXT
             yield CollectedItem(
                 url=url,
-                body=json.dumps(
-                    stored_item,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8"),
-                content_type="application/json",
+                body=item_body,
+                content_type=content_type,
                 title=title,
                 published_at=published_at,
                 publisher_key=publisher_key,
                 etag=response.etag,
                 last_modified=response.last_modified,
-                artifact=artifact,
+                artifact=item_artifact,
+                content_scope=content_scope,
             )
             if len(seen) >= limit:
                 return

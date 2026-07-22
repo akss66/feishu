@@ -148,12 +148,13 @@ def _media_provenance(
     )
     if not publisher_key:
         raise ExtractionError("missing_publisher_identity")
-    if source.attribution is None or source.content_scope is None:
+    content_scope = item.content_scope or source.content_scope
+    if source.attribution is None or content_scope is None:
         raise ExtractionError("missing_media_provenance")
     return {
         "publisher_key": publisher_key,
         "attribution": source.attribution,
-        "content_scope": source.content_scope.value,
+        "content_scope": content_scope.value,
     }
 
 

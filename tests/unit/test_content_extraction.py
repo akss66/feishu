@@ -227,6 +227,33 @@ def test_gdelt_media_uses_per_item_publisher_and_source_attribution() -> None:
     }
 
 
+def test_gdelt_media_prefers_item_level_full_text_scope() -> None:
+    media_source = replace(
+        source(),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+        collector=CollectorKind.API,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index; original publisher shown per item",
+        publisher_key=None,
+    )
+    item = CollectedItem(
+        url="https://www.reuters.com/example",
+        body=b"<html><article>Original article body for analysis.</article></html>",
+        content_type="text/html",
+        publisher_key="reuters.com",
+        content_scope=ContentScope.FULL_TEXT,
+    )
+
+    document = ContentExtractor(FixedLanguageDetector()).extract(
+        media_source,
+        item,
+        fetched_at=FETCHED_AT,
+    )
+
+    assert document.metadata["content_scope"] == "full_text"
+
+
 def test_media_without_final_publisher_identity_fails_with_safe_code() -> None:
     media_source = replace(
         source(),
