@@ -288,6 +288,14 @@ def test_qa_enabled_adapter_requires_delivery_worker() -> None:
         FeishuAdapter(FakeChannel(), QaService())
 
 
+def test_qa_enabled_adapter_requires_positive_concurrency() -> None:
+    class QaService:
+        qa_enabled = True
+
+    with pytest.raises(ValueError, match="qa_concurrency_must_be_positive"):
+        FeishuAdapter(FakeChannel(), QaService(), delivery=object(), qa_concurrency=0)
+
+
 async def test_qa_prequeue_failure_replies_safely_without_leaking_input(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -297,10 +305,14 @@ async def test_qa_prequeue_failure_replies_safely_without_leaking_input(
     class FailingQa:
         qa_enabled = True
 
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def qa_available(self, chat_id: str) -> bool:
             return True
 
         async def queue_question(self, message) -> int:
+            self.calls += 1
             raise RuntimeError(f"{secret}: {message.text}")
 
     class Delivery:
@@ -308,7 +320,8 @@ async def test_qa_prequeue_failure_replies_safely_without_leaking_input(
             raise AssertionError(outbox_id)
 
     channel = FakeChannel()
-    adapter = FeishuAdapter(channel, FailingQa(), delivery=Delivery())
+    service = FailingQa()
+    adapter = FeishuAdapter(channel, service, delivery=Delivery(), qa_concurrency=1)
     event = SimpleNamespace(chat_id="chat-one", message_id="msg-one", body_text=question)
 
     with caplog.at_level(logging.ERROR):
@@ -321,6 +334,12 @@ async def test_qa_prequeue_failure_replies_safely_without_leaking_input(
     assert question not in caplog.text
     assert secret not in caplog.text
     assert not adapter._pending_tasks
+
+    await channel.handlers["message"](event)
+    await _wait_for_reply_count(channel, 4)
+    await asyncio.sleep(0)
+    assert service.calls == 2
+    assert all(reply[1]["text"] != "当前问答请求较多，请稍后重试。" for reply in channel.replies)
 
 
 async def test_qa_send_failure_leaves_outbox_for_retry_without_direct_failure_reply(
@@ -395,9 +414,11 @@ async def test_close_is_bounded_when_background_qa_swallows_cancellation(
     await asyncio.wait_for(adapter.close(), timeout=0.2)
 
     assert adapter._pending_tasks
+    assert adapter._qa_slots_in_use == 1
     release.set()
     await _wait_for_background_tasks(adapter)
     assert delivery.sent == []
+    assert adapter._qa_slots_in_use == 0
 
 
 async def test_unbound_unknown_message_never_starts_qa_or_acknowledges_search() -> None:
@@ -425,6 +446,227 @@ async def test_unbound_unknown_message_never_starts_qa_or_acknowledges_search() 
 
     assert channel.replies == [(event, {"text": "暂不支持该指令。发送“帮助”查看可用命令。"})]
     assert not adapter._pending_tasks
+
+
+async def test_grounded_qa_burst_is_bounded_and_slot_is_reused_after_completion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gates = [asyncio.Event(), asyncio.Event(), asyncio.Event()]
+
+    class BlockingQa:
+        qa_enabled = True
+
+        def __init__(self) -> None:
+            self.questions: list[str] = []
+            self.started = asyncio.Event()
+            self.reused = asyncio.Event()
+
+        async def qa_available(self, chat_id: str) -> bool:
+            return True
+
+        async def queue_question(self, message) -> int:
+            index = len(self.questions)
+            self.questions.append(message.text)
+            if len(self.questions) == 2:
+                self.started.set()
+            if len(self.questions) == 3:
+                self.reused.set()
+            await gates[index].wait()
+            return index + 1
+
+    class Delivery:
+        def __init__(self) -> None:
+            self.sent: list[int] = []
+
+        async def send_id(self, outbox_id: int) -> None:
+            self.sent.append(outbox_id)
+
+    channel = FakeChannel()
+    service = BlockingQa()
+    delivery = Delivery()
+    adapter = FeishuAdapter(channel, service, delivery=delivery, qa_concurrency=2)
+
+    events = [
+        SimpleNamespace(
+            chat_id="chat-one",
+            message_id=f"msg-{index}",
+            body_text=f"不得写日志的问题-{index}",
+        )
+        for index in range(1, 5)
+    ]
+    with caplog.at_level(logging.WARNING):
+        await channel.handlers["message"](events[0])
+        await channel.handlers["message"](events[1])
+        await asyncio.wait_for(service.started.wait(), timeout=1)
+        await channel.handlers["message"](events[2])
+
+    assert service.questions == ["不得写日志的问题-1", "不得写日志的问题-2"]
+    assert len(adapter._pending_tasks) == 2
+    assert delivery.sent == []
+    assert channel.replies == [
+        (events[0], {"text": "已收到，正在检索入库资料，请稍候。"}),
+        (events[1], {"text": "已收到，正在检索入库资料，请稍候。"}),
+        (events[2], {"text": "当前问答请求较多，请稍后重试。"}),
+    ]
+    assert "grounded qa capacity exhausted" in caplog.text
+    assert "不得写日志的问题-3" not in caplog.text
+    assert "chat-one" not in caplog.text
+
+    gates[0].set()
+    gates[1].set()
+    await _wait_for_background_tasks(adapter)
+    assert delivery.sent == [1, 2]
+
+    await channel.handlers["message"](events[3])
+    await asyncio.wait_for(service.reused.wait(), timeout=1)
+    assert service.questions[-1] == "不得写日志的问题-4"
+    assert channel.replies[-1] == (
+        events[3],
+        {"text": "已收到，正在检索入库资料，请稍候。"},
+    )
+    gates[2].set()
+    await _wait_for_background_tasks(adapter)
+
+
+async def test_cancelled_qa_releases_capacity_for_next_request() -> None:
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    class Qa:
+        qa_enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def qa_available(self, chat_id: str) -> bool:
+            return True
+
+        async def queue_question(self, message) -> int:
+            self.calls += 1
+            if self.calls == 1:
+                first_started.set()
+                await asyncio.Event().wait()
+            second_started.set()
+            return 2
+
+    class Delivery:
+        async def send_id(self, outbox_id: int) -> None:
+            assert outbox_id == 2
+
+    channel = FakeChannel()
+    service = Qa()
+    adapter = FeishuAdapter(channel, service, delivery=Delivery(), qa_concurrency=1)
+    first = SimpleNamespace(chat_id="chat-one", message_id="msg-1", body_text="问题一")
+    second = SimpleNamespace(chat_id="chat-one", message_id="msg-2", body_text="问题二")
+
+    await channel.handlers["message"](first)
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    task = next(iter(adapter._pending_tasks))
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    await channel.handlers["message"](second)
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    await _wait_for_background_tasks(adapter)
+
+    assert service.calls == 2
+    assert channel.replies[-1] == (
+        second,
+        {"text": "已收到，正在检索入库资料，请稍候。"},
+    )
+
+
+async def test_qa_ack_failure_releases_capacity() -> None:
+    class FailFirstReplyChannel(FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+
+        async def reply(self, event, content) -> None:
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("safe reply unavailable")
+            await super().reply(event, content)
+
+    class Qa:
+        qa_enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def qa_available(self, chat_id: str) -> bool:
+            return True
+
+        async def queue_question(self, message) -> int:
+            self.calls += 1
+            return 1
+
+    class Delivery:
+        async def send_id(self, outbox_id: int) -> None:
+            assert outbox_id == 1
+
+    channel = FailFirstReplyChannel()
+    service = Qa()
+    adapter = FeishuAdapter(channel, service, delivery=Delivery(), qa_concurrency=1)
+    first = SimpleNamespace(chat_id="chat-one", message_id="msg-1", body_text="问题一")
+    second = SimpleNamespace(chat_id="chat-one", message_id="msg-2", body_text="问题二")
+
+    with pytest.raises(RuntimeError, match="safe reply unavailable"):
+        await channel.handlers["message"](first)
+    await channel.handlers["message"](second)
+    await _wait_for_background_tasks(adapter)
+
+    assert service.calls == 1
+    assert channel.replies == [(second, {"text": "已收到，正在检索入库资料，请稍候。"})]
+
+
+async def test_qa_task_creation_failure_releases_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent.integrations import feishu
+
+    class Qa:
+        qa_enabled = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def qa_available(self, chat_id: str) -> bool:
+            return True
+
+        async def queue_question(self, message) -> int:
+            self.calls += 1
+            return 1
+
+    class Delivery:
+        async def send_id(self, outbox_id: int) -> None:
+            assert outbox_id == 1
+
+    channel = FakeChannel()
+    service = Qa()
+    adapter = FeishuAdapter(channel, service, delivery=Delivery(), qa_concurrency=1)
+    first = SimpleNamespace(chat_id="chat-one", message_id="msg-1", body_text="问题一")
+    second = SimpleNamespace(chat_id="chat-one", message_id="msg-2", body_text="问题二")
+    real_create_task = asyncio.create_task
+
+    def fail_create_task(coroutine, *, name=None):
+        del coroutine, name
+        raise RuntimeError("task creation unavailable")
+
+    monkeypatch.setattr(feishu.asyncio, "create_task", fail_create_task)
+    with pytest.raises(RuntimeError, match="task creation unavailable"):
+        await channel.handlers["message"](first)
+    monkeypatch.setattr(feishu.asyncio, "create_task", real_create_task)
+
+    await channel.handlers["message"](second)
+    await _wait_for_background_tasks(adapter)
+
+    assert service.calls == 1
+    assert channel.replies[-1] == (
+        second,
+        {"text": "已收到，正在检索入库资料，请稍候。"},
+    )
 
 
 async def test_delivery_port_is_available_from_feishu_integration() -> None:

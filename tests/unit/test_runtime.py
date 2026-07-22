@@ -285,6 +285,80 @@ def test_enabled_intelligence_graph_wires_qa_delivery_and_scheduler() -> None:
     assert runtime.default_profile.value == "aggressive"
 
 
+async def test_runtime_passes_configured_concurrency_to_qa_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import runtime
+
+    captured: dict[str, object] = {}
+
+    class Secret:
+        def get_secret_value(self) -> str:
+            return "test-only"
+
+    settings = SimpleNamespace(
+        ingestion_browser_enabled=False,
+        ingestion_scheduler_enabled=False,
+        database_url="sqlite+aiosqlite:///:memory:",
+        deepseek_api_key=Secret(),
+        deepseek_base_url="https://example.invalid",
+        deepseek_timeout_seconds=1,
+        deepseek_model="test-model",
+        lark_app_id="test-app",
+        lark_app_secret=Secret(),
+        bot_bind_code=Secret(),
+        intelligence_analysis_enabled=False,
+        intelligence_daily_report_enabled=False,
+        intelligence_alerts_enabled=False,
+        intelligence_qa_enabled=True,
+        intelligence_ai_concurrency=7,
+    )
+
+    class Database:
+        session = object()
+
+        def __init__(self, url: str) -> None:
+            del url
+
+        async def create_schema(self) -> None: ...
+
+    class Adapter:
+        def __init__(
+            self,
+            channel: object,
+            service: object,
+            delivery: object,
+            *,
+            qa_concurrency: int,
+        ) -> None:
+            del channel, service, delivery
+            captured["qa_concurrency"] = qa_concurrency
+
+    async def serve(resources: object, *, scheduler_enabled: bool) -> None:
+        del resources, scheduler_enabled
+
+    intelligence = SimpleNamespace(
+        scheduler=None,
+        preferences=object(),
+        default_profile=object(),
+        qa=object(),
+        delivery=object(),
+    )
+    monkeypatch.setattr(runtime, "Database", Database)
+    monkeypatch.setattr(runtime, "AsyncOpenAI", lambda **kwargs: object())
+    monkeypatch.setattr(runtime, "SqlAlchemyGroupBindingStore", lambda session: object())
+    monkeypatch.setattr(runtime, "DeepSeekGateway", lambda client, model: object())
+    monkeypatch.setattr(runtime, "FeishuChannel", lambda **kwargs: object())
+    monkeypatch.setattr(runtime, "_build_intelligence", lambda *args: intelligence)
+    monkeypatch.setattr(runtime, "BotService", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runtime, "FeishuAdapter", Adapter)
+    monkeypatch.setattr(runtime, "_serve", serve)
+
+    await runtime._run_configured(settings)
+
+    assert captured == {"qa_concurrency": 7}
+
+
 async def test_disabled_scheduler_is_neither_started_nor_stopped() -> None:
     events: list[str] = []
 

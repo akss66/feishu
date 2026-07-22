@@ -118,6 +118,7 @@ async def _run_configured(settings: Settings) -> None:
                 resources.channel,
                 service,
                 delivery=intelligence.delivery,
+                qa_concurrency=settings.intelligence_ai_concurrency,
             )
         else:
             service = BotService(bindings, llm, settings.bot_bind_code.get_secret_value())

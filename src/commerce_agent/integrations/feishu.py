@@ -23,14 +23,20 @@ class FeishuAdapter:
         channel: Any,
         service: BotService,
         delivery: Any | None = None,
+        qa_concurrency: int = 2,
     ) -> None:
         self._channel = channel
         self._service = service
         self._delivery = delivery
         self._pending_tasks: set[asyncio.Task[None]] = set()
         self._closed = False
-        if getattr(service, "qa_enabled", False) and delivery is None:
-            raise ValueError("qa_delivery_required")
+        self._qa_slots_in_use = 0
+        self._qa_concurrency = qa_concurrency
+        if getattr(service, "qa_enabled", False):
+            if delivery is None:
+                raise ValueError("qa_delivery_required")
+            if qa_concurrency <= 0:
+                raise ValueError("qa_concurrency_must_be_positive")
         self._channel.on("message", self._on_message)
 
     async def _on_message(self, event: Any) -> None:
@@ -61,22 +67,55 @@ class FeishuAdapter:
             and getattr(self._service, "qa_enabled", False)
             and await self._service.qa_available(event.chat_id)
         ):
-            await self._channel.reply(
-                event,
-                {"text": "已收到，正在检索入库资料，请稍候。"},
-            )
-            if self._closed:
+            if not self._reserve_qa_slot():
+                logger.warning("grounded qa capacity exhausted")
+                await self._channel.reply(
+                    event,
+                    {"text": "当前问答请求较多，请稍后重试。"},
+                )
                 return
-            task = asyncio.create_task(
-                self._queue_and_send_qa(event, inbound),
-                name="feishu-grounded-qa",
-            )
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._pending_tasks.discard)
+            handed_off = False
+            try:
+                await self._channel.reply(
+                    event,
+                    {"text": "已收到，正在检索入库资料，请稍候。"},
+                )
+                if self._closed:
+                    return
+                background = self._run_reserved_qa(event, inbound)
+                try:
+                    task = asyncio.create_task(
+                        background,
+                        name="feishu-grounded-qa",
+                    )
+                except BaseException:
+                    background.close()
+                    raise
+                handed_off = True
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
+            finally:
+                if not handed_off:
+                    self._release_qa_slot()
             return
 
         reply = await self._service.handle(inbound)
         await self._channel.reply(event, {"text": reply})
+
+    def _reserve_qa_slot(self) -> bool:
+        if self._qa_slots_in_use >= self._qa_concurrency:
+            return False
+        self._qa_slots_in_use += 1
+        return True
+
+    def _release_qa_slot(self) -> None:
+        self._qa_slots_in_use -= 1
+
+    async def _run_reserved_qa(self, event: Any, inbound: InboundMessage) -> None:
+        try:
+            await self._queue_and_send_qa(event, inbound)
+        finally:
+            self._release_qa_slot()
 
     async def _queue_and_send_qa(self, event: Any, inbound: InboundMessage) -> None:
         try:
