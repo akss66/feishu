@@ -40,6 +40,16 @@ _RISK_LABELS = {
     "medium": "中（建议检查）",
     "high": "高（建议尽快处理）",
 }
+_MEDIA_CATEGORY_LABELS = {
+    "global_authority": "全球权威媒体",
+    "specialist": "电商与零售专业媒体",
+    "chinese_industry": "中文跨境行业媒体",
+}
+_CONTENT_BASIS_LABELS = {
+    "full_text": "已读取公开原文",
+    "feed_summary": "订阅源摘要（未读取整篇原文）",
+    "metadata_only": "仅标题和元数据（不用于详细结论）",
+}
 
 
 class DeliverySendError(RuntimeError):
@@ -229,6 +239,21 @@ def _friendly_deadline(value: object) -> str:
     return text
 
 
+def _media_context_line(item: dict[str, object]) -> str:
+    category = item.get("media_category")
+    basis = item.get("content_basis")
+    if category is None and basis is None:
+        return ""
+    parts: list[str] = []
+    if category is not None:
+        parts.append(
+            f"来源类型：{_MEDIA_CATEGORY_LABELS.get(str(category), '未识别')}"
+        )
+    if basis is not None:
+        parts.append(f"分析依据：{_CONTENT_BASIS_LABELS.get(str(basis), '未识别')}")
+    return "｜".join(parts) + "\n"
+
+
 def alert_markdown(item: dict[str, object], *, compact: bool = False) -> str:
     field_limit = 50 if compact else None
     rationale = "；".join(
@@ -253,6 +278,7 @@ def alert_markdown(item: dict[str, object], *, compact: bool = False) -> str:
     return (
         f"**{_plain(item['headline'], limit=headline_limit)}**\n"
         f"关注程度：{risk}｜信息可靠度：{_confidence_label(item['evidence_confidence'])}\n"
+        f"{_media_context_line(item)}"
         f"一句话看懂：{_plain(item['summary'], limit=value_limit)}\n"
         f"对店铺可能有什么影响：{_plain(item['impact'], limit=value_limit)}\n"
         f"建议你这样做：\n{actions}\n"

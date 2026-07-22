@@ -16,6 +16,7 @@ from commerce_agent.intelligence.delivery import (
     FeishuDeliveryPort,
     FeishuMessageRenderer,
     _plain,
+    alert_markdown,
     safe_feishu_error_code,
 )
 from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
@@ -172,6 +173,60 @@ def test_alert_card_contains_decision_fields_and_source_link() -> None:
 
     for professional_label in ("风险：high", "证据可信度：", "建议动作：", "不确定性："):
         assert professional_label not in encoded
+
+
+@pytest.mark.parametrize(
+    ("media_category", "content_basis", "expected"),
+    [
+        (
+            "global_authority",
+            "full_text",
+            "来源类型：全球权威媒体｜分析依据：已读取公开原文",
+        ),
+        (
+            "specialist",
+            "feed_summary",
+            "来源类型：电商与零售专业媒体｜分析依据：订阅源摘要（未读取整篇原文）",
+        ),
+        (
+            "chinese_industry",
+            "metadata_only",
+            "来源类型：中文跨境行业媒体｜分析依据：仅标题和元数据（不用于详细结论）",
+        ),
+    ],
+)
+def test_media_alert_explains_source_type_and_content_basis(
+    media_category: str,
+    content_basis: str,
+    expected: str,
+) -> None:
+    item = _alert_item()
+    item["media_category"] = media_category
+    item["content_basis"] = content_basis
+
+    rendered = alert_markdown(item)
+
+    assert expected in rendered
+
+
+def test_official_alert_omits_empty_media_labels() -> None:
+    rendered = alert_markdown(_alert_item())
+
+    assert "来源类型：" not in rendered
+    assert "分析依据：" not in rendered
+
+
+def test_unknown_media_labels_are_not_echoed_into_markdown() -> None:
+    item = _alert_item()
+    item["media_category"] = "<script>unsafe-category</script>"
+    item["content_basis"] = "[unsafe](javascript:alert(1))"
+
+    rendered = alert_markdown(item)
+
+    assert "来源类型：未识别" in rendered
+    assert "分析依据：未识别" in rendered
+    assert "unsafe-category" not in rendered
+    assert "javascript:" not in rendered
 
 
 def test_alert_card_rejects_markdown_injection_in_source_url() -> None:
