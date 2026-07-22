@@ -70,6 +70,7 @@ _KNOWN_ERROR_CODES = frozenset(
         "scheme_not_allowed",
         "source_disabled",
         "source_already_running",
+        "source_circuit_open",
         "too_many_redirects",
         "unexpected_http_status",
         "userinfo_not_allowed",
@@ -162,6 +163,18 @@ class IngestionService:
         source = self._registry.require(source_id)
         await self._ensure_sources_synced()
         started_at = self._clock()
+        if (
+            trigger is Trigger.SCHEDULED
+            and await self._repository.is_source_suspended(source_id)
+        ):
+            return self._summary(
+                source,
+                trigger,
+                started_at,
+                RunStatus.SKIPPED,
+                _RunCounts(error_code="source_circuit_open"),
+                FetchMetrics(),
+            )
         lease_token = await self._repository.claim_source(
             source_id,
             acquired_at=started_at,

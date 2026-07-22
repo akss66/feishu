@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from commerce_agent.ingestion.models import (
@@ -297,6 +298,90 @@ async def test_first_partial_run_initializes_health_failure_count(tmp_path) -> N
         assert health is not None
         assert health.consecutive_failures == 1
         assert health.health_status == "degraded"
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.parametrize("third_status", [RunStatus.PARTIAL, RunStatus.FAILED])
+async def test_three_consecutive_unsuccessful_runs_suspend_a_source_and_manual_success_recovers(
+    tmp_path,
+    third_status: RunStatus,
+) -> None:
+    database, repository = await _repository(tmp_path)
+    started_at = datetime(2026, 7, 20, 6, tzinfo=UTC)
+    try:
+        await repository.sync_sources([_source()])
+
+        for index, status in enumerate((RunStatus.FAILED, RunStatus.PARTIAL), start=1):
+            run_id = await repository.start_run(
+                "amazon-news",
+                Trigger.SCHEDULED,
+                started_at=started_at + timedelta(minutes=index),
+            )
+            await repository.finish_run(
+                run_id,
+                RunSummary(
+                    source_id="amazon-news",
+                    trigger=Trigger.SCHEDULED,
+                    status=status,
+                    started_at=started_at + timedelta(minutes=index),
+                    finished_at=started_at + timedelta(minutes=index, seconds=1),
+                    failed=1,
+                    error_code="fetch_failed",
+                ),
+            )
+
+        assert await repository.is_source_suspended("amazon-news") is False
+
+        suspended_run = await repository.start_run(
+            "amazon-news",
+            Trigger.SCHEDULED,
+            started_at=started_at + timedelta(minutes=3),
+        )
+        await repository.finish_run(
+            suspended_run,
+            RunSummary(
+                source_id="amazon-news",
+                trigger=Trigger.SCHEDULED,
+                status=third_status,
+                started_at=started_at + timedelta(minutes=3),
+                finished_at=started_at + timedelta(minutes=3, seconds=1),
+                failed=1,
+                error_code="fetch_failed",
+            ),
+        )
+
+        async with database.session() as session:
+            suspended_health = await session.get(SourceHealth, "amazon-news")
+
+        assert suspended_health is not None
+        assert suspended_health.consecutive_failures == 3
+        assert suspended_health.health_status == "suspended"
+        assert await repository.is_source_suspended("amazon-news") is True
+
+        recovery_run = await repository.start_run(
+            "amazon-news",
+            Trigger.MANUAL,
+            started_at=started_at + timedelta(minutes=4),
+        )
+        await repository.finish_run(
+            recovery_run,
+            RunSummary(
+                source_id="amazon-news",
+                trigger=Trigger.MANUAL,
+                status=RunStatus.SUCCESS,
+                started_at=started_at + timedelta(minutes=4),
+                finished_at=started_at + timedelta(minutes=4, seconds=1),
+            ),
+        )
+
+        async with database.session() as session:
+            recovered_health = await session.get(SourceHealth, "amazon-news")
+
+        assert recovered_health is not None
+        assert recovered_health.consecutive_failures == 0
+        assert recovered_health.health_status == "healthy"
+        assert await repository.is_source_suspended("amazon-news") is False
     finally:
         await database.dispose()
 

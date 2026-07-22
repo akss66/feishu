@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Final, Protocol
 from uuid import uuid4
 
 from sqlalchemy import delete, select
@@ -29,6 +29,7 @@ from commerce_agent.persistence.models import (
 )
 
 SOURCE_LEASE_TTL = timedelta(hours=24)
+SOURCE_FAILURE_THRESHOLD: Final[int] = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +83,8 @@ class PersistOutcome:
 class IngestionRepository(Protocol):
     async def sync_sources(self, sources: Sequence[SourceDefinition]) -> None: ...
 
+    async def is_source_suspended(self, source_id: str) -> bool: ...
+
     async def claim_source(
         self,
         source_id: str,
@@ -111,6 +114,15 @@ class IngestionRepository(Protocol):
 class SqlAlchemyIngestionRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
+
+    async def is_source_suspended(self, source_id: str) -> bool:
+        async with self._session_factory() as session:
+            status = await session.scalar(
+                select(SourceHealth.health_status).where(
+                    SourceHealth.source_id == source_id
+                )
+            )
+        return status == "suspended"
 
     async def sync_sources(self, sources: Sequence[SourceDefinition]) -> None:
         now = datetime.now(UTC)
@@ -336,9 +348,9 @@ class SqlAlchemyIngestionRepository:
             else:
                 health.consecutive_failures += 1
                 health.last_error_code = summary.error_code
-                health.health_status = (
-                    "degraded" if summary.status is RunStatus.PARTIAL else "error"
-                )
+                health.health_status = "suspended" if (
+                    health.consecutive_failures >= SOURCE_FAILURE_THRESHOLD
+                ) else ("degraded" if summary.status is RunStatus.PARTIAL else "error")
 
 
 def _source_values(source: SourceDefinition) -> dict[str, object]:

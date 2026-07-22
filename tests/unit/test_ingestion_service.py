@@ -169,6 +169,10 @@ class FakeRepository:
         self.persisted: list[PersistableDocument] = []
         self.finished: list[tuple[int, RunSummary]] = []
         self.lease_tokens: dict[str, str] = {}
+        self.suspended_source_ids: set[str] = set()
+
+    async def is_source_suspended(self, source_id: str) -> bool:
+        return source_id in self.suspended_source_ids
 
     async def claim_source(
         self,
@@ -317,6 +321,44 @@ async def test_disabled_source_is_finished_as_skipped_without_collection() -> No
     assert collector.calls == []
     assert repository.finished == [(1, summary)]
     assert repository.lease_tokens == {}
+
+
+async def test_scheduled_suspended_source_skips_without_starting_a_run_or_collecting() -> None:
+    collector = FakeCollector([item()])
+    repository = FakeRepository()
+    repository.suspended_source_ids.add("amazon-news")
+    ingestion, _, _ = service(
+        [source()],
+        {CollectorKind.RSS: collector},
+        repository=repository,
+    )
+
+    summary = await ingestion.run_source("amazon-news", Trigger.SCHEDULED)
+
+    assert summary.status is RunStatus.SKIPPED
+    assert summary.error_code == "source_circuit_open"
+    assert collector.calls == []
+    assert repository.started == []
+    assert repository.finished == []
+    assert repository.lease_tokens == {}
+
+
+async def test_manual_run_bypasses_a_suspended_source_circuit() -> None:
+    collector = FakeCollector([item()])
+    repository = FakeRepository()
+    repository.suspended_source_ids.add("amazon-news")
+    ingestion, _, _ = service(
+        [source()],
+        {CollectorKind.RSS: collector},
+        repository=repository,
+    )
+
+    summary = await ingestion.run_source("amazon-news", Trigger.MANUAL)
+
+    assert summary.status is RunStatus.SUCCESS
+    assert collector.calls
+    assert repository.started == [(1, "amazon-news", Trigger.MANUAL, summary.started_at)]
+    assert repository.finished == [(1, summary)]
 
 
 async def test_nonallowed_source_is_finished_as_skipped_without_collection() -> None:
