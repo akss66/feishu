@@ -146,6 +146,7 @@ class RaisingAnalyzer:
 class FakeGateway:
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses.copy()
+        self._index = 0
         self.call_count = 0
 
     async def complete_json(
@@ -153,7 +154,11 @@ class FakeGateway:
     ) -> str:
         del system_prompt, user_payload
         self.call_count += 1
-        return self.responses.pop(0)
+        if not self.responses:
+            raise AssertionError("the model gateway must not be called")
+        index = min(self._index, len(self.responses) - 1)
+        self._index += 1
+        return self.responses[index]
 
 
 class BlockingAnalyzer:
@@ -202,7 +207,7 @@ async def test_drain_completes_one_result_once_for_one_version() -> None:
     assert len(repository.completed) == 1
 
 
-async def test_invalid_output_uses_controlled_error_and_only_two_attempts(
+async def test_invalid_output_uses_controlled_error_and_only_three_attempts(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     repository = FakeRepository([_candidate()])
@@ -214,7 +219,7 @@ async def test_invalid_output_uses_controlled_error_and_only_two_attempts(
 
     assert batch.failed == 1
     assert batch.error_codes == ("invalid_model_output",)
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert repository.failures == [(1, "invalid_model_output")]
     assert "validation_code=invalid_json" in caplog.text
     assert "validation_issues=$:json_invalid" in caplog.text
@@ -281,27 +286,27 @@ def test_oversized_analysis_input_maps_to_controlled_code() -> None:
     )
 
 
-async def test_oversized_input_fails_without_gateway_call_or_body_in_logs(
+async def test_long_input_is_bounded_and_completes_without_body_in_logs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    secret_marker = "SECRET-OVERSIZED-ARTICLE"
+    secret_marker = "SECRET-LONG-ARTICLE"
+    base = _candidate()
     candidate = replace(
-        _candidate(),
-        body=secret_marker + "x" * (50_001 - len(secret_marker)),
+        base,
+        body=base.body + "x" * 60_000 + secret_marker,
     )
     repository = FakeRepository([candidate])
-    gateway = FakeGateway([])
+    result = _result().model_copy(update={"effective_at": None})
+    gateway = FakeGateway([result.model_dump_json()])
 
     with caplog.at_level(logging.WARNING):
         batch = await _service(repository, IntelligenceAnalyzer(gateway)).drain(limit=1)
 
     rendered = "\n".join(record.getMessage() for record in caplog.records)
-    assert batch.error_codes == ("input_too_large",)
-    assert repository.failures == [(1, "input_too_large")]
-    assert gateway.call_count == 0
-    assert "OversizedAnalysisInput" in rendered
-    assert "job_id=1" in rendered
-    assert "elapsed_ms=" in rendered
+    assert batch.error_codes == ()
+    assert batch.succeeded == 1
+    assert repository.failures == []
+    assert gateway.call_count == 1
     assert secret_marker not in rendered
 
 

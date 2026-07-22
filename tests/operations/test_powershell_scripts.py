@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-commerce-agent.ps1"
 INSTALLER = ROOT / "scripts" / "install-commerce-agent-autostart.ps1"
