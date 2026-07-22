@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from unicodedata import category
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
@@ -130,7 +131,11 @@ class DeliverySummary:
 
 
 def _plain(value: object, *, limit: int | None = None) -> str:
-    text = " ".join(str(value).split())
+    sanitized = "".join(
+        " " if character.isspace() else "" if category(character) == "Cc" else character
+        for character in str(value)
+    )
+    text = " ".join(sanitized.split())
     if limit is not None and len(text) > limit:
         text = f"{text[: max(limit - 1, 0)]}…"
     for token in ("\\", "`", "*", "_", "[", "]", "<", ">"):
@@ -249,7 +254,7 @@ def semantic_to_card(
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": _message_theme(payload, kind),
-                "title": {"tag": "plain_text", "content": _title(payload)},
+                "title": {"tag": "plain_text", "content": _plain(_title(payload))},
             },
             "elements": blocks,
         }

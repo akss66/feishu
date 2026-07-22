@@ -1,5 +1,6 @@
 import json
 import logging
+import unicodedata
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from commerce_agent.intelligence.delivery import (
     DeliveryWorker,
     FeishuDeliveryPort,
     FeishuMessageRenderer,
+    _plain,
     safe_feishu_error_code,
 )
 from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
@@ -189,6 +191,91 @@ def test_daily_title_always_displays_strategy_profile() -> None:
 
     assert rendered["card"]["header"]["template"] == "blue"
     assert "策略：保守" in rendered["card"]["header"]["title"]["content"]
+
+
+@pytest.mark.parametrize(
+    "character",
+    [*(chr(value) for value in range(0x20)), *(chr(value) for value in range(0x7F, 0xA0))],
+)
+def test_plain_sanitizes_c0_and_c1_controls_before_markdown_escaping(
+    character: str,
+) -> None:
+    expected_separator = " " if character.isspace() else ""
+
+    rendered = _plain(f"中{character}文🙂")
+
+    assert rendered == f"中{expected_separator}文🙂"
+    assert all(unicodedata.category(value) != "Cc" for value in rendered)
+
+
+def test_daily_card_sanitizes_untrusted_controls_and_preserves_unicode() -> None:
+    claim = _claim(
+        kind=MessageKind.DAILY_REPORT,
+        payload={
+            "title": "跨境\n电商每日情报\x00🙂",
+            "theme": "blue",
+            "risk_profile": "default",
+            "sections": [
+                {
+                    "title": "AI\t今日\x1b提炼🚀",
+                    "items": ["中文\r\n内容\x85继续\x7f🙂"],
+                }
+            ],
+        },
+    )
+
+    rendered = FeishuMessageRenderer().render(claim)
+
+    assert rendered["card"]["header"]["title"]["content"] == (
+        "跨境 电商每日情报🙂 · 策略：默认"
+    )
+    assert rendered["card"]["elements"][0]["content"] == (
+        "**AI 今日提炼🚀**\n- 中文 内容 继续🙂"
+    )
+
+
+def test_alert_card_sanitizes_untrusted_controls_and_preserves_unicode() -> None:
+    item = _alert_item()
+    item.update(
+        {
+            "headline": "平台\x00规则\n更新🙂",
+            "summary": "中文\r\n摘要\t保留🚀\x1b",
+            "impact": "影响\x85说明\x7f",
+            "rationale": [{"claim": "判\x01断", "quote": "原\n文"}],
+            "actions": [
+                {
+                    "action": "核对\x00商品",
+                    "owner_type": "运\t营",
+                    "deadline": "2026-07-22\x1b",
+                }
+            ],
+            "uncertainties": ["范围\r待确认\x7f"],
+            "source_name": "平台\x00公告🙂",
+        }
+    )
+    claim = _claim(
+        payload={
+            "title": "高\n风险\t预警\x00\x1b\x7f🙂",
+            "theme": "red",
+            "items": [item],
+        }
+    )
+
+    rendered = FeishuMessageRenderer().render(claim)
+    content = rendered["card"]["elements"][0]["content"]
+
+    assert rendered["card"]["header"]["title"]["content"] == "高 风险 预警🙂"
+    for expected in (
+        "**平台规则 更新🙂**",
+        "摘要：中文 摘要 保留🚀",
+        "影响：影响 说明",
+        "判断依据：判断（原文：原 文）",
+        "建议动作：核对商品｜负责人：运 营｜期限：2026-07-22",
+        "不确定性：范围 待确认",
+        "原文：[平台公告🙂](https://example.com/source/one)",
+    ):
+        assert expected in content
+    assert not any(character in content for character in ("\x00", "\x1b", "\x7f", "\r", "\t"))
 
 
 def test_oversized_alert_card_degrades_to_text_with_at_most_15_linked_items() -> None:
