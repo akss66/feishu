@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from types import SimpleNamespace
 
@@ -722,7 +723,7 @@ async def test_delivery_port_accepts_real_sdk_send_result_and_send_options() -> 
     assert isinstance(sdk_options, SendOpts)
     assert sdk_options.reply_to == "om_parent"
     assert sdk_options.reply_in_thread is True
-    assert sdk_options.uuid == "delivery-sdk-one"
+    assert sdk_options.uuid == hashlib.sha256(b"delivery-sdk-one").hexdigest()[:32]
 
 
 async def test_delivery_port_reduces_real_sdk_send_error_without_logging_details(

@@ -80,7 +80,7 @@ class FeishuDeliveryPort:
         options = {
             "reply_to": claim.reply_to_message_id,
             "reply_in_thread": claim.reply_in_thread,
-            "uuid": claim.idempotency_key,
+            "uuid": _delivery_uuid(claim.idempotency_key),
         }
         try:
             message = self._renderer.render(claim)
@@ -94,9 +94,7 @@ class FeishuDeliveryPort:
                     raise DeliverySendError(code)
                 fallback_options = {
                     **options,
-                    "uuid": hashlib.sha256(
-                        f"{claim.idempotency_key}:text".encode()
-                    ).hexdigest()[:32],
+                    "uuid": _delivery_uuid(claim.idempotency_key, suffix=":text"),
                 }
                 result = await self._channel.send(
                     claim.group_id,
@@ -117,6 +115,10 @@ class FeishuDeliveryPort:
         except Exception as error:
             raise DeliverySendError(safe_feishu_error_code(error)) from None
         return message_id
+
+
+def _delivery_uuid(idempotency_key: str, *, suffix: str = "") -> str:
+    return hashlib.sha256(f"{idempotency_key}{suffix}".encode()).hexdigest()[:32]
 
 
 class DeliveryRepository(Protocol):

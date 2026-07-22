@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import unicodedata
@@ -461,7 +462,11 @@ async def test_port_sends_proactively_with_stable_uuid() -> None:
         (
             "chat-one",
             FeishuMessageRenderer().render(claim),
-            {"reply_to": None, "reply_in_thread": False, "uuid": "delivery-key-one"},
+            {
+                "reply_to": None,
+                "reply_in_thread": False,
+                "uuid": hashlib.sha256(b"delivery-key-one").hexdigest()[:32],
+            },
         )
     ]
 
@@ -507,7 +512,7 @@ async def test_port_sends_thread_reply_options() -> None:
     assert channel.sent[0][2] == {
         "reply_to": "om_parent",
         "reply_in_thread": True,
-        "uuid": "delivery-key-one",
+        "uuid": hashlib.sha256(b"delivery-key-one").hexdigest()[:32],
     }
 
 
