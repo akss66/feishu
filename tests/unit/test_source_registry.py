@@ -355,7 +355,7 @@ def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() ->
     assert amazon.entry_url == "https://developer-docs.amazon/sp-api/changelog.rss"
     assert amazon.collector is CollectorKind.RSS
     assert amazon.compliance is ComplianceStatus.ALLOWED
-    assert amazon.enabled is False
+    assert amazon.enabled is True
     assert ebay.collector is CollectorKind.RSS
     assert ebay.enabled is True
     assert gdelt.adapter is SourceAdapter.GDELT

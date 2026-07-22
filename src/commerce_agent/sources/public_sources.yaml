@@ -8,7 +8,7 @@ sources:
     trust_tier: official
     collector: rss
     compliance: allowed
-    enabled: false
+    enabled: true
     regions: [global]
     language_hint: en
     interval_minutes: 120
