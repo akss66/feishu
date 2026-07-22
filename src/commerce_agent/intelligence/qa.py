@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Protocol
+from unicodedata import category
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -148,7 +149,11 @@ def append_sources(
 
 
 def _single_line(value: str) -> str:
-    flattened = " ".join(value.split())
+    sanitized = "".join(
+        (" " if character.isspace() else "") if category(character) == "Cc" else character
+        for character in value
+    )
+    flattened = " ".join(sanitized.split())
     return _CITATION.sub(lambda match: f"［{match.group(1)}］", flattened)
 
 

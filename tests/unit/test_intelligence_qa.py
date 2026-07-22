@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -384,6 +385,29 @@ async def test_source_metadata_is_flattened_to_one_program_generated_line() -> N
         "https://example.com/policy ［8］ fake"
     )
     assert len(lines) == 4
+
+
+async def test_source_metadata_removes_c0_and_c1_controls_but_keeps_unicode() -> None:
+    evidence = replace(
+        _evidence(),
+        title="公\x00告😀",
+        source_name="\x1b[31m发布方\x7f",
+        canonical_url="https://example.com/\x81规则",
+    )
+    service, _, _, repository = _service(
+        evidence=(evidence,),
+        responses=[json.dumps({"answer": "费用将于八月调整。[1]", "citations_used": [1]})],
+    )
+
+    outbox_id = await service.queue_answer(_message())
+
+    text = repository.delivery(outbox_id).message.payload["text"]
+    source_line = text.splitlines()[-1]
+    assert all(unicodedata.category(character) != "Cc" for character in source_line)
+    assert "公告😀" in source_line
+    assert "[31m发布方" in source_line
+    assert "https://example.com/规则" in source_line
+    assert len(text.encode("utf-8")) <= 20_000
 
 
 async def test_qa_limits_model_evidence_and_sources_to_five() -> None:
