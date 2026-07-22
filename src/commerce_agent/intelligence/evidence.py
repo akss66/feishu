@@ -18,7 +18,10 @@ class EvidenceScorer:
         specificity = 5 * int(bool(result.regions)) + 5 * int(result.effective_at is not None)
         corroboration = 10 if corroborating_sources >= 2 else 0
         schema = 10
-        return min(
+        score = min(
             100,
             source + anchors + extraction + specificity + corroboration + schema,
         )
+        if candidate.trust_tier is TrustTier.MEDIA and corroborating_sources < 2:
+            return min(score, 70)
+        return score

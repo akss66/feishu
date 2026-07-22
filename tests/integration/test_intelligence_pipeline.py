@@ -14,7 +14,9 @@ from commerce_agent.ingestion.models import (
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     Platform,
+    SourceAdapter,
     SourceDefinition,
     TrustTier,
 )
@@ -98,6 +100,10 @@ class OfflinePipeline:
             entry_url="https://news.example.test/fees",
             platforms=(Platform.EBAY,),
             trust_tier=TrustTier.MEDIA,
+            adapter=SourceAdapter.GENERIC,
+            content_scope=ContentScope.FEED_SUMMARY,
+            attribution="Fixture Marketplace News",
+            publisher_key="news.example.test",
             collector=CollectorKind.HTML,
             compliance=ComplianceStatus.ALLOWED,
             enabled=True,
@@ -135,6 +141,9 @@ class OfflinePipeline:
                 fetched_at=extracted.fetched_at,
                 author=extracted.author,
                 published_at=extracted.published_at,
+                publisher_key=str(extracted.metadata["publisher_key"]),
+                attribution=str(extracted.metadata["attribution"]),
+                content_scope=str(extracted.metadata["content_scope"]),
             )
         )
         return outcome.version_id

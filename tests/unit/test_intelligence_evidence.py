@@ -101,3 +101,27 @@ def test_all_six_score_components_are_deterministic() -> None:
         )
         == 80
     )
+
+
+def test_single_media_publisher_is_capped_at_seventy() -> None:
+    candidate = replace(
+        _candidate(),
+        trust_tier=TrustTier.MEDIA,
+        publisher_key="reuters.com",
+        attribution="Reuters",
+        content_scope="metadata_only",
+    )
+
+    assert EvidenceScorer().score(candidate, _result(), corroborating_sources=1) == 70
+
+
+def test_two_media_publishers_remove_the_single_publisher_cap() -> None:
+    candidate = replace(
+        _candidate(),
+        trust_tier=TrustTier.MEDIA,
+        publisher_key="reuters.com",
+        attribution="Reuters",
+        content_scope="metadata_only",
+    )
+
+    assert EvidenceScorer().score(candidate, _result(), corroborating_sources=2) == 90
