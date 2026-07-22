@@ -6,8 +6,10 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
-from commerce_agent.intelligence.errors import EmptyModelOutput
+from commerce_agent.intelligence.errors import EmptyModelOutput, OversizedAnalysisInput
 from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult
+
+MAX_ANALYSIS_BODY_CHARACTERS = 50_000
 
 
 class JsonModelGateway(Protocol):
@@ -300,6 +302,8 @@ class IntelligenceAnalyzer:
         self._gateway = gateway
 
     async def analyze(self, candidate: AnalysisCandidate) -> AnalysisResult:
+        if len(candidate.body) > MAX_ANALYSIS_BODY_CHARACTERS:
+            raise OversizedAnalysisInput
         payload = candidate_payload(candidate)
         last_code = "invalid_model_output"
         for attempt in range(2):

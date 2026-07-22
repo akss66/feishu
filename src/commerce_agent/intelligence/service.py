@@ -10,6 +10,7 @@ from time import monotonic
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from commerce_agent.intelligence.analyzer import IntelligenceAnalyzer, InvalidModelOutput
+from commerce_agent.intelligence.errors import OversizedAnalysisInput
 from commerce_agent.intelligence.evidence import EvidenceScorer
 from commerce_agent.intelligence.models import (
     AnalysisCandidate,
@@ -42,6 +43,8 @@ class _Analyzed:
 
 
 def controlled_analysis_error(error: Exception) -> str:
+    if isinstance(error, OversizedAnalysisInput):
+        return "input_too_large"
     if isinstance(error, InvalidModelOutput):
         return "invalid_model_output"
     if isinstance(error, (TimeoutError, APITimeoutError)):

@@ -10,6 +10,7 @@ import pytest
 from httpx import Request, Response
 from openai import APIConnectionError, APITimeoutError, InternalServerError
 
+import commerce_agent.intelligence.errors as errors_module
 from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.analyzer import IntelligenceAnalyzer, InvalidModelOutput
 from commerce_agent.intelligence.evidence import EvidenceScorer
@@ -266,6 +267,37 @@ def test_controlled_analysis_error_has_a_fixed_allowlist(
     error: Exception, expected: str
 ) -> None:
     assert controlled_analysis_error(error) == expected
+
+
+def test_oversized_analysis_input_maps_to_controlled_code() -> None:
+    assert (
+        controlled_analysis_error(errors_module.OversizedAnalysisInput())
+        == "input_too_large"
+    )
+
+
+async def test_oversized_input_fails_without_gateway_call_or_body_in_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_marker = "SECRET-OVERSIZED-ARTICLE"
+    candidate = replace(
+        _candidate(),
+        body=secret_marker + "x" * (50_001 - len(secret_marker)),
+    )
+    repository = FakeRepository([candidate])
+    gateway = FakeGateway([])
+
+    with caplog.at_level(logging.WARNING):
+        batch = await _service(repository, IntelligenceAnalyzer(gateway)).drain(limit=1)
+
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert batch.error_codes == ("input_too_large",)
+    assert repository.failures == [(1, "input_too_large")]
+    assert gateway.call_count == 0
+    assert "OversizedAnalysisInput" in rendered
+    assert "job_id=1" in rendered
+    assert "elapsed_ms=" in rendered
+    assert secret_marker not in rendered
 
 
 @pytest.mark.parametrize(

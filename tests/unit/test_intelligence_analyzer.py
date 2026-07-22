@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+import commerce_agent.intelligence.analyzer as analyzer_module
+import commerce_agent.intelligence.errors as errors_module
 from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.analyzer import (
     REPAIR_PROMPT,
@@ -88,6 +90,11 @@ def valid_json(**overrides: Any) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def test_analysis_size_boundary_api_is_stable() -> None:
+    assert analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS == 50_000
+    assert issubclass(errors_module.OversizedAnalysisInput, RuntimeError)
+
+
 async def test_analyzer_rejects_an_unanchored_quote_after_one_repair(
     candidate: AnalysisCandidate,
 ) -> None:
@@ -152,6 +159,40 @@ async def test_article_instructions_are_wrapped_as_untrusted_data(
     assert article["body"] == candidate.body
     assert article["published_at"] == candidate.published_at.isoformat()
     assert user["schema"]
+
+
+async def test_analyzer_accepts_body_at_hard_character_limit(
+    candidate: AnalysisCandidate,
+) -> None:
+    body = "界" * analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS
+    bounded_candidate = replace(candidate, body=body)
+    gateway = FakeJsonGateway(
+        [valid_json(rationale=[{"claim": "原文证据", "quote": "界" * 6}])]
+    )
+
+    result = await IntelligenceAnalyzer(gateway).analyze(bounded_candidate)
+
+    assert result.rationale[0].quote == "界" * 6
+    assert gateway.call_count == 1
+    assert gateway.calls[0][1]["article"]["body"] == body
+
+
+async def test_analyzer_rejects_body_over_hard_limit_before_gateway_call(
+    candidate: AnalysisCandidate,
+) -> None:
+    secret_marker = "SECRET-OVERSIZED-ARTICLE"
+    body = secret_marker + "界" * (
+        analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS + 1 - len(secret_marker)
+    )
+    oversized_candidate = replace(candidate, body=body)
+    gateway = FakeJsonGateway([])
+
+    with pytest.raises(errors_module.OversizedAnalysisInput) as raised:
+        await IntelligenceAnalyzer(gateway).analyze(oversized_candidate)
+
+    assert gateway.call_count == 0
+    assert body not in repr(raised.value)
+    assert secret_marker not in repr(raised.value)
 
 
 async def test_analyzer_rejects_extra_fields_as_schema_mismatch(
