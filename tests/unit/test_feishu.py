@@ -89,6 +89,41 @@ async def test_message_event_prefers_sdk_body_text_over_mentioned_content() -> N
     assert service.message.text == "\u5e2e\u52a9"
 
 
+async def test_mention_only_message_shows_help_without_starting_qa() -> None:
+    class RecordingService:
+        qa_enabled = True
+
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def qa_available(self, chat_id: str) -> bool:
+            raise AssertionError("mention-only messages must not check QA availability")
+
+        async def handle(self, message) -> str:
+            self.messages.append(message)
+            return "help content"
+
+    class Delivery:
+        async def send_id(self, outbox_id: int) -> None:
+            raise AssertionError(outbox_id)
+
+    channel = FakeChannel()
+    service = RecordingService()
+    adapter = FeishuAdapter(channel, service, delivery=Delivery())
+    event = SimpleNamespace(
+        chat_id="chat-one",
+        message_id="msg-one",
+        body_text="  \n\t",
+        content_text="@跨境电商情报助手",
+    )
+
+    await channel.handlers["message"](event)
+
+    assert [message.text for message in service.messages] == ["  \n\t"]
+    assert channel.replies == [(event, {"text": "help content"})]
+    assert not adapter._pending_tasks
+
+
 async def _wait_for_reply_count(channel: FakeChannel, count: int) -> None:
     async with asyncio.timeout(1):
         while len(channel.replies) < count:

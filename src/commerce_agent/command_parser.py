@@ -3,7 +3,7 @@ from commerce_agent.domain import Command, CommandKind
 
 def parse_command(text: str) -> Command:
     normalized = " ".join(text.strip().split())
-    if normalized == "帮助":
+    if not normalized or normalized == "帮助":
         return Command(CommandKind.HELP)
     if normalized == "状态":
         return Command(CommandKind.STATUS)

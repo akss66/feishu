@@ -7,6 +7,8 @@ from commerce_agent.domain import CommandKind
 @pytest.mark.parametrize(
     ("text", "kind", "argument"),
     [
+        ("", CommandKind.HELP, ""),
+        ("   \n\t", CommandKind.HELP, ""),
         ("帮助", CommandKind.HELP, ""),
         ("状态", CommandKind.STATUS, ""),
         ("绑定本群 abc123", CommandKind.BIND, "abc123"),
