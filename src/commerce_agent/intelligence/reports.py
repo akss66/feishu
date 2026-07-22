@@ -17,6 +17,7 @@ from commerce_agent.intelligence.models import (
     RiskProfile,
     ScoredAnalysis,
 )
+from commerce_agent.media.catalog import publisher_profile
 
 if TYPE_CHECKING:
     from commerce_agent.intelligence.repository import SqlAlchemyIntelligenceRepository
@@ -189,6 +190,7 @@ def _daily_actions(
 
 def _daily_item(item: ScoredAnalysis, profile: RiskProfile) -> dict[str, object]:
     verified = item.evidence_confidence >= 75
+    source_fields = _source_fields(item)
     return {
         "analysis_id": item.analysis_id,
         "document_version_id": item.candidate.document_version_id,
@@ -204,9 +206,26 @@ def _daily_item(item: ScoredAnalysis, profile: RiskProfile) -> dict[str, object]
         "rationale": [claim.model_dump(mode="json") for claim in item.result.rationale],
         "actions": _daily_actions(item, profile, verified=verified),
         "uncertainties": list(item.result.uncertainties),
-        "source_name": item.candidate.attribution or item.candidate.source_name,
         "source_url": item.candidate.canonical_url,
+        **source_fields,
+    }
+
+
+def _source_fields(item: ScoredAnalysis) -> dict[str, object]:
+    profile = (
+        publisher_profile(item.candidate.publisher_key)
+        if item.candidate.publisher_key is not None
+        else None
+    )
+    return {
+        "source_name": (
+            profile.display_name
+            if profile is not None
+            else item.candidate.attribution or item.candidate.source_name
+        ),
         "publisher_key": item.candidate.publisher_key,
+        "media_category": profile.category.value if profile is not None else None,
+        "content_basis": item.candidate.content_scope,
     }
 
 
@@ -349,8 +368,8 @@ def alert_item(item: ScoredAnalysis, decision: RiskDecision) -> dict[str, object
         "rationale": [claim.model_dump(mode="json") for claim in item.result.rationale],
         "actions": _alert_actions(item, decision),
         "uncertainties": list(item.result.uncertainties),
-        "source_name": item.candidate.source_name,
         "source_url": item.candidate.canonical_url,
+        **_source_fields(item),
     }
 
 

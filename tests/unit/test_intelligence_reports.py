@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -271,6 +272,29 @@ def test_report_items_include_risk_confidence_basis_action_attribution_and_origi
     assert items[2]["source_name"] == "媒体署名 2"
     assert items[2]["source_url"] == "https://example.com/2"
     assert items[2]["publisher_key"] == "publisher-2.example"
+
+
+def test_media_report_item_uses_catalog_label_and_content_basis() -> None:
+    media = _analysis(1)
+    media = replace(
+        media,
+        candidate=replace(
+            media.candidate,
+            publisher_key="reuters.com",
+            attribution="GDELT index; original publisher shown per item",
+            content_scope="full_text",
+        ),
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(media,),
+    )
+
+    item = draft.payload["items"][0]
+    assert item["source_name"] == "Reuters"
+    assert item["media_category"] == "global_authority"
+    assert item["content_basis"] == "full_text"
 
 
 def test_profiles_change_actions_but_not_evidence_or_verification_status() -> None:

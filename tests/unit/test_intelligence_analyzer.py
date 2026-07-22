@@ -15,6 +15,7 @@ from commerce_agent.intelligence.analyzer import (
     SYSTEM_PROMPT,
     IntelligenceAnalyzer,
     InvalidModelOutput,
+    candidate_payload,
 )
 from commerce_agent.intelligence.errors import EmptyModelOutput
 from commerce_agent.intelligence.models import AnalysisCandidate, EventType
@@ -104,6 +105,27 @@ def test_analysis_prompts_require_plain_language_explanations_and_actions() -> N
         assert "对店铺经营的实际影响" in prompt
         assert "可以直接执行的检查步骤" in prompt
         assert "不得只写“关注官方文档”" in prompt
+
+
+def test_media_candidate_payload_exposes_publisher_and_full_text_basis(
+    candidate: AnalysisCandidate,
+) -> None:
+    media_candidate = replace(
+        candidate,
+        trust_tier=TrustTier.MEDIA,
+        publisher_key="reuters.com",
+        attribution="GDELT index; original publisher shown per item",
+        content_scope="full_text",
+    )
+
+    payload = candidate_payload(media_candidate)
+
+    assert payload["article"]["media"] == {
+        "publisher_key": "reuters.com",
+        "publisher_name": "Reuters",
+        "category": "global_authority",
+        "content_basis": "full_text",
+    }
 
 
 async def test_analyzer_rejects_an_unanchored_quote_after_one_repair(

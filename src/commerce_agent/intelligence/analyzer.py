@@ -6,8 +6,10 @@ from typing import Protocol
 
 from pydantic import ValidationError
 
+from commerce_agent.ingestion.models import TrustTier
 from commerce_agent.intelligence.errors import EmptyModelOutput, OversizedAnalysisInput
 from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult
+from commerce_agent.media.catalog import publisher_name, publisher_profile
 
 MAX_ANALYSIS_BODY_CHARACTERS = 50_000
 
@@ -27,6 +29,7 @@ impact 要说明对店铺经营的实际影响，例如商品、订单、费用�
 action_items 必须提供可以直接执行的检查步骤，写清检查对象和判断结果后的下一步；
 不得只写“关注官方文档”。
 rationale.claim 用通俗中文解释判断理由，rationale.quote 仍须保留原文证据。
+article.media.content_basis 说明当前依据是原文还是摘要，不得把元数据当作原文。
 owner_type 使用普通人能理解的中文岗位名称。"""
 
 
@@ -174,6 +177,19 @@ _SCOPE_UNKNOWN_EN_PATTERN = re.compile(
 
 
 def candidate_payload(candidate: AnalysisCandidate) -> dict[str, object]:
+    profile = (
+        publisher_profile(candidate.publisher_key)
+        if candidate.publisher_key is not None
+        else None
+    )
+    media: dict[str, object] | None = None
+    if candidate.trust_tier is TrustTier.MEDIA and candidate.publisher_key is not None:
+        media = {
+            "publisher_key": candidate.publisher_key,
+            "publisher_name": publisher_name(candidate.publisher_key),
+            "category": profile.category.value if profile is not None else None,
+            "content_basis": candidate.content_scope,
+        }
     return {
         "article": {
             "title": candidate.title,
@@ -186,6 +202,7 @@ def candidate_payload(candidate: AnalysisCandidate) -> dict[str, object]:
             "regions": list(candidate.regions),
             "source_name": candidate.source_name,
             "trust_tier": candidate.trust_tier.value,
+            "media": media,
         },
         "schema": AnalysisResult.model_json_schema(),
     }
