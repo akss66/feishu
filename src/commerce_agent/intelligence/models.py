@@ -62,7 +62,7 @@ class ActionItem(BaseModel):
 class AnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     headline_zh: str = Field(min_length=4, max_length=120)
-    summary_zh: str = Field(min_length=80, max_length=250)
+    summary_zh: str = Field(min_length=20, max_length=250)
     event_type: EventType
     platforms: tuple[Platform, ...] = Field(min_length=1)
     regions: tuple[str, ...] = Field(min_length=1)

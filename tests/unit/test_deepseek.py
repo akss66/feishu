@@ -68,6 +68,8 @@ async def test_complete_json_serializes_the_payload_without_ascii_escaping() -> 
                 ),
             },
         ],
+        "response_format": {"type": "json_object"},
+        "max_tokens": 4096,
         "stream": False,
     }
 

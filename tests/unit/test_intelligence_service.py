@@ -202,17 +202,22 @@ async def test_drain_completes_one_result_once_for_one_version() -> None:
     assert len(repository.completed) == 1
 
 
-async def test_invalid_output_uses_controlled_error_and_only_two_attempts() -> None:
+async def test_invalid_output_uses_controlled_error_and_only_two_attempts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     repository = FakeRepository([_candidate()])
     gateway = FakeGateway(["bad", "still bad"])
     service = _service(repository, IntelligenceAnalyzer(gateway))
 
-    batch = await service.drain(limit=10)
+    with caplog.at_level(logging.WARNING):
+        batch = await service.drain(limit=10)
 
     assert batch.failed == 1
     assert batch.error_codes == ("invalid_model_output",)
     assert gateway.call_count == 2
     assert repository.failures == [(1, "invalid_model_output")]
+    assert "validation_code=invalid_json" in caplog.text
+    assert "validation_issues=$:json_invalid" in caplog.text
 
 
 async def test_drain_never_exceeds_configured_concurrency() -> None:

@@ -25,6 +25,23 @@ from commerce_agent.intelligence.risk import RiskPolicy, event_fingerprint
 
 logger = logging.getLogger(__name__)
 
+_MODEL_VALIDATION_CODES = frozenset(
+    {
+        "empty_output",
+        "invalid_json",
+        "schema_mismatch",
+        "evidence_not_anchored",
+        "evidence_not_substantive",
+        "platform_not_grounded",
+        "region_not_grounded",
+        "seller_scope_not_grounded",
+        "seller_scope_uncertain",
+        "amount_not_grounded",
+        "date_not_grounded",
+        "date_precision_not_grounded",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class AnalysisBatch:
@@ -187,9 +204,23 @@ class AnalysisService:
 
 def _log_analysis_failure(error: Exception, job_id: int, started_at: float) -> None:
     elapsed_ms = max(0, round((monotonic() - started_at) * 1000))
+    validation_code = (
+        error.code
+        if isinstance(error, InvalidModelOutput)
+        and error.code in _MODEL_VALIDATION_CODES
+        else "-"
+    )
+    validation_issues = (
+        ",".join(error.validation_issues)
+        if isinstance(error, InvalidModelOutput) and error.validation_issues
+        else "-"
+    )
     logger.warning(
-        "analysis_failed error_type=%s job_id=%s elapsed_ms=%s",
+        "analysis_failed error_type=%s validation_code=%s validation_issues=%s "
+        "job_id=%s elapsed_ms=%s",
         type(error).__name__,
+        validation_code,
+        validation_issues,
         job_id,
         elapsed_ms,
     )

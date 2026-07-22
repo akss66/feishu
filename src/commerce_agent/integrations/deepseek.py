@@ -41,6 +41,8 @@ class DeepSeekGateway:
                     ),
                 },
             ],
+            response_format={"type": "json_object"},
+            max_tokens=4096,
             stream=False,
         )
         content = response.choices[0].message.content

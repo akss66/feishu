@@ -57,3 +57,25 @@ def test_analysis_result_accepts_strict_valid_payload() -> None:
     )
 
     assert result.platforms == (Platform.EBAY,)
+
+
+def test_analysis_result_accepts_a_concise_grounded_summary() -> None:
+    payload = {
+        "headline_zh": "平台公告更新",
+        "summary_zh": "平台发布变更公告，卖家需核对官方原文、适用范围与后续影响。",
+        "event_type": EventType.POLICY,
+        "platforms": [Platform.EBAY],
+        "regions": ["global"],
+        "affected_seller_types": [],
+        "effective_at": None,
+        "risk_level": RiskLevel.LOW,
+        "impact": "具体影响有待核对。",
+        "rationale": [{"claim": "公告已更新", "quote": "policy update"}],
+        "action_items": [],
+        "uncertainties": ["适用卖家范围未知"],
+        "tags": ["公告"],
+    }
+
+    result = AnalysisResult.model_validate(payload)
+
+    assert result.summary_zh == payload["summary_zh"]
