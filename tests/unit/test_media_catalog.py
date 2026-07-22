@@ -1,0 +1,35 @@
+from commerce_agent.media.catalog import (
+    ArticleAccess,
+    MediaCategory,
+    publisher_name,
+    publisher_profile,
+)
+
+
+def test_catalog_normalizes_www_without_suffix_confusion() -> None:
+    profile = publisher_profile("www.reuters.com")
+
+    assert profile is not None
+    assert profile.publisher_key == "reuters.com"
+    assert profile.display_name == "Reuters"
+    assert profile.category is MediaCategory.GLOBAL_AUTHORITY
+    assert profile.article_access is ArticleAccess.AUTHORIZATION_REQUIRED
+    assert publisher_profile("reuters.com.example") is None
+
+
+def test_catalog_includes_three_media_categories() -> None:
+    assert publisher_profile("apnews.com").category is MediaCategory.GLOBAL_AUTHORITY
+    assert publisher_profile("retaildive.com").category is MediaCategory.SPECIALIST
+    assert publisher_profile("cifnews.com").category is MediaCategory.CHINESE_INDUSTRY
+
+
+def test_catalog_matches_subdomains_and_rejects_unknown_hosts() -> None:
+    assert publisher_profile("feeds.bbci.co.uk").publisher_key == "bbc.com"
+    assert publisher_profile("news.marketplacepulse.com").article_access is ArticleAccess.DENIED
+    assert publisher_profile("example.com") is None
+    assert publisher_profile("") is None
+
+
+def test_publisher_name_falls_back_to_key_for_unknown_publisher() -> None:
+    assert publisher_name("digitalcommerce360.com") == "Digital Commerce 360"
+    assert publisher_name("unknown.example") == "unknown.example"
