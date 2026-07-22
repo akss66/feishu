@@ -626,15 +626,31 @@ class SqlAlchemyIntelligenceRepository:
                 raise RuntimeError("daily report must be previewed before it can be queued")
 
             idempotency_key = f"daily:{report.group_id}:{report.report_date.isoformat()}"
-            existing_id = await session.scalar(
-                select(DeliveryOutbox.id).where(
+            existing = await session.scalar(
+                select(DeliveryOutbox).where(
                     DeliveryOutbox.idempotency_key == idempotency_key
                 )
             )
-            if existing_id is not None:
+            if existing is not None:
+                if (
+                    existing.message_kind == MessageKind.DAILY_REPORT.value
+                    and existing.status in {"skipped", "failed"}
+                ):
+                    existing.payload = report.report_payload
+                    existing.status = "pending"
+                    existing.attempt_count = 0
+                    existing.next_attempt_at = None
+                    existing.lease_token = None
+                    existing.lease_expires_at = None
+                    existing.safe_error_code = None
+                    existing.feishu_message_id = None
+                    existing.sent_at = None
+                    existing.created_at = now
+                    report.status = "queued"
+                    return existing.id
                 if report.status == "previewed":
                     report.status = "queued"
-                return existing_id
+                return existing.id
             if report.status == "queued":
                 raise RuntimeError("queued daily report is missing its outbox row")
 

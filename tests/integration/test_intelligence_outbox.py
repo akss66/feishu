@@ -753,6 +753,69 @@ async def test_marking_delivery_sent_marks_linked_report_in_same_transaction(
         await database.dispose()
 
 
+@pytest.mark.parametrize("terminal_status", ["skipped", "failed"])
+async def test_terminal_daily_report_delivery_can_be_requeued_and_sent(
+    tmp_path, terminal_status: str
+) -> None:
+    database, repository, _, _ = await _services(
+        tmp_path, f"report-recovery-{terminal_status}.db"
+    )
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=())
+    replacement_payload = {"title": f"recovered-{terminal_status}"}
+    try:
+        report_id = await repository.save_report("chat-one", draft, now=NOW)
+        await repository.mark_report_previewed(report_id)
+        outbox_id = await repository.queue_report(report_id, now=NOW)
+        terminal_time = await _make_terminal(
+            repository, outbox_id, terminal_status, now=NOW
+        )
+        recovery_time = terminal_time + timedelta(hours=1)
+
+        async with database.session.begin() as session:
+            report = await session.get(DailyReport, report_id)
+            outbox = await session.get(DeliveryOutbox, outbox_id)
+            assert report is not None and outbox is not None
+            report.report_payload = replacement_payload
+            outbox.next_attempt_at = recovery_time + timedelta(days=1)
+            outbox.lease_token = "stale-terminal-lease"
+            outbox.lease_expires_at = recovery_time + timedelta(minutes=5)
+            outbox.feishu_message_id = "stale-message"
+            outbox.sent_at = terminal_time
+
+        recovered_id = await repository.queue_report(report_id, now=recovery_time)
+
+        assert recovered_id == outbox_id
+        recovered = (await repository.list_outbox((outbox_id,)))[0]
+        assert recovered.status == "pending"
+        assert recovered.attempt_count == 0
+        assert recovered.next_attempt_at is None
+        assert recovered.lease_token is None
+        assert recovered.lease_expires_at is None
+        assert recovered.safe_error_code is None
+        assert recovered.feishu_message_id is None
+        assert recovered.sent_at is None
+        assert recovered.payload == replacement_payload
+        assert recovered.created_at == recovery_time
+
+        claim = await repository.claim_delivery_by_id(outbox_id, now=recovery_time)
+        assert claim is not None
+        assert claim.attempt_count == 1
+        assert claim.payload == replacement_payload
+        await repository.mark_delivery_sent(
+            claim, message_id="om_recovered", now=recovery_time
+        )
+
+        async with database.session() as session:
+            report = await session.get(DailyReport, report_id)
+            outbox = await session.get(DeliveryOutbox, outbox_id)
+        assert report is not None and report.status == "sent"
+        assert report.sent_at == recovery_time
+        assert outbox is not None and outbox.status == "sent"
+        assert outbox.feishu_message_id == "om_recovered"
+    finally:
+        await database.dispose()
+
+
 async def test_missing_linked_report_rolls_back_sent_transition(tmp_path) -> None:
     database, repository, _, _ = await _services(tmp_path, "missing-report.db")
     try:
