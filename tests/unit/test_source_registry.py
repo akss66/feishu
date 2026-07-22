@@ -324,3 +324,19 @@ def test_public_registry_has_required_platform_coverage_and_seed_mix() -> None:
             )
             for source in registry.sources
         ), platform
+
+
+def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    media = tuple(source for source in registry.sources if source.trust_tier is TrustTier.MEDIA)
+
+    assert media
+    for source in media:
+        assert source.adapter is SourceAdapter.GENERIC
+        assert source.content_scope in {
+            ContentScope.METADATA_ONLY,
+            ContentScope.FEED_SUMMARY,
+        }
+        assert source.attribution
+        assert source.publisher_key
+        assert source.enabled is False
