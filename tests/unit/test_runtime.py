@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,14 +65,15 @@ class Adapter:
 
 
 class Scheduler:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], name: str = "scheduler") -> None:
         self._events = events
+        self._name = name
 
     def start(self) -> None:
-        self._events.append("scheduler_start")
+        self._events.append(f"{self._name}_start")
 
     async def aclose(self) -> None:
-        self._events.append("scheduler_stop")
+        self._events.append(f"{self._name}_stop")
 
 
 def test_runtime_logging_suppresses_transport_queries_but_keeps_application_info(
@@ -99,6 +101,7 @@ def resources(
     *,
     adapter: Adapter | None = None,
     scheduler: object | None = None,
+    intelligence_scheduler: object | None = None,
 ) -> RuntimeResources:
     return RuntimeResources(
         database=DatabaseCloser(events),
@@ -106,6 +109,7 @@ def resources(
         channel=ChannelCloser(events),
         adapter=adapter or Adapter(events),
         scheduler=scheduler or Scheduler(events),
+        intelligence_scheduler=intelligence_scheduler,
         ingestion_resources=(
             AsyncCloser("http", events),
             AsyncCloser("browser", events),
@@ -192,6 +196,93 @@ async def test_all_resources_close_once_in_shutdown_order() -> None:
         "deepseek",
         "database",
     ]
+
+
+async def test_intelligence_scheduler_starts_first_and_stops_before_ingestion() -> None:
+    events: list[str] = []
+
+    await _serve(
+        resources(
+            events,
+            intelligence_scheduler=Scheduler(events, "intelligence"),
+        ),
+        scheduler_enabled=True,
+    )
+
+    assert events == [
+        "intelligence_start",
+        "scheduler_start",
+        "connect",
+        "intelligence_stop",
+        "scheduler_stop",
+        "adapter",
+        "channel",
+        "http",
+        "browser",
+        "deepseek",
+        "database",
+    ]
+
+
+def test_disabled_intelligence_graph_has_no_scheduler_or_qa() -> None:
+    from commerce_agent.runtime import _build_intelligence
+
+    settings = SimpleNamespace(
+        intelligence_analysis_enabled=False,
+        intelligence_daily_report_enabled=False,
+        intelligence_alerts_enabled=False,
+        intelligence_qa_enabled=False,
+        intelligence_timezone="Asia/Shanghai",
+        intelligence_daily_hour=9,
+        intelligence_ai_concurrency=2,
+        intelligence_risk_profile="default",
+        intelligence_context_ttl_minutes=30,
+        intelligence_qa_max_turns=6,
+        deepseek_model="deepseek-v4-pro",
+    )
+    database = SimpleNamespace(session=object())
+
+    runtime = _build_intelligence(
+        settings,
+        database,
+        llm=object(),
+        channel=object(),
+        bindings=object(),
+    )
+
+    assert runtime.scheduler is None
+    assert runtime.qa is None
+
+
+def test_enabled_intelligence_graph_wires_qa_delivery_and_scheduler() -> None:
+    from commerce_agent.runtime import _build_intelligence
+
+    settings = SimpleNamespace(
+        intelligence_analysis_enabled=True,
+        intelligence_daily_report_enabled=True,
+        intelligence_alerts_enabled=True,
+        intelligence_qa_enabled=True,
+        intelligence_timezone="Asia/Shanghai",
+        intelligence_daily_hour=9,
+        intelligence_ai_concurrency=2,
+        intelligence_risk_profile="aggressive",
+        intelligence_context_ttl_minutes=30,
+        intelligence_qa_max_turns=6,
+        deepseek_model="deepseek-v4-pro",
+    )
+
+    runtime = _build_intelligence(
+        settings,
+        SimpleNamespace(session=object()),
+        llm=object(),
+        channel=object(),
+        bindings=object(),
+    )
+
+    assert runtime.scheduler is not None
+    assert runtime.qa is not None
+    assert runtime.delivery is not None
+    assert runtime.default_profile.value == "aggressive"
 
 
 async def test_disabled_scheduler_is_neither_started_nor_stopped() -> None:

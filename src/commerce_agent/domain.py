@@ -15,6 +15,7 @@ class CommandKind(StrEnum):
     STATUS = "status"
     BIND = "bind"
     AI_TEST = "ai_test"
+    RISK_PROFILE = "risk_profile"
     UNKNOWN = "unknown"
 
 

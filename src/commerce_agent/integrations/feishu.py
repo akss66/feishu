@@ -14,14 +14,23 @@ from commerce_agent.intelligence.delivery import (
 )
 
 logger = logging.getLogger(__name__)
+_TASK_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
 class FeishuAdapter:
-    def __init__(self, channel: Any, service: BotService) -> None:
+    def __init__(
+        self,
+        channel: Any,
+        service: BotService,
+        delivery: Any | None = None,
+    ) -> None:
         self._channel = channel
         self._service = service
+        self._delivery = delivery
         self._pending_tasks: set[asyncio.Task[None]] = set()
         self._closed = False
+        if getattr(service, "qa_enabled", False) and delivery is None:
+            raise ValueError("qa_delivery_required")
         self._channel.on("message", self._on_message)
 
     async def _on_message(self, event: Any) -> None:
@@ -32,6 +41,7 @@ class FeishuAdapter:
             chat_id=event.chat_id,
             message_id=event.message_id,
             text=text,
+            thread_id=getattr(getattr(event, "conversation", None), "thread_id", None),
         )
         command = parse_command(text)
         if command.kind is CommandKind.AI_TEST and command.argument:
@@ -46,8 +56,64 @@ class FeishuAdapter:
             task.add_done_callback(self._pending_tasks.discard)
             return
 
+        if (
+            command.kind is CommandKind.UNKNOWN
+            and getattr(self._service, "qa_enabled", False)
+            and await self._service.qa_available(event.chat_id)
+        ):
+            await self._channel.reply(
+                event,
+                {"text": "已收到，正在检索入库资料，请稍候。"},
+            )
+            if self._closed:
+                return
+            task = asyncio.create_task(
+                self._queue_and_send_qa(event, inbound),
+                name="feishu-grounded-qa",
+            )
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
+            return
+
         reply = await self._service.handle(inbound)
         await self._channel.reply(event, {"text": reply})
+
+    async def _queue_and_send_qa(self, event: Any, inbound: InboundMessage) -> None:
+        try:
+            outbox_id = await self._service.queue_question(inbound)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error(
+                "grounded qa failed before queue (exception_type=%s)",
+                type(error).__name__,
+            )
+            await self._reply_qa_prequeue_failure(event)
+            return
+        if self._closed:
+            return
+        try:
+            await self._delivery.send_id(outbox_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error(
+                "grounded qa delivery failed (exception_type=%s)",
+                type(error).__name__,
+            )
+
+    async def _reply_qa_prequeue_failure(self, event: Any) -> None:
+        if self._closed:
+            return
+        try:
+            await self._channel.reply(event, {"text": "资料检索失败，请稍后重试。"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error(
+                "grounded qa failure reply failed (exception_type=%s)",
+                type(error).__name__,
+            )
 
     async def _complete_ai_test(self, event: Any, inbound: InboundMessage) -> None:
         try:
@@ -88,8 +154,11 @@ class FeishuAdapter:
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self._pending_tasks.difference_update(tasks)
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=_TASK_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            self._pending_tasks.difference_update(done)
 
 
 __all__ = [

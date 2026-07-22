@@ -15,4 +15,8 @@ def parse_command(text: str) -> Command:
         return Command(CommandKind.AI_TEST)
     if normalized.startswith("AI测试 "):
         return Command(CommandKind.AI_TEST, normalized.removeprefix("AI测试 "))
+    if normalized == "策略":
+        return Command(CommandKind.RISK_PROFILE)
+    if normalized.startswith("策略 "):
+        return Command(CommandKind.RISK_PROFILE, normalized.removeprefix("策略 "))
     return Command(CommandKind.UNKNOWN, normalized)

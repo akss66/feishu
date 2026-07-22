@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from lark_channel import FeishuChannel, LogLevel, SecurityConfig
 from openai import AsyncOpenAI
@@ -28,7 +30,21 @@ class RuntimeResources:
     channel: Any | None = None
     adapter: Any | None = None
     scheduler: Any | None = None
+    intelligence_scheduler: Any | None = None
     ingestion_resources: tuple[_AsyncCloser, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceRuntime:
+    scheduler: Any | None
+    repository: Any
+    analysis: Any
+    reports: Any
+    alerts: Any
+    preferences: Any
+    default_profile: Any
+    qa: Any | None
+    delivery: Any
 
 
 async def run() -> None:
@@ -66,19 +82,169 @@ async def _run_configured(settings: Settings) -> None:
             timeout=settings.deepseek_timeout_seconds,
         )
         llm = DeepSeekGateway(resources.openai_client, settings.deepseek_model)
-        service = BotService(bindings, llm, settings.bot_bind_code.get_secret_value())
         resources.channel = FeishuChannel(
             app_id=settings.lark_app_id,
             app_secret=settings.lark_app_secret.get_secret_value(),
             log_level=LogLevel.WARNING,
             security=SecurityConfig(mode="audit"),
         )
-        resources.adapter = FeishuAdapter(resources.channel, service)
+        intelligence_enabled = any(
+            bool(getattr(settings, name, False))
+            for name in (
+                "intelligence_analysis_enabled",
+                "intelligence_daily_report_enabled",
+                "intelligence_alerts_enabled",
+                "intelligence_qa_enabled",
+            )
+        )
+        if intelligence_enabled:
+            intelligence = _build_intelligence(
+                settings,
+                resources.database,
+                llm,
+                resources.channel,
+                bindings,
+            )
+            resources.intelligence_scheduler = intelligence.scheduler
+            service = BotService(
+                bindings,
+                llm,
+                settings.bot_bind_code.get_secret_value(),
+                risk_profiles=intelligence.preferences,
+                default_risk_profile=intelligence.default_profile,
+                qa=intelligence.qa,
+            )
+            resources.adapter = FeishuAdapter(
+                resources.channel,
+                service,
+                delivery=intelligence.delivery,
+            )
+        else:
+            service = BotService(bindings, llm, settings.bot_bind_code.get_secret_value())
+            resources.adapter = FeishuAdapter(resources.channel, service)
     except BaseException:
         await _close_resources(resources, scheduler_enabled=scheduler_enabled)
         raise
 
     await _serve(resources, scheduler_enabled=scheduler_enabled)
+
+
+def _build_intelligence(
+    settings: Any,
+    database: Any,
+    llm: Any,
+    channel: Any,
+    bindings: Any,
+) -> IntelligenceRuntime:
+    from commerce_agent.intelligence.analyzer import IntelligenceAnalyzer
+    from commerce_agent.intelligence.delivery import (
+        DeliveryWorker,
+        FeishuDeliveryPort,
+        FeishuMessageRenderer,
+    )
+    from commerce_agent.intelligence.evidence import EvidenceScorer
+    from commerce_agent.intelligence.models import RiskProfile
+    from commerce_agent.intelligence.qa import QaService, ThreadContextStore
+    from commerce_agent.intelligence.reports import (
+        AlertComposer,
+        DailyReportComposer,
+        DailyReportService,
+    )
+    from commerce_agent.intelligence.repository import SqlAlchemyIntelligenceRepository
+    from commerce_agent.intelligence.retrieval import CorpusRetriever
+    from commerce_agent.intelligence.risk import RiskPolicy
+    from commerce_agent.intelligence.scheduler import IntelligenceScheduler
+    from commerce_agent.intelligence.service import AnalysisService
+    from commerce_agent.persistence.intelligence_preferences import (
+        SqlAlchemyIntelligencePreferenceStore,
+    )
+
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    preferences = SqlAlchemyIntelligencePreferenceStore(database.session)
+    risk_policy = RiskPolicy()
+    default_profile = RiskProfile(settings.intelligence_risk_profile)
+    timezone = ZoneInfo(settings.intelligence_timezone)
+    analysis = AnalysisService(
+        repository,
+        IntelligenceAnalyzer(llm),
+        EvidenceScorer(),
+        risk_policy,
+        concurrency=settings.intelligence_ai_concurrency,
+        model_name=settings.deepseek_model,
+    )
+    reports = DailyReportService(
+        repository,
+        DailyReportComposer(timezone),
+        preferences,
+        timezone=timezone,
+        default_profile=default_profile,
+    )
+    alerts = AlertComposer(
+        repository,
+        preferences,
+        risk_policy,
+        default_profile=default_profile,
+    )
+    delivery = DeliveryWorker(
+        repository,
+        FeishuDeliveryPort(channel, FeishuMessageRenderer()),
+        bindings=bindings,
+    )
+    qa = (
+        QaService(
+            CorpusRetriever(repository),
+            llm,
+            repository,
+            ThreadContextStore(
+                max_turns=settings.intelligence_qa_max_turns,
+                ttl=timedelta(minutes=settings.intelligence_context_ttl_minutes),
+            ),
+        )
+        if settings.intelligence_qa_enabled
+        else None
+    )
+    any_enabled = any(
+        (
+            settings.intelligence_analysis_enabled,
+            settings.intelligence_daily_report_enabled,
+            settings.intelligence_alerts_enabled,
+            settings.intelligence_qa_enabled,
+        )
+    )
+    scheduler = (
+        IntelligenceScheduler(
+            analysis=analysis,
+            reports=reports,
+            alerts=alerts,
+            delivery=delivery,
+            bindings=bindings,
+            analysis_enabled=settings.intelligence_analysis_enabled,
+            alerts_enabled=settings.intelligence_alerts_enabled,
+            daily_enabled=settings.intelligence_daily_report_enabled,
+            delivery_enabled=any(
+                (
+                    settings.intelligence_daily_report_enabled,
+                    settings.intelligence_alerts_enabled,
+                    settings.intelligence_qa_enabled,
+                )
+            ),
+            daily_hour=settings.intelligence_daily_hour,
+            timezone=settings.intelligence_timezone,
+        )
+        if any_enabled
+        else None
+    )
+    return IntelligenceRuntime(
+        scheduler=scheduler,
+        repository=repository,
+        analysis=analysis,
+        reports=reports,
+        alerts=alerts,
+        preferences=preferences,
+        default_profile=default_profile,
+        qa=qa,
+        delivery=delivery,
+    )
 
 
 async def _build_ingestion(
@@ -149,6 +315,8 @@ async def _build_ingestion(
 
 async def _serve(resources: RuntimeResources, *, scheduler_enabled: bool) -> None:
     try:
+        if resources.intelligence_scheduler is not None:
+            resources.intelligence_scheduler.start()
         if scheduler_enabled and resources.scheduler is not None:
             resources.scheduler.start()
         if resources.adapter is not None:
@@ -172,6 +340,8 @@ async def _close_resources(
             if first_error is None:
                 first_error = error
 
+    if resources.intelligence_scheduler is not None:
+        await close(resources.intelligence_scheduler.aclose)
     if scheduler_enabled and resources.scheduler is not None:
         await close(resources.scheduler.aclose)
     if resources.adapter is not None:
