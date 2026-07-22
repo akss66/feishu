@@ -391,3 +391,107 @@ async def test_runtime_rejects_browser_mode_before_creating_resources(
 
     with pytest.raises(ProductionConfigurationError, match="browser ingestion is unavailable"):
         await runtime._run_configured(BrowserSettings())
+
+
+@pytest.mark.parametrize("fail_initialization", [False, True])
+async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_initialization: bool,
+) -> None:
+    from commerce_agent import ingestion_cli, runtime
+    from commerce_agent.ingestion import bootstrap, collectors, extract, http, scheduler, service
+
+    events: list[str] = []
+    captured: dict[str, object] = {}
+
+    class Closer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def aclose(self) -> None:
+            events.append(self.name)
+
+    resolver = Closer("resolver")
+    policy = object()
+
+    def build_bundle(mode: str) -> object:
+        captured["mode"] = mode
+        return SimpleNamespace(safety_policy=policy, resources=(resolver,))
+
+    class HttpClient(Closer):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__("http")
+            captured["http_kwargs"] = kwargs
+
+    class Collector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    class Extractor:
+        def __init__(self, detector: object) -> None:
+            del detector
+
+    class Repository:
+        def __init__(self, session: object) -> None:
+            del session
+
+    class Service:
+        def __init__(self, **kwargs: object) -> None:
+            captured["service_kwargs"] = kwargs
+
+        async def initialize(self) -> None:
+            events.append("initialize")
+            if fail_initialization:
+                raise RuntimeError("initialization failed")
+
+    class IngestionScheduler:
+        def __init__(self, service: object, **kwargs: object) -> None:
+            captured["scheduler"] = (service, kwargs)
+
+    settings = SimpleNamespace(
+        ingestion_dns_mode="cloudflare_doh",
+        ingestion_global_concurrency=2,
+        ingestion_domain_rps=1.0,
+        ingestion_http_timeout_seconds=3.0,
+        ingestion_max_response_bytes=4096,
+        ingestion_user_agent="test-agent",
+        ingestion_interval_minutes=120,
+        snapshot_dir=".",
+    )
+    monkeypatch.setattr(bootstrap, "build_resolver_bundle", build_bundle)
+    monkeypatch.setattr(ingestion_cli, "build_registry", lambda: SimpleNamespace())
+    monkeypatch.setattr(http, "IngestionHttpClient", HttpClient)
+    collector_names = (
+        "ApiCollector",
+        "BrowserCollector",
+        "FeedCollector",
+        "HtmlCollector",
+        "SitemapCollector",
+    )
+    for name in collector_names:
+        monkeypatch.setattr(collectors, name, Collector)
+    monkeypatch.setattr(extract, "ContentExtractor", Extractor)
+    monkeypatch.setattr(extract, "LinguaLanguageDetector", object)
+    monkeypatch.setattr(service, "IngestionService", Service)
+    monkeypatch.setattr(scheduler, "IngestionScheduler", IngestionScheduler)
+    monkeypatch.setattr(
+        "commerce_agent.persistence.ingestion.SqlAlchemyIngestionRepository",
+        Repository,
+    )
+
+    if fail_initialization:
+        with pytest.raises(RuntimeError, match="initialization failed"):
+            await runtime._build_ingestion(settings, SimpleNamespace(session=object()))
+        assert events == ["initialize", "http", "resolver"]
+        return
+
+    built_scheduler, owned_resources = await runtime._build_ingestion(
+        settings,
+        SimpleNamespace(session=object()),
+    )
+
+    assert isinstance(built_scheduler, IngestionScheduler)
+    assert captured["mode"] == "cloudflare_doh"
+    assert captured["http_kwargs"]["safety_policy"] is policy  # type: ignore[index]
+    assert owned_resources[0].name == "http"  # type: ignore[attr-defined]
+    assert owned_resources[1] is resolver

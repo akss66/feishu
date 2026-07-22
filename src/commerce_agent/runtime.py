@@ -252,6 +252,7 @@ async def _build_ingestion(
     settings: Any,
     database: Any,
 ) -> tuple[Any, tuple[_AsyncCloser, ...]]:
+    from commerce_agent.ingestion.bootstrap import build_resolver_bundle
     from commerce_agent.ingestion.collectors import (
         ApiCollector,
         BrowserCollector,
@@ -264,7 +265,6 @@ async def _build_ingestion(
     from commerce_agent.ingestion.http import IngestionHttpClient
     from commerce_agent.ingestion.models import CollectorKind
     from commerce_agent.ingestion.scheduler import IngestionScheduler
-    from commerce_agent.ingestion.security import UrlSafetyPolicy
     from commerce_agent.ingestion.service import IngestionService
     from commerce_agent.ingestion.snapshots import SnapshotStore
     from commerce_agent.ingestion_cli import build_registry
@@ -272,16 +272,17 @@ async def _build_ingestion(
 
     registry = build_registry()
     repository = SqlAlchemyIngestionRepository(database.session)
-    safety_policy = UrlSafetyPolicy()
-    http_client = IngestionHttpClient(
-        safety_policy=safety_policy,
-        global_concurrency=settings.ingestion_global_concurrency,
-        domain_rps=settings.ingestion_domain_rps,
-        timeout_seconds=settings.ingestion_http_timeout_seconds,
-        max_response_bytes=settings.ingestion_max_response_bytes,
-        user_agent=settings.ingestion_user_agent,
-    )
+    resolver_bundle = build_resolver_bundle(settings.ingestion_dns_mode)
+    http_client: IngestionHttpClient | None = None
     try:
+        http_client = IngestionHttpClient(
+            safety_policy=resolver_bundle.safety_policy,
+            global_concurrency=settings.ingestion_global_concurrency,
+            domain_rps=settings.ingestion_domain_rps,
+            timeout_seconds=settings.ingestion_http_timeout_seconds,
+            max_response_bytes=settings.ingestion_max_response_bytes,
+            user_agent=settings.ingestion_user_agent,
+        )
         collectors = {
             CollectorKind.RSS: FeedCollector(http_client),
             CollectorKind.SITEMAP: SitemapCollector(http_client),
@@ -308,9 +309,16 @@ async def _build_ingestion(
             interval_minutes=settings.ingestion_interval_minutes,
             timezone="UTC",
         )
-        return scheduler, (http_client,)
+        return scheduler, (http_client, *resolver_bundle.resources)
     except BaseException:
-        await http_client.aclose()
+        resources: tuple[Any, ...] = resolver_bundle.resources
+        if http_client is not None:
+            resources = (http_client, *resources)
+        for resource in resources:
+            try:
+                await resource.aclose()
+            except BaseException:
+                pass
         raise
 
 
