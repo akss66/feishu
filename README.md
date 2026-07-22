@@ -93,7 +93,7 @@ AI 分析、自动日报、即时预警和有据问答四个开关均默认关�
 .\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli health
 ```
 
-`analyze --limit` 默认为 10、上限为 100；`alerts preview --since-hours` 默认为 24、上限为 168。超过单批上限的 backfill 或待分析任务应拆分为多批，逐批运行并检查 `health` 后再继续。
+`analyze --limit` 默认为 10、上限为 100；单篇正文进入模型前还有固定 50,000 字符硬上限，超限任务不会调用模型，并以安全错误码 `input_too_large` 进入现有失败/重试流程。`alerts preview --since-hours` 默认为 24、上限为 168。超过单批上限的 backfill 或待分析任务应拆分为多批，逐批运行并检查 `health` 后再继续。
 
 当前只有登记表中 `allowed + enabled` 的来源可进入分析，未覆盖平台不能补写事实。自动 analysis、
 日报和预警必须分别取得用户批准；出现异常时优先关闭对应单项开关并重启，保留 SQLite 审计记录。
