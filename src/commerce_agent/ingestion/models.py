@@ -40,6 +40,17 @@ class TrustTier(StrEnum):
     MEDIA = "media"
 
 
+class SourceAdapter(StrEnum):
+    GENERIC = "generic"
+    GDELT = "gdelt"
+
+
+class ContentScope(StrEnum):
+    METADATA_ONLY = "metadata_only"
+    FEED_SUMMARY = "feed_summary"
+    FULL_TEXT = "full_text"
+
+
 class ComplianceStatus(StrEnum):
     ALLOWED = "allowed"
     PENDING_REVIEW = "pending_review"
@@ -84,6 +95,10 @@ class SourceDefinition:
     robots_url: str
     reviewed_at: date
     compliance_notes: str
+    adapter: SourceAdapter = SourceAdapter.GENERIC
+    content_scope: ContentScope | None = None
+    attribution: str | None = None
+    publisher_key: str | None = None
     collector_config: Mapping[str, Scalar] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

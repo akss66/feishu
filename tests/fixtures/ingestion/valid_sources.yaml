@@ -25,6 +25,10 @@ sources:
     entry_url: https://api.example.com/v1/updates
     platforms: [ebay, temu]
     trust_tier: media
+    adapter: generic
+    content_scope: metadata_only
+    attribution: Alpha News
+    publisher_key: alpha.example
     collector: api
     compliance: allowed
     enabled: true

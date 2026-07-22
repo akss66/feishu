@@ -14,9 +14,11 @@ import yaml
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     CoverageStatus,
     Platform,
     Scalar,
+    SourceAdapter,
     SourceDefinition,
     TrustTier,
 )
@@ -26,8 +28,17 @@ class SourceRegistryError(ValueError):
     """Raised when a source registry violates its versioned contract."""
 
 
-_EnumT = TypeVar("_EnumT", Platform, CollectorKind, TrustTier, ComplianceStatus)
+_EnumT = TypeVar(
+    "_EnumT",
+    Platform,
+    CollectorKind,
+    TrustTier,
+    ComplianceStatus,
+    SourceAdapter,
+    ContentScope,
+)
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_PUBLISHER_KEY = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _ROOT_FIELDS = frozenset({"version", "sources"})
 _SOURCE_FIELDS = frozenset(
     {
@@ -46,16 +57,34 @@ _SOURCE_FIELDS = frozenset(
         "robots_url",
         "reviewed_at",
         "compliance_notes",
+        "adapter",
+        "content_scope",
+        "attribution",
+        "publisher_key",
         "collector_config",
     }
 )
-_REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {"language_hint", "collector_config"}
+_REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {
+    "adapter",
+    "attribution",
+    "collector_config",
+    "content_scope",
+    "language_hint",
+    "publisher_key",
+}
 _CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
     CollectorKind.RSS: frozenset({"item_limit"}),
     CollectorKind.SITEMAP: frozenset({"item_limit"}),
     CollectorKind.HTML: frozenset({"link_selector", "article_selector", "item_limit"}),
     CollectorKind.API: frozenset(
-        {"items_path", "url_field", "title_field", "published_at_field", "item_limit"}
+        {
+            "items_path",
+            "url_field",
+            "title_field",
+            "published_at_field",
+            "publisher_field",
+            "item_limit",
+        }
     ),
     CollectorKind.BROWSER: frozenset({"link_selector", "article_selector", "item_limit"}),
 }
@@ -172,6 +201,13 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
         )
 
     collector = _parse_enum(CollectorKind, source["collector"], "collector", context)
+    trust_tier = _parse_enum(TrustTier, source["trust_tier"], "trust_tier", context)
+    adapter = _parse_enum(
+        SourceAdapter,
+        source.get("adapter", SourceAdapter.GENERIC.value),
+        "adapter",
+        context,
+    )
     compliance = _parse_enum(ComplianceStatus, source["compliance"], "compliance", context)
     enabled = _require_bool(source["enabled"], "enabled", context)
     if enabled and compliance is not ComplianceStatus.ALLOWED:
@@ -181,6 +217,25 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
 
     collector_config = _parse_collector_config(
         source.get("collector_config", {}), collector, context
+    )
+    content_scope = _parse_optional_enum(
+        ContentScope,
+        source.get("content_scope"),
+        "content_scope",
+        context,
+    )
+    attribution = _parse_optional_string(source.get("attribution"), "attribution", context)
+    publisher_key = _parse_publisher_key(source.get("publisher_key"), context)
+    _validate_media_contract(
+        trust_tier=trust_tier,
+        adapter=adapter,
+        collector=collector,
+        enabled=enabled,
+        content_scope=content_scope,
+        attribution=attribution,
+        publisher_key=publisher_key,
+        collector_config=collector_config,
+        context=context,
     )
     reviewed_at = _parse_date(source["reviewed_at"], "reviewed_at", context)
     language_hint = source.get("language_hint")
@@ -194,7 +249,7 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
         name=_require_nonempty_string(source["name"], "name", context),
         entry_url=_require_url(source["entry_url"], "entry_url", context),
         platforms=_parse_platforms(source["platforms"], context),
-        trust_tier=_parse_enum(TrustTier, source["trust_tier"], "trust_tier", context),
+        trust_tier=trust_tier,
         collector=collector,
         compliance=compliance,
         enabled=enabled,
@@ -209,6 +264,10 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
         compliance_notes=_require_nonempty_string(
             source["compliance_notes"], "compliance_notes", context
         ),
+        adapter=adapter,
+        content_scope=content_scope,
+        attribution=attribution,
+        publisher_key=publisher_key,
         collector_config=collector_config,
     )
 
@@ -233,6 +292,66 @@ def _parse_enum(enum_type: type[_EnumT], value: object, field: str, context: str
     except (TypeError, ValueError):
         allowed = ", ".join(item.value for item in enum_type)
         raise SourceRegistryError(f"{context}: {field} must be one of: {allowed}") from None
+
+
+def _parse_optional_enum(
+    enum_type: type[_EnumT],
+    value: object,
+    field: str,
+    context: str,
+) -> _EnumT | None:
+    if value is None:
+        return None
+    return _parse_enum(enum_type, value, field, context)
+
+
+def _parse_optional_string(value: object, field: str, context: str) -> str | None:
+    if value is None:
+        return None
+    return _require_nonempty_string(value, field, context)
+
+
+def _parse_publisher_key(value: object, context: str) -> str | None:
+    key = _parse_optional_string(value, "publisher_key", context)
+    if key is not None and _PUBLISHER_KEY.fullmatch(key) is None:
+        raise SourceRegistryError(
+            f"{context}: publisher_key must be a lowercase stable identifier"
+        )
+    return key
+
+
+def _validate_media_contract(
+    *,
+    trust_tier: TrustTier,
+    adapter: SourceAdapter,
+    collector: CollectorKind,
+    enabled: bool,
+    content_scope: ContentScope | None,
+    attribution: str | None,
+    publisher_key: str | None,
+    collector_config: Mapping[str, Scalar],
+    context: str,
+) -> None:
+    if adapter is SourceAdapter.GDELT:
+        if trust_tier is not TrustTier.MEDIA:
+            raise SourceRegistryError(f"{context}: gdelt adapter requires trust_tier 'media'")
+        if collector is not CollectorKind.API:
+            raise SourceRegistryError(f"{context}: gdelt adapter requires collector 'api'")
+        if "publisher_field" not in collector_config:
+            raise SourceRegistryError(
+                f"{context}: gdelt adapter requires collector_config publisher_field"
+            )
+
+    if not enabled or trust_tier is not TrustTier.MEDIA:
+        return
+    if content_scope is None:
+        raise SourceRegistryError(f"{context}: enabled media requires content_scope")
+    if content_scope is ContentScope.FULL_TEXT:
+        raise SourceRegistryError(f"{context}: full_text media cannot be enabled")
+    if attribution is None:
+        raise SourceRegistryError(f"{context}: enabled media requires attribution")
+    if adapter is SourceAdapter.GENERIC and publisher_key is None:
+        raise SourceRegistryError(f"{context}: enabled direct media requires publisher_key")
 
 
 def _require_nonempty_string(value: object, field: str, context: str) -> str:

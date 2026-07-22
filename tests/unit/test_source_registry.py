@@ -9,8 +9,10 @@ import yaml
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     CoverageStatus,
     Platform,
+    SourceAdapter,
     TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry, SourceRegistryError
@@ -58,6 +60,12 @@ def test_enum_values_are_stable() -> None:
     ]
     assert {item.value for item in CollectorKind} == {"rss", "sitemap", "html", "api", "browser"}
     assert {item.value for item in TrustTier} == {"official", "media"}
+    assert {item.value for item in SourceAdapter} == {"generic", "gdelt"}
+    assert {item.value for item in ContentScope} == {
+        "metadata_only",
+        "feed_summary",
+        "full_text",
+    }
     assert {item.value for item in ComplianceStatus} == {
         "allowed",
         "pending_review",
@@ -76,6 +84,10 @@ def test_loads_valid_yaml_into_immutable_definitions_in_source_id_order() -> Non
     ]
     assert [source.source_id for source in registry.enabled()] == ["alpha-api", "zeta-html"]
     assert registry.require("zeta-html").collector_config["link_selector"] == "article a"
+    assert registry.require("alpha-api").adapter is SourceAdapter.GENERIC
+    assert registry.require("alpha-api").content_scope is ContentScope.METADATA_ONLY
+    assert registry.require("alpha-api").attribution == "Alpha News"
+    assert registry.require("alpha-api").publisher_key == "alpha.example"
     with pytest.raises(FrozenInstanceError):
         registry.require("zeta-html").enabled = False  # type: ignore[misc]
     with pytest.raises(TypeError):
@@ -210,6 +222,74 @@ def test_rejects_unknown_keys_with_source_id(tmp_path: Path) -> None:
     document["sources"][0]["secret_header"] = "do-not-accept"  # type: ignore[index]
 
     with pytest.raises(SourceRegistryError, match=r"zeta-html.*secret_header"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
+@pytest.mark.parametrize("field", ["content_scope", "attribution", "publisher_key"])
+def test_enabled_direct_media_requires_complete_provenance(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    document = _valid_document()
+    source = document["sources"][1]  # type: ignore[index]
+    del source[field]
+
+    with pytest.raises(SourceRegistryError, match=rf"alpha-api.*{field}"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
+def test_disabled_unannotated_media_candidate_remains_loadable(tmp_path: Path) -> None:
+    document = _valid_document()
+    source = document["sources"][1]  # type: ignore[index]
+    source["enabled"] = False
+    for field in ("content_scope", "attribution", "publisher_key"):
+        del source[field]
+
+    loaded = SourceRegistry.from_yaml(_write_registry(tmp_path, document)).require("alpha-api")
+
+    assert loaded.content_scope is None
+    assert loaded.attribution is None
+    assert loaded.publisher_key is None
+
+
+def test_enabled_gdelt_media_uses_per_item_publisher_field(tmp_path: Path) -> None:
+    document = _valid_document()
+    source = document["sources"][1]  # type: ignore[index]
+    source["adapter"] = "gdelt"
+    source["attribution"] = "GDELT index; original publisher shown per item"
+    del source["publisher_key"]
+    source["collector_config"]["publisher_field"] = "domain"
+
+    loaded = SourceRegistry.from_yaml(_write_registry(tmp_path, document)).require("alpha-api")
+
+    assert loaded.adapter is SourceAdapter.GDELT
+    assert loaded.publisher_key is None
+    assert loaded.collector_config["publisher_field"] == "domain"
+
+
+def test_enabled_gdelt_media_requires_per_item_publisher_field(tmp_path: Path) -> None:
+    document = _valid_document()
+    source = document["sources"][1]  # type: ignore[index]
+    source["adapter"] = "gdelt"
+    del source["publisher_key"]
+
+    with pytest.raises(SourceRegistryError, match=r"alpha-api.*publisher_field"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
+def test_rejects_unknown_adapter(tmp_path: Path) -> None:
+    document = _valid_document()
+    document["sources"][1]["adapter"] = "dynamic.module"  # type: ignore[index]
+
+    with pytest.raises(SourceRegistryError, match=r"alpha-api.*adapter"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
+def test_rejects_enabled_full_text_media(tmp_path: Path) -> None:
+    document = _valid_document()
+    document["sources"][1]["content_scope"] = "full_text"  # type: ignore[index]
+
+    with pytest.raises(SourceRegistryError, match=r"alpha-api.*full_text"):
         SourceRegistry.from_yaml(_write_registry(tmp_path, document))
 
 
