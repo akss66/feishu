@@ -12,6 +12,7 @@ import commerce_agent.intelligence.errors as errors_module
 from commerce_agent.ingestion.models import Platform, TrustTier
 from commerce_agent.intelligence.analyzer import (
     REPAIR_PROMPT,
+    SYSTEM_PROMPT,
     IntelligenceAnalyzer,
     InvalidModelOutput,
 )
@@ -93,6 +94,16 @@ def valid_json(**overrides: Any) -> str:
 def test_analysis_size_boundary_api_is_stable() -> None:
     assert analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS == 50_000
     assert issubclass(errors_module.OversizedAnalysisInput, RuntimeError)
+
+
+def test_analysis_prompts_require_plain_language_explanations_and_actions() -> None:
+    for prompt in (SYSTEM_PROMPT, REPAIR_PROMPT):
+        assert "不懂技术的跨境电商运营人员" in prompt
+        assert "用括号补充通俗解释" in prompt
+        assert "先说明发生了什么，再说明卖家为什么需要关注" in prompt
+        assert "对店铺经营的实际影响" in prompt
+        assert "可以直接执行的检查步骤" in prompt
+        assert "不得只写“关注官方文档”" in prompt
 
 
 async def test_analyzer_rejects_an_unanchored_quote_after_one_repair(
