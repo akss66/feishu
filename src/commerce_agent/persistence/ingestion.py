@@ -57,7 +57,11 @@ class PersistableDocument:
         if any(value is not None for value in provenance):
             if any(not isinstance(value, str) or not value.strip() for value in provenance):
                 raise ValueError("media provenance must be complete")
-            if self.content_scope not in {"metadata_only", "feed_summary"}:
+            if self.content_scope not in {
+                "metadata_only",
+                "feed_summary",
+                "full_text",
+            }:
                 raise ValueError("unsupported media content scope")
 
 

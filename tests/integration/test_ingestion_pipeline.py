@@ -36,9 +36,15 @@ from commerce_agent.ingestion.models import (
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.service import IngestionService
 from commerce_agent.ingestion.snapshots import SnapshotStore
+from commerce_agent.media.catalog import (
+    ArticleAccess,
+    MediaCategory,
+    PublisherProfile,
+)
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
 from commerce_agent.persistence.models import (
+    AnalysisJob,
     Document,
     DocumentProvenance,
     DocumentVersion,
@@ -232,6 +238,100 @@ async def test_media_pipeline_persists_version_provenance_idempotently(tmp_path:
         assert {row.publisher_key for row in rows} == {"feeds.example.com"}
         assert {row.attribution for row in rows} == {"Fixture Publisher"}
         assert {row.content_scope for row in rows} == {"feed_summary"}
+    finally:
+        await database.dispose()
+
+
+async def test_allowed_public_media_article_reaches_the_analysis_queue(
+    tmp_path: Path,
+) -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    article_url = "https://publisher.example/article"
+    source_definition = SourceDefinition(
+        source_id="media-gdelt-fixture",
+        name="GDELT fixture",
+        entry_url=discovery_url,
+        platforms=(Platform.AMAZON,),
+        trust_tier=TrustTier.MEDIA,
+        collector=CollectorKind.API,
+        compliance=ComplianceStatus.ALLOWED,
+        enabled=True,
+        regions=("global",),
+        language_hint="en",
+        interval_minutes=120,
+        terms_url="https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/",
+        robots_url="https://api.gdeltproject.org/robots.txt",
+        reviewed_at=date(2026, 7, 22),
+        compliance_notes="Fixture-only governed discovery.",
+        adapter=SourceAdapter.GDELT,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index; original publisher shown per item",
+        collector_config={
+            "items_path": "articles",
+            "url_field": "url",
+            "title_field": "title",
+            "published_at_field": "seendate",
+            "publisher_field": "domain",
+            "item_limit": 10,
+        },
+    )
+    discovery_body = (
+        b'{"articles":[{"url":"https://publisher.example/article",'
+        b'"title":"Marketplace policy update","seendate":"20260722T081500Z",'
+        b'"domain":"publisher.example"}]}'
+    )
+    article_body = (FIXTURES / "article_en.html").read_bytes()
+    http = FixtureHttp(
+        {
+            discovery_url: FetchResponse(
+                url=discovery_url,
+                status_code=200,
+                headers={"content-type": "application/json"},
+                body=discovery_body,
+            ),
+            article_url: FetchResponse(
+                url=article_url,
+                status_code=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=article_body,
+            ),
+        }
+    )
+    profile = PublisherProfile(
+        publisher_key="publisher.example",
+        display_name="Fixture Publisher",
+        category=MediaCategory.SPECIALIST,
+        article_access=ArticleAccess.ALLOWED_PUBLIC,
+        allowed_hosts=("publisher.example",),
+    )
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'media-full-text.db'}")
+    await database.create_schema()
+    service = IngestionService(
+        registry=SourceRegistry([source_definition]),
+        compliance=CompliancePolicy(),
+        collectors={
+            CollectorKind.API: ApiCollector(
+                http,
+                publisher_lookup=lambda _: profile,
+            )
+        },
+        extractor=ContentExtractor(StaticLanguageDetector()),
+        snapshot_store=SnapshotStore(tmp_path / "media-snapshots"),
+        repository=SqlAlchemyIngestionRepository(database.session),
+    )
+    try:
+        summary = await service.run_source(source_definition.source_id)
+
+        async with database.session() as session:
+            provenance = await session.scalar(select(DocumentProvenance))
+            jobs = (await session.scalars(select(AnalysisJob))).all()
+
+        assert summary.status is RunStatus.SUCCESS
+        assert [request.url for request in http.requests] == [discovery_url, article_url]
+        assert provenance is not None
+        assert provenance.publisher_key == "publisher.example"
+        assert provenance.content_scope == "full_text"
+        assert len(jobs) == 1
     finally:
         await database.dispose()
 

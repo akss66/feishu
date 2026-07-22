@@ -574,6 +574,38 @@ async def test_media_provenance_is_inserted_once_with_its_document_version(tmp_p
         await database.dispose()
 
 
+async def test_approved_media_full_text_is_persisted_with_complete_provenance(
+    tmp_path,
+) -> None:
+    database, repository = await _repository(tmp_path)
+    try:
+        await repository.sync_sources([_source()])
+        candidate = replace(
+            _candidate(content_hash="c" * 64),
+            publisher_key="publisher.example",
+            attribution="Fixture Publisher",
+            content_scope="full_text",
+        )
+
+        outcome = await repository.persist_version(candidate)
+
+        async with database.session() as session:
+            provenance = await session.scalar(
+                select(DocumentProvenance).where(
+                    DocumentProvenance.document_version_id == outcome.version_id
+                )
+            )
+            jobs = (await session.scalars(select(AnalysisJob))).all()
+
+        assert provenance is not None
+        assert provenance.publisher_key == "publisher.example"
+        assert provenance.attribution == "Fixture Publisher"
+        assert provenance.content_scope == "full_text"
+        assert [job.document_version_id for job in jobs] == [outcome.version_id]
+    finally:
+        await database.dispose()
+
+
 async def test_schema_upgrade_adds_provenance_table_without_touching_existing_data(
     tmp_path,
 ) -> None:
