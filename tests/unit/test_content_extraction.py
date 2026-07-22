@@ -267,6 +267,26 @@ def test_blank_content_is_rejected() -> None:
         )
 
 
+def test_rss_title_is_retained_when_feed_omits_summary() -> None:
+    rss_source = replace(source(), collector=CollectorKind.RSS)
+    item = CollectedItem(
+        url="https://example.com/changelog/fee-update",
+        body=b"",
+        title="Marketplace fee policy update",
+    )
+    detector = FixedLanguageDetector()
+
+    document = ContentExtractor(detector).extract(
+        rss_source,
+        item,
+        fetched_at=FETCHED_AT,
+    )
+
+    assert document.title == "Marketplace fee policy update"
+    assert document.body == "Marketplace fee policy update"
+    assert detector.seen == ["Marketplace fee policy update"]
+
+
 def test_bad_published_time_does_not_crash_extraction() -> None:
     html = b"""
     <html><head><title>Safe date</title>

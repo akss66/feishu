@@ -14,6 +14,7 @@ from lxml import html as lxml_html
 from commerce_agent.ingestion.dedupe import canonicalize_url, normalize_text
 from commerce_agent.ingestion.models import (
     CollectedItem,
+    CollectorKind,
     ExtractedDocument,
     SourceAdapter,
     SourceDefinition,
@@ -101,6 +102,8 @@ class ContentExtractor:
         else:
             body = _decode_text(item.body, item.content_type)
         body = normalize_text(body)
+        if not body and source.collector is CollectorKind.RSS:
+            body = normalize_text(item.title or "")
         if not body:
             raise ExtractionError("blank_content")
 
