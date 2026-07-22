@@ -7,6 +7,7 @@ class InboundMessage:
     chat_id: str
     message_id: str
     text: str
+    thread_id: str | None = None
 
 
 class CommandKind(StrEnum):

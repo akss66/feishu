@@ -520,6 +520,53 @@ class SqlAlchemyIntelligenceRepository:
             raise KeyError(f"daily report does not exist for {group_id} on {report_date}")
         return report_id
 
+    async def find_delivery_id(self, idempotency_key: str) -> int | None:
+        async with self._session_factory() as session:
+            return await session.scalar(
+                select(DeliveryOutbox.id).where(
+                    DeliveryOutbox.idempotency_key == idempotency_key
+                )
+            )
+
+    async def queue_delivery(self, message: DeliveryMessage, *, now: datetime) -> int:
+        if message.kind is not MessageKind.QA_ANSWER:
+            raise ValueError("direct delivery queue only supports qa answers")
+        if (
+            set(message.payload) != {"text"}
+            or not isinstance(message.payload["text"], str)
+            or len(message.payload["text"].encode("utf-8")) > 20_000
+        ):
+            raise ValueError("qa payload must be an exact text payload within 20KB")
+
+        async with self._session_factory.begin() as session:
+            outbox_id = (
+                await session.execute(
+                    sqlite_insert(DeliveryOutbox)
+                    .values(
+                        idempotency_key=message.idempotency_key,
+                        group_id=message.group_id,
+                        message_kind=message.kind.value,
+                        payload=message.payload,
+                        reply_to_message_id=message.reply_to_message_id,
+                        reply_in_thread=message.reply_in_thread,
+                        status="pending",
+                        attempt_count=0,
+                        created_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                    .returning(DeliveryOutbox.id)
+                )
+            ).scalar_one_or_none()
+            if outbox_id is not None:
+                return outbox_id
+            return (
+                await session.execute(
+                    select(DeliveryOutbox.id).where(
+                        DeliveryOutbox.idempotency_key == message.idempotency_key
+                    )
+                )
+            ).scalar_one()
+
     async def queue_report(self, report_id: int, *, now: datetime) -> int:
         async with self._session_factory.begin() as session:
             report = await session.get(DailyReport, report_id)
