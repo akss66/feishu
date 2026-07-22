@@ -89,6 +89,56 @@ OUT_OF_SCOPE_STATUS = {
     "media-reuters-retail": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
 }
 
+BALANCED_REVIEW_SOURCE_EVIDENCE = {
+    "amazon-seller-forums": {
+        "robots_url": "https://sellercentral.amazon.com/robots.txt",
+    },
+    "shopee-sg-seller-education": {
+        "terms_url": "https://shopee.sg/legaldoc/termsOfService/",
+        "robots_url": "https://seller.shopee.sg/robots.txt",
+    },
+    "shopee-my-seller-education": {
+        "terms_url": "https://shopee.com.my/legaldoc/termsOfService/",
+        "robots_url": "https://seller.shopee.com.my/robots.txt",
+    },
+    "shopee-ph-seller-education": {
+        "terms_url": "https://shopee.ph/legaldoc/termsOfService/",
+        "robots_url": "https://seller.shopee.ph/robots.txt",
+    },
+    "ebay-seller-updates": {
+        "terms_url": "https://www.ebay.com/help/policies/member-behaviour-policies/user-agreement?id=4259",
+        "robots_url": "https://www.ebay.com/robots.txt",
+    },
+    "joybuy-german-news": {
+        "regions": ("de",),
+        "language_hint": "de",
+    },
+    "joybuy-dutch-news": {
+        "regions": ("nl",),
+        "language_hint": "nl",
+    },
+}
+
+BALANCED_REVIEW_NOTE_MARKERS = {
+    "amazon-seller-blog": "public blog",
+    "amazon-seller-announcements": "announcements list",
+    "amazon-seller-forums": "Agent Policy",
+    "shopee-sg-seller-education": "Singapore education hub",
+    "shopee-my-seller-education": "Malaysia education hub",
+    "shopee-ph-seller-education": "Philippines education hub",
+    "ebay-press-room": "public press room",
+    "ebay-seller-updates": "Seller News",
+    "coupang-rules-and-policies": "Rules and Policies list",
+    "coupang-seller-university": "Seller University",
+    "coupang-global-news": "Step-by-step Guide",
+    "ozon-seller-news": "fbo-i-fbs",
+    "ozon-seller-media": "promokodov",
+    "ozon-global-docs": "dokumenty",
+    "joybuy-news": "English newsroom",
+    "joybuy-german-news": "German newsroom",
+    "joybuy-dutch-news": "Dutch newsroom",
+}
+
 
 def _valid_document() -> dict[str, object]:
     return yaml.safe_load((FIXTURES / "valid_sources.yaml").read_text(encoding="utf-8"))
@@ -420,6 +470,18 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
         )
         for source_id in OUT_OF_SCOPE_STATUS
     } == OUT_OF_SCOPE_STATUS
+    assert {
+        source_id: {
+            field: getattr(registry.require(source_id), field)
+            for field in evidence
+        }
+        for source_id, evidence in BALANCED_REVIEW_SOURCE_EVIDENCE.items()
+    } == BALANCED_REVIEW_SOURCE_EVIDENCE
+    assert set(BALANCED_REVIEW_NOTE_MARKERS) == BALANCED_REVIEW_SOURCE_IDS
+    assert all(
+        marker in registry.require(source_id).compliance_notes
+        for source_id, marker in BALANCED_REVIEW_NOTE_MARKERS.items()
+    )
 
 
 def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled() -> None:

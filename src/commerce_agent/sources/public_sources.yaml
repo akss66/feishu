@@ -283,20 +283,20 @@ sources:
     terms_url: https://docs.ozon.ru/legal/en/partners/logistics/contract/
     robots_url: https://seller.ozon.ru/robots.txt
     reviewed_at: 2026-07-22
-    compliance_notes: Anonymous access enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
+    compliance_notes: Anonymous access to the fbo-i-fbs news entry enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
     collector_config: *html_config
 
   - <<: *ozon
     source_id: ozon-seller-media
     name: Ozon Seller Analytics News
     entry_url: https://seller.ozon.ru/media/news/ocenivajte-effektivnost-vashih-promokodov/
-    compliance_notes: Anonymous access enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
+    compliance_notes: Anonymous access to the promokodov news entry enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
 
   - <<: *ozon
     source_id: ozon-global-docs
     name: Ozon Seller Documents Topic
     entry_url: https://seller.ozon.ru/media/tags/dokumenty/
-    compliance_notes: Anonymous access enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
+    compliance_notes: Anonymous access to the dokumenty topic entry enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
 
   # Joybuy public newsrooms may be collected conservatively at low frequency.
   - &joybuy
