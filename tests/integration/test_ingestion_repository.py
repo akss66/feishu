@@ -222,9 +222,14 @@ async def test_source_lease_is_atomic_and_recovers_after_ttl(tmp_path) -> None:
         assert recovered is not None
         assert recovered != first
         await repository.release_source("amazon-news", first)
-        assert await repository.claim_source("amazon-news") is None
+        check_at = started_at + timedelta(days=1, hours=1)
+        assert (
+            await repository.claim_source("amazon-news", acquired_at=check_at) is None
+        )
         await competing.release_source("amazon-news", recovered)
-        assert await repository.claim_source("amazon-news") is not None
+        assert (
+            await repository.claim_source("amazon-news", acquired_at=check_at) is not None
+        )
     finally:
         await database.dispose()
 
