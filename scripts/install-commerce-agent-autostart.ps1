@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $powerShellPath = Join-Path $PSHOME "powershell.exe"
-$arguments = '-NoProfile -NonInteractive -File "{0}"' -f $runnerPath
+$arguments = '-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "{0}"' -f $runnerPath
 $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments -WorkingDirectory (Split-Path -Parent $PSScriptRoot)
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType "Interactive" -RunLevel "Limited"

@@ -42,5 +42,7 @@ $stamp = Get-Date -Format "yyyyMMdd"
 $standardLog = Join-Path $runtimeDirectory "bot-$stamp.stdout.log"
 $errorLog = Join-Path $runtimeDirectory "bot-$stamp.stderr.log"
 
+$ErrorActionPreference = "Continue"
 & $PythonPath -m commerce_agent 1>> $standardLog 2>> $errorLog
-exit $LASTEXITCODE
+$agentExitCode = $LASTEXITCODE
+exit $agentExitCode
