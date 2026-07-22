@@ -233,24 +233,30 @@ def _title(payload: dict[str, object]) -> str:
     return title
 
 
+def _markdown_block(content: str) -> dict[str, object]:
+    return {
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": content},
+    }
+
+
 def semantic_to_card(
     payload: dict[str, object], *, kind: MessageKind | None = None
 ) -> dict[str, object]:
     sections = payload.get("sections")
     items = payload.get("items", [])
     if isinstance(items, list) and items:
-        blocks = [{"tag": "markdown", "content": alert_markdown(item)} for item in items]
+        blocks = [_markdown_block(alert_markdown(item)) for item in items]
     elif isinstance(sections, list):
         blocks = [
-            {
-                "tag": "markdown",
-                "content": f"**{_plain(section['title'])}**\n"
-                + "\n".join(f"- {_plain(item)}" for item in section["items"]),
-            }
+            _markdown_block(
+                f"**{_plain(section['title'])}**\n"
+                + "\n".join(f"- {_plain(item)}" for item in section["items"])
+            )
             for section in sections
         ]
     else:
-        blocks = [{"tag": "markdown", "content": alert_markdown(item)} for item in items]
+        blocks = [_markdown_block(alert_markdown(item)) for item in items]
     return {
         "card": {
             "config": {"wide_screen_mode": True},

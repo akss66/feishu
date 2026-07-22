@@ -108,6 +108,10 @@ def test_daily_card_prefers_evidence_rich_items_when_updates_exist() -> None:
     assert item["actions"][0]["action"] in encoded
     assert item["source_url"] in encoded
     assert rendered["card"]["header"]["template"] == "blue"
+    first_element = rendered["card"]["elements"][0]
+    assert first_element["tag"] == "div"
+    assert first_element["text"]["tag"] == "lark_md"
+    assert isinstance(first_element["text"]["content"], str)
 
 
 @pytest.mark.parametrize(
@@ -254,7 +258,7 @@ def test_daily_card_sanitizes_untrusted_controls_and_preserves_unicode() -> None
     assert rendered["card"]["header"]["title"]["content"] == (
         "跨境 电商每日情报🙂 · 策略：默认"
     )
-    assert rendered["card"]["elements"][0]["content"] == (
+    assert rendered["card"]["elements"][0]["text"]["content"] == (
         "**AI 今日提炼🚀**\n- 中文 内容 继续🙂"
     )
 
@@ -287,7 +291,7 @@ def test_alert_card_sanitizes_untrusted_controls_and_preserves_unicode() -> None
     )
 
     rendered = FeishuMessageRenderer().render(claim)
-    content = rendered["card"]["elements"][0]["content"]
+    content = rendered["card"]["elements"][0]["text"]["content"]
 
     assert rendered["card"]["header"]["title"]["content"] == "高 风险 预警🙂"
     for expected in (
