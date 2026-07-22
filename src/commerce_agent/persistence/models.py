@@ -180,6 +180,19 @@ class DocumentVersion(Base):
     )
 
 
+class DocumentProvenance(Base):
+    __tablename__ = "document_provenance"
+
+    document_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    publisher_key: Mapped[str] = mapped_column(String(253), nullable=False)
+    attribution: Mapped[str] = mapped_column(Text, nullable=False)
+    content_scope: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class AnalysisJob(Base):
     __tablename__ = "analysis_jobs"
 

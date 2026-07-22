@@ -339,6 +339,9 @@ class IngestionService:
                 snapshot_path=snapshot.relative_path,
                 etag=item.etag,
                 last_modified=item.last_modified,
+                publisher_key=_metadata_string(document.metadata, "publisher_key"),
+                attribution=_metadata_string(document.metadata, "attribution"),
+                content_scope=_metadata_string(document.metadata, "content_scope"),
             )
         )
 
@@ -409,6 +412,13 @@ def _artifact_response(artifact: ResponseArtifact) -> FetchResponse:
 
 def _safe_conditional(value: str | None) -> str | None:
     if value is None or "\r" in value or "\n" in value:
+        return None
+    return value
+
+
+def _metadata_string(metadata: Mapping[str, object], key: str) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value.strip():
         return None
     return value
 

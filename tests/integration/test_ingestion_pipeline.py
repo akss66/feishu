@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from xml.etree import ElementTree
@@ -23,9 +24,11 @@ from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     Platform,
     ResponseArtifact,
     RunStatus,
+    SourceAdapter,
     SourceDefinition,
     Trigger,
     TrustTier,
@@ -35,7 +38,13 @@ from commerce_agent.ingestion.service import IngestionService
 from commerce_agent.ingestion.snapshots import SnapshotStore
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
-from commerce_agent.persistence.models import Document, DocumentVersion, FetchRun, SourceHealth
+from commerce_agent.persistence.models import (
+    Document,
+    DocumentProvenance,
+    DocumentVersion,
+    FetchRun,
+    SourceHealth,
+)
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "ingestion"
 
@@ -158,8 +167,17 @@ def rss_body() -> bytes:
     return ElementTree.tostring(rss, encoding="utf-8", xml_declaration=True)
 
 
-async def build_pipeline(tmp_path: Path):
+async def build_pipeline(tmp_path: Path, *, media_feed: bool = False):
     feed_source = source("fixture-feed", CollectorKind.RSS)
+    if media_feed:
+        feed_source = replace(
+            feed_source,
+            trust_tier=TrustTier.MEDIA,
+            adapter=SourceAdapter.GENERIC,
+            content_scope=ContentScope.FEED_SUMMARY,
+            attribution="Fixture Publisher",
+            publisher_key="feeds.example.com",
+        )
     api_source = source("fixture-api", CollectorKind.API)
     feed_body = rss_body()
     api_body = (FIXTURES / "api.json").read_bytes()
@@ -194,6 +212,28 @@ async def build_pipeline(tmp_path: Path):
         max_concurrency=2,
     )
     return service, database, http, feed_source, api_source, feed_body
+
+
+async def test_media_pipeline_persists_version_provenance_idempotently(tmp_path: Path) -> None:
+    service, database, _, feed_source, _, _ = await build_pipeline(
+        tmp_path,
+        media_feed=True,
+    )
+    try:
+        first = await service.run_source(feed_source.source_id)
+        second = await service.run_source(feed_source.source_id)
+
+        async with database.session() as session:
+            rows = (await session.scalars(select(DocumentProvenance))).all()
+
+        assert first.status is RunStatus.SUCCESS
+        assert second.status is RunStatus.SUCCESS
+        assert len(rows) == 2
+        assert {row.publisher_key for row in rows} == {"feeds.example.com"}
+        assert {row.attribution for row in rows} == {"Fixture Publisher"}
+        assert {row.content_scope for row in rows} == {"feed_summary"}
+    finally:
+        await database.dispose()
 
 
 async def test_two_services_share_atomic_source_lease_without_second_fetch(tmp_path: Path) -> None:

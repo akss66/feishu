@@ -19,6 +19,7 @@ from commerce_agent.ingestion.models import (
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
+    DocumentProvenance,
     DocumentVersion,
     FetchRun,
     Source,
@@ -46,6 +47,17 @@ class PersistableDocument:
     snapshot_path: str | None = None
     etag: str | None = None
     last_modified: str | None = None
+    publisher_key: str | None = None
+    attribution: str | None = None
+    content_scope: str | None = None
+
+    def __post_init__(self) -> None:
+        provenance = (self.publisher_key, self.attribution, self.content_scope)
+        if any(value is not None for value in provenance):
+            if any(not isinstance(value, str) or not value.strip() for value in provenance):
+                raise ValueError("media provenance must be complete")
+            if self.content_scope not in {"metadata_only", "feed_summary"}:
+                raise ValueError("unsupported media content scope")
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +256,15 @@ class SqlAlchemyIngestionRepository:
 
             if created_version:
                 now = datetime.now(UTC)
+                if candidate.publisher_key is not None:
+                    session.add(
+                        DocumentProvenance(
+                            document_version_id=version_id,
+                            publisher_key=candidate.publisher_key,
+                            attribution=candidate.attribution,
+                            content_scope=candidate.content_scope,
+                        )
+                    )
                 await session.execute(
                     sqlite_insert(AnalysisJob)
                     .values(

@@ -24,8 +24,10 @@ from commerce_agent.persistence.ingestion import (
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
+    DocumentProvenance,
     DocumentVersion,
     FetchRun,
+    GroupBinding,
     Source,
     SourceHealth,
     SourcePlatform,
@@ -401,6 +403,61 @@ async def test_new_document_version_enqueues_exactly_one_analysis_job(tmp_path) 
         assert first.created_version is True
         assert second.created_version is False
         assert [row.document_version_id for row in rows] == [first.version_id]
+    finally:
+        await database.dispose()
+
+
+async def test_media_provenance_is_inserted_once_with_its_document_version(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    try:
+        await repository.sync_sources([_source()])
+        candidate = replace(
+            _candidate(content_hash="b" * 64),
+            publisher_key="reuters.com",
+            attribution="Reuters",
+            content_scope="metadata_only",
+        )
+
+        first = await repository.persist_version(candidate)
+        duplicate = await repository.persist_version(candidate)
+
+        async with database.session() as session:
+            rows = (await session.scalars(select(DocumentProvenance))).all()
+            jobs = (await session.scalars(select(AnalysisJob))).all()
+
+        assert first.created_version is True
+        assert duplicate.created_version is False
+        assert len(rows) == 1
+        assert rows[0].document_version_id == first.version_id
+        assert rows[0].publisher_key == "reuters.com"
+        assert rows[0].attribution == "Reuters"
+        assert rows[0].content_scope == "metadata_only"
+        assert [job.document_version_id for job in jobs] == [first.version_id]
+    finally:
+        await database.dispose()
+
+
+async def test_schema_upgrade_adds_provenance_table_without_touching_existing_data(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'existing.db'}")
+    try:
+        await database.create_schema()
+        async with database.session.begin() as session:
+            session.add(GroupBinding(chat_id="existing-group", active=True))
+        async with database.engine.begin() as connection:
+            await connection.run_sync(DocumentProvenance.__table__.drop)
+
+        await database.create_schema()
+
+        async with database.session() as session:
+            binding = await session.get(GroupBinding, "existing-group")
+            provenance_count = await session.scalar(
+                select(func.count()).select_from(DocumentProvenance)
+            )
+        assert binding is not None
+        assert binding.active is True
+        assert provenance_count == 0
     finally:
         await database.dispose()
 
