@@ -9,7 +9,10 @@ import pytest
 
 from commerce_agent.intelligence.models import RiskProfile
 from commerce_agent.intelligence_cli import (
+    MAX_ALERT_PREVIEW_HOURS,
+    MAX_BATCH_LIMIT,
     ProductionCliApplication,
+    build_application,
     build_parser,
     run_cli,
 )
@@ -99,6 +102,54 @@ async def test_invalid_arguments_exit_two_without_running_app(arguments: list[st
     assert code == 2
     assert output == "error=invalid_arguments\n"
     assert app.calls == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["analyze", "--pending", "--limit", "101"],
+        ["analyze", "--backfill", "--limit", "999999999999999999999999"],
+        ["alerts", "preview", "--since-hours", "169"],
+        ["alerts", "preview", "--since-hours", "999999999999999999999999"],
+    ],
+)
+async def test_operational_bounds_reject_before_building_application(
+    arguments: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from commerce_agent import intelligence_cli
+
+    build_calls = 0
+
+    async def forbidden_build():
+        nonlocal build_calls
+        build_calls += 1
+        raise AssertionError("application must not be built")
+
+    monkeypatch.setattr(intelligence_cli, "build_application", forbidden_build)
+    output = io.StringIO()
+
+    code = await run_cli(arguments, output=output)
+
+    assert code == 2
+    assert output.getvalue() == "error=invalid_arguments\n"
+    assert build_calls == 0
+
+
+async def test_operational_bounds_accept_documented_maximums() -> None:
+    assert MAX_BATCH_LIMIT == 100
+    assert MAX_ALERT_PREVIEW_HOURS == 168
+    app = FakeCliApplication()
+
+    analyze_code, _ = await invoke(["analyze", "--pending", "--limit", str(MAX_BATCH_LIMIT)], app)
+    alerts_code, _ = await invoke(
+        ["alerts", "preview", "--since-hours", str(MAX_ALERT_PREVIEW_HOURS)], app
+    )
+
+    assert analyze_code == alerts_code == 0
+    assert app.calls == [
+        ("analyze_pending", MAX_BATCH_LIMIT),
+        ("preview_alerts", MAX_ALERT_PREVIEW_HOURS),
+    ]
 
 
 async def test_report_preview_never_sends() -> None:
@@ -288,3 +339,82 @@ async def test_owned_application_close_failure_is_runtime_failure(
     assert code == 3
     assert output.getvalue() == "error=runtime_error\n"
     assert "secret" not in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    "failing_cleanup",
+    [None, "channel", "client", "database", "all"],
+)
+async def test_build_failure_attempts_all_cleanup_and_preserves_original_error(
+    failing_cleanup: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import intelligence_cli
+
+    cleanup_calls: list[str] = []
+    startup_error = RuntimeError("startup_failed")
+
+    class Secret:
+        def get_secret_value(self) -> str:
+            return "test-only-secret"
+
+    settings = SimpleNamespace(
+        database_url="sqlite+aiosqlite:///unused.db",
+        deepseek_api_key=Secret(),
+        deepseek_base_url="https://example.test",
+        deepseek_timeout_seconds=1,
+        deepseek_model="fake-model",
+        lark_app_id="fake-app",
+        lark_app_secret=Secret(),
+    )
+
+    def should_fail(name: str) -> bool:
+        return failing_cleanup in {name, "all"}
+
+    class FakeDatabase:
+        session = object()
+
+        def __init__(self, url: str) -> None:
+            assert url == settings.database_url
+
+        async def create_schema(self) -> None:
+            pass
+
+        async def dispose(self) -> None:
+            cleanup_calls.append("database")
+            if should_fail("database"):
+                raise RuntimeError("database_cleanup_secret")
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["timeout"] == 1
+
+        async def close(self) -> None:
+            cleanup_calls.append("client")
+            if should_fail("client"):
+                raise RuntimeError("client_cleanup_secret")
+
+    class FakeChannel:
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["app_id"] == "fake-app"
+
+        async def disconnect(self) -> None:
+            cleanup_calls.append("channel")
+            if should_fail("channel"):
+                raise RuntimeError("channel_cleanup_secret")
+
+    def fail_runtime(*args: object) -> object:
+        assert args
+        raise startup_error
+
+    monkeypatch.setattr(intelligence_cli, "Settings", lambda: settings)
+    monkeypatch.setattr(intelligence_cli, "Database", FakeDatabase)
+    monkeypatch.setattr(intelligence_cli, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(intelligence_cli, "FeishuChannel", FakeChannel)
+    monkeypatch.setattr(intelligence_cli, "_build_intelligence", fail_runtime)
+
+    with pytest.raises(RuntimeError) as caught:
+        await build_application()
+
+    assert caught.value is startup_error
+    assert cleanup_calls == ["channel", "client", "database"]

@@ -103,3 +103,34 @@ runbook 明确：四开关全关离线 → backfill 1/人工复核 → report pr
 日期落入错误窗口。两项均按 TDD 修复；新增 pending/sent、failed/skipped、风险升级、新版本内容变化和
 preview 不写 Outbox 边界测试，README/runbook 统一使用 `2026-07-22` 并解释上海日报窗口。复审为
 0 remaining Critical/Important，结论 Approve / ready to merge。
+
+## 复审加固（2026-07-22）
+
+针对后续独立复审的 2 项 Important 与 1 项 Minor，按 TDD 完成以下加固：
+
+- RED：先加入操作上限与启动清理回归测试；首次收集因缺少 `MAX_BATCH_LIMIT`、
+  `MAX_ALERT_PREVIEW_HOURS` 而 `ImportError`，证明测试先于实现失败；
+- GREEN：`analyze --limit` 保留默认 10 并限制为 1–100，`alerts preview --since-hours`
+  保留默认 24 并限制为 1–168；101/169 及超大整数都在构建应用前返回
+  `error=invalid_arguments`/退出码 2，100/168 正常传给应用；
+- 启动构建失败时按 channel → client → database 顺序逐项尝试清理。任一项或全部清理失败均不
+  阻断后续清理，也不覆盖最初的启动异常；清理异常不进入 CLI 输出或日志；
+- README 与 runbook 的新 Python 命令统一使用
+  `.\.venv\Scripts\python.exe -m ...`，并说明上限、默认值和大批任务分批运行规则；
+- worktree 与主工作树均没有现成 `.venv`，因此没有伪称完成该解释器路径的 help 实测。README
+  已明确先创建 venv 并 editable install 的前置合同；现有嵌入式 Python 的 `._pth` 固定指向主工作树，
+  不接受 `PYTHONPATH=src` 覆盖，故改用同一解释器显式前置 worktree `src` 后通过 `runpy` 实测
+  `commerce_agent.intelligence_cli --help`，退出码 0 且显示四类命令；另有六条 parser 命令 6/6
+  通过，100/168 接受、101/169 拒绝；
+- 复审产生的两个 `tmp-review-*` 目录均只含离线 SQLite 测试库，核对绝对路径后已删除。
+
+复审加固后的新鲜验证结果：
+
+- 聚焦单元/集成：40 passed；
+- `python -m pytest -v`：639 passed，1 个显式可选 smoke skipped；
+- `python -m ruff check .`：通过；
+- `python -m ruff format --check`（本任务 Python 文件）：通过；
+- `python -m compileall -q src tests`：通过；
+- `git diff --check`：通过；
+- `.env`/`.env.example` git 改动：0；
+- 敏感扫描只命中生产配置边界和“不泄漏”测试假值，无真实凭据。

@@ -23,6 +23,8 @@ from commerce_agent.runtime import IntelligenceRuntime, _build_intelligence
 
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*\Z")
 _ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+MAX_BATCH_LIMIT = 100
+MAX_ALERT_PREVIEW_HOURS = 168
 _SAFE_RESULT_KEYS = frozenset(
     {
         "status",
@@ -81,10 +83,22 @@ class IntelligenceCliApplication(Protocol):
     async def aclose(self) -> None: ...
 
 
-def _positive_integer(value: str) -> int:
+def _batch_limit(value: str) -> int:
     if _POSITIVE_INTEGER.fullmatch(value) is None:
-        raise argparse.ArgumentTypeError("positive_value_required")
-    return int(value)
+        raise argparse.ArgumentTypeError("batch_limit_required")
+    parsed = int(value)
+    if parsed > MAX_BATCH_LIMIT:
+        raise argparse.ArgumentTypeError("batch_limit_exceeded")
+    return parsed
+
+
+def _alert_preview_hours(value: str) -> int:
+    if _POSITIVE_INTEGER.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("alert_preview_hours_required")
+    parsed = int(value)
+    if parsed > MAX_ALERT_PREVIEW_HOURS:
+        raise argparse.ArgumentTypeError("alert_preview_hours_exceeded")
+    return parsed
 
 
 def _strict_date(value: str) -> date:
@@ -104,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = analyze.add_mutually_exclusive_group(required=True)
     mode.add_argument("--pending", action="store_true")
     mode.add_argument("--backfill", action="store_true")
-    analyze.add_argument("--limit", type=_positive_integer, default=10)
+    analyze.add_argument("--limit", type=_batch_limit, default=10)
 
     report = commands.add_parser("report")
     report_commands = report.add_subparsers(dest="report_command", required=True)
@@ -117,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     alerts = commands.add_parser("alerts")
     alert_commands = alerts.add_subparsers(dest="alerts_command", required=True)
     alert_preview = alert_commands.add_parser("preview")
-    alert_preview.add_argument("--since-hours", type=_positive_integer, default=24)
+    alert_preview.add_argument("--since-hours", type=_alert_preview_hours, default=24)
 
     commands.add_parser("health")
     return parser
@@ -335,12 +349,27 @@ async def build_application() -> ProductionCliApplication:
         runtime = _build_intelligence(settings, database, llm, channel, bindings)
         return ProductionCliApplication(runtime, bindings, database, client, channel)
     except BaseException:
-        if channel is not None:
-            await channel.disconnect()
-        if client is not None:
-            await client.close()
-        await database.dispose()
+        await _cleanup_failed_build(channel, client, database)
         raise
+
+
+async def _cleanup_failed_build(
+    channel: FeishuChannel | None,
+    client: AsyncOpenAI | None,
+    database: Database,
+) -> None:
+    operations = (
+        channel.disconnect if channel is not None else None,
+        client.close if client is not None else None,
+        database.dispose,
+    )
+    for operation in operations:
+        if operation is None:
+            continue
+        try:
+            await operation()
+        except BaseException:
+            pass
 
 
 def main(argv: Sequence[str] | None = None) -> int:

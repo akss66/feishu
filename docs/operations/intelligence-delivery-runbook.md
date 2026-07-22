@@ -16,9 +16,9 @@ INTELLIGENCE_QA_ENABLED=false
 ```
 
 不要由脚本读取、打印或改写用户现有 `.env`。人工修改开关后必须正常停止并重启
-`python -m commerce_agent` 才会生效。
+`.\.venv\Scripts\python.exe -m commerce_agent` 才会生效。
 
-来源覆盖只以 `python -m commerce_agent.ingestion_cli sources list` 显示的
+来源覆盖只以 `.\.venv\Scripts\python.exe -m commerce_agent.ingestion_cli sources list` 显示的
 `allowed + enabled` 记录为准。当前登记表中只有 eBay Newsroom RSS 满足该条件；其他平台没有已
 验证更新时，日报必须显示“无已验证更新”或“尚无合规启用来源”，不能补写平台事实，也不能把
 一次人工访问成功解释为长期授权。
@@ -26,13 +26,15 @@ INTELLIGENCE_QA_ENABLED=false
 ## 管理员命令与退出码
 
 ```powershell
-python -m commerce_agent.intelligence_cli analyze --backfill --limit 1
-python -m commerce_agent.intelligence_cli analyze --pending --limit 1
-python -m commerce_agent.intelligence_cli report preview --date 2026-07-22
-python -m commerce_agent.intelligence_cli report send --date 2026-07-22 --confirm
-python -m commerce_agent.intelligence_cli alerts preview --since-hours 24
-python -m commerce_agent.intelligence_cli health
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli analyze --backfill --limit 1
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli analyze --pending --limit 1
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli report preview --date 2026-07-22
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli report send --date 2026-07-22 --confirm
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli alerts preview --since-hours 24
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli health
 ```
+
+`analyze --limit` 默认为 10，允许范围为 1–100；`alerts preview --since-hours` 默认为 24，允许范围为 1–168。大于 100 条的 backfill 或待分析任务必须拆分批次，每批完成后先检查 `health`，确认失败/重试计数没有异常增长再继续。
 
 退出码 0 表示成功，2 表示参数、目标或确认错误，3 表示运行失败或部分失败。命令输出只包含状态、
 计数、内部 ID、安全错误码和当前 `risk_profile`；不会显示文章正文、提示词、模型原始输出、用户
@@ -49,9 +51,9 @@ python -m commerce_agent.intelligence_cli health
 保持四个开关全为 `false`，运行默认无网络测试：
 
 ```powershell
-python -m pytest -v
-python -m ruff check .
-python -m compileall -q src tests
+.\.venv\Scripts\python.exe -m pytest -v
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m compileall -q src tests
 git diff --check
 ```
 
@@ -63,8 +65,8 @@ Outbox 和 fake 飞书发送。不要设置真实网络或 smoke 开关。
 在已有一篇 `allowed` 来源文章的测试数据库上依次运行：
 
 ```powershell
-python -m commerce_agent.intelligence_cli analyze --backfill --limit 1
-python -m commerce_agent.intelligence_cli analyze --pending --limit 1
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli analyze --backfill --limit 1
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli analyze --pending --limit 1
 ```
 
 在受控本地数据库查看该内部 analysis ID，对照原文逐项复核中文摘要、风险、证据可信度、判断依据、
@@ -74,7 +76,7 @@ python -m commerce_agent.intelligence_cli analyze --pending --limit 1
 ### 2. 日报预览
 
 ```powershell
-python -m commerce_agent.intelligence_cli report preview --date 2026-07-22
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli report preview --date 2026-07-22
 ```
 
 `--date` 是日报结束日期；`2026-07-22` 对应 `Asia/Shanghai` 的 2026-07-21 09:00（含）至
@@ -90,7 +92,7 @@ python -m commerce_agent.intelligence_cli report preview --date 2026-07-22
 先确认当前唯一有效绑定确实是专用测试群，再执行：
 
 ```powershell
-python -m commerce_agent.intelligence_cli report send --date 2026-07-22 --confirm
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli report send --date 2026-07-22 --confirm
 ```
 
 验收同群同日报日期只有一个 Outbox 幂等键和一条飞书消息。目标不是测试群、出现多条消息、发送
@@ -124,7 +126,7 @@ python -m commerce_agent.intelligence_cli report send --date 2026-07-22 --confir
 可先运行不发送的摘要：
 
 ```powershell
-python -m commerce_agent.intelligence_cli alerts preview --since-hours 24
+.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli alerts preview --since-hours 24
 ```
 
 ### 6. 仅开启有据问答
@@ -145,7 +147,7 @@ python -m commerce_agent.intelligence_cli alerts preview --since-hours 24
 
 ## 监控、成功门与红线
 
-`python -m commerce_agent.intelligence_cli health` 提供待分析、分析重试/失败、Outbox 待发送、重试/
+`.\.venv\Scripts\python.exe -m commerce_agent.intelligence_cli health` 提供待分析、分析重试/失败、Outbox 待发送、重试/
 失败和当前档位的安全摘要。当前没有内建 dashboard；发布期间应定时保存这些计数及进程受控日志中的
 内部 job ID、耗时和安全错误码。另行人工记录以下指标，不把正文或用户问题写入监控：
 
@@ -164,7 +166,7 @@ python -m commerce_agent.intelligence_cli alerts preview --since-hours 24
 回滚优先只关闭发生问题的开关并重启，不要顺带改变其他能力：
 
 1. 将受影响的 `INTELLIGENCE_*_ENABLED` 设置为 `false`；
-2. 正常停止并重启 `python -m commerce_agent`，阻止新 job；
+2. 正常停止并重启 `.\.venv\Scripts\python.exe -m commerce_agent`，阻止新 job；
 3. 运行 `health`，记录安全计数和内部 ID；
 4. 保留 SQLite、分析、日报和 Outbox 审计记录，不删除数据库、不清空表、不重写历史 payload；
 5. 修复后从离线测试和单篇/单消息阶段重新开始，再单独取得批准。
