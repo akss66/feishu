@@ -100,10 +100,12 @@ BALANCED_REVIEW_SOURCE_EVIDENCE = {
     "shopee-my-seller-education": {
         "terms_url": "https://shopee.com.my/legaldoc/termsOfService/",
         "robots_url": "https://seller.shopee.com.my/robots.txt",
+        "regions": ("my",),
     },
     "shopee-ph-seller-education": {
         "terms_url": "https://shopee.ph/legaldoc/termsOfService/",
         "robots_url": "https://seller.shopee.ph/robots.txt",
+        "regions": ("ph",),
     },
     "ebay-seller-updates": {
         "terms_url": "https://www.ebay.com/help/policies/member-behaviour-policies/user-agreement?id=4259",
