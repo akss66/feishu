@@ -4,6 +4,7 @@ import io
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +18,13 @@ from commerce_agent.ingestion.models import (
     TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry
-from commerce_agent.ingestion_cli import HealthRow, build_application, run_cli
+from commerce_agent.ingestion_cli import (
+    HealthRow,
+    _IngestionSettings,
+    _ProductionApplication,
+    build_application,
+    run_cli,
+)
 
 NOW = datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
 
@@ -480,3 +487,113 @@ async def test_cli_browser_config_failure_is_controlled_exit_three(
     assert exit_code == 3
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == "error: command failed\n"
+
+
+def test_ingestion_cli_settings_accept_cloudflare_doh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INGESTION_DNS_MODE", "cloudflare_doh")
+
+    assert _IngestionSettings(_env_file=None).ingestion_dns_mode == "cloudflare_doh"
+
+
+async def test_production_application_closes_http_resolver_then_database() -> None:
+    events: list[str] = []
+
+    class Service:
+        pass
+
+    class Closer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def aclose(self) -> None:
+            events.append(self.name)
+
+    class Database:
+        async def dispose(self) -> None:
+            events.append("database")
+
+    app = _ProductionApplication(
+        registry=SourceRegistry([]),
+        service=Service(),  # type: ignore[arg-type]
+        database=Database(),  # type: ignore[arg-type]
+        http_client=Closer("http"),  # type: ignore[arg-type]
+        resolver_resources=(Closer("resolver"),),
+    )
+
+    await app.aclose()
+
+    assert events == ["http", "resolver", "database"]
+
+
+async def test_cli_partial_construction_closes_http_resolver_then_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import ingestion_cli
+
+    events: list[str] = []
+
+    class Settings:
+        database_url = "sqlite+aiosqlite:///:memory:"
+        ingestion_browser_enabled = False
+        ingestion_dns_mode = "cloudflare_doh"
+        ingestion_global_concurrency = 1
+        ingestion_domain_rps = 1.0
+        ingestion_http_timeout_seconds = 1.0
+        ingestion_max_response_bytes = 1024
+        ingestion_user_agent = "test-agent"
+        snapshot_dir = "."
+
+    class Database:
+        session = object()
+
+        def __init__(self, url: str) -> None:
+            del url
+
+        async def create_schema(self) -> None:
+            pass
+
+        async def dispose(self) -> None:
+            events.append("database")
+
+    class Repository:
+        def __init__(self, session: object) -> None:
+            del session
+
+        async def sync_sources(self, sources: object) -> None:
+            del sources
+
+    class Closer:
+        def __init__(self, name: str, **kwargs: object) -> None:
+            del kwargs
+            self.name = name
+
+        async def aclose(self) -> None:
+            events.append(self.name)
+
+    resolver = Closer("resolver")
+    monkeypatch.setattr(ingestion_cli, "_IngestionSettings", Settings)
+    monkeypatch.setattr(ingestion_cli, "Database", Database)
+    monkeypatch.setattr(ingestion_cli, "SqlAlchemyIngestionRepository", Repository)
+    monkeypatch.setattr(ingestion_cli, "build_registry", lambda: SourceRegistry([]))
+    monkeypatch.setattr(
+        ingestion_cli,
+        "build_resolver_bundle",
+        lambda mode: SimpleNamespace(safety_policy=object(), resources=(resolver,)),
+    )
+    monkeypatch.setattr(
+        ingestion_cli,
+        "IngestionHttpClient",
+        lambda **kwargs: Closer("http", **kwargs),
+    )
+    monkeypatch.setattr(
+        ingestion_cli,
+        "FeedCollector",
+        lambda client: (_ for _ in ()).throw(RuntimeError("collector failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="collector failed"):
+        await build_application()
+
+    assert events == ["http", "resolver", "database"]

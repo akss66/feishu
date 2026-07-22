@@ -9,13 +9,14 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, TextIO
+from typing import Literal, Protocol, TextIO
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 
 from commerce_agent.config import require_browser_ingestion_disabled
+from commerce_agent.ingestion.bootstrap import AsyncCloser, build_resolver_bundle
 from commerce_agent.ingestion.collectors import (
     ApiCollector,
     BrowserCollector,
@@ -28,7 +29,6 @@ from commerce_agent.ingestion.extract import ContentExtractor, LinguaLanguageDet
 from commerce_agent.ingestion.http import IngestionHttpClient
 from commerce_agent.ingestion.models import CollectorKind, RunStatus, RunSummary, Trigger
 from commerce_agent.ingestion.registry import SourceRegistry
-from commerce_agent.ingestion.security import UrlSafetyPolicy
 from commerce_agent.ingestion.service import IngestionService
 from commerce_agent.ingestion.snapshots import SnapshotStore
 from commerce_agent.persistence.database import Database
@@ -54,6 +54,7 @@ class _IngestionSettings(BaseSettings):
     ingestion_http_timeout_seconds: float = Field(default=20.0, gt=0)
     ingestion_max_response_bytes: int = Field(default=10_485_760, gt=0)
     ingestion_browser_enabled: bool = False
+    ingestion_dns_mode: Literal["system", "cloudflare_doh"] = "system"
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
 
@@ -93,11 +94,13 @@ class _ProductionApplication:
         service: IngestionService,
         database: Database,
         http_client: IngestionHttpClient,
+        resolver_resources: tuple[AsyncCloser, ...],
     ) -> None:
         self.registry = registry
         self._service = service
         self._database = database
         self._http_client = http_client
+        self._resolver_resources = resolver_resources
 
     async def run_all(self) -> tuple[RunSummary, ...]:
         return await self._service.run_all(Trigger.MANUAL)
@@ -117,10 +120,10 @@ class _ProductionApplication:
         )
 
     async def aclose(self) -> None:
-        try:
-            await self._http_client.aclose()
-        finally:
-            await self._database.dispose()
+        await _close_application_resources(
+            (self._http_client, *self._resolver_resources),
+            self._database,
+        )
 
 
 class _ArgumentError(ValueError):
@@ -141,14 +144,16 @@ async def build_application() -> CliApplication:
     registry = build_registry()
     database = Database(settings.database_url)
     http_client: IngestionHttpClient | None = None
+    resolver_resources: tuple[AsyncCloser, ...] = ()
     try:
         await database.create_schema()
         repository = SqlAlchemyIngestionRepository(database.session)
         await repository.sync_sources(registry.sources)
 
-        safety_policy = UrlSafetyPolicy()
+        resolver_bundle = build_resolver_bundle(settings.ingestion_dns_mode)
+        resolver_resources = resolver_bundle.resources
         http_client = IngestionHttpClient(
-            safety_policy=safety_policy,
+            safety_policy=resolver_bundle.safety_policy,
             global_concurrency=settings.ingestion_global_concurrency,
             domain_rps=settings.ingestion_domain_rps,
             timeout_seconds=settings.ingestion_http_timeout_seconds,
@@ -180,14 +185,37 @@ async def build_application() -> CliApplication:
             service=service,
             database=database,
             http_client=http_client,
+            resolver_resources=resolver_resources,
         )
     except BaseException:
         try:
+            resources: tuple[AsyncCloser, ...] = resolver_resources
             if http_client is not None:
-                await http_client.aclose()
-        finally:
-            await database.dispose()
+                resources = (http_client, *resources)
+            await _close_application_resources(resources, database)
+        except BaseException:
+            pass
         raise
+
+
+async def _close_application_resources(
+    resources: tuple[AsyncCloser, ...],
+    database: Database,
+) -> None:
+    first_error: BaseException | None = None
+    for resource in resources:
+        try:
+            await resource.aclose()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+    try:
+        await database.dispose()
+    except BaseException as error:
+        if first_error is None:
+            first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 def build_registry() -> SourceRegistry:
