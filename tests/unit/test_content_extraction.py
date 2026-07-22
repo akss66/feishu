@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -16,7 +17,9 @@ from commerce_agent.ingestion.models import (
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     Platform,
+    SourceAdapter,
     SourceDefinition,
     TrustTier,
 )
@@ -163,6 +166,92 @@ def test_feed_provided_plain_text_and_collected_metadata_take_precedence() -> No
     assert document.title == "Feed title"
     assert document.author == "Feed author"
     assert document.published_at == published
+    assert document.metadata == {}
+
+
+def test_direct_media_inherits_source_provenance() -> None:
+    media_source = replace(
+        source(),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GENERIC,
+        content_scope=ContentScope.FEED_SUMMARY,
+        attribution="Reuters",
+        publisher_key="reuters.com",
+    )
+    item = CollectedItem(
+        url="https://www.reuters.com/example",
+        body=b"Feed summary retained under the reviewed source contract.",
+        content_type="text/plain",
+    )
+
+    document = ContentExtractor(FixedLanguageDetector()).extract(
+        media_source,
+        item,
+        fetched_at=FETCHED_AT,
+    )
+
+    assert document.metadata == {
+        "publisher_key": "reuters.com",
+        "attribution": "Reuters",
+        "content_scope": "feed_summary",
+    }
+
+
+def test_gdelt_media_uses_per_item_publisher_and_source_attribution() -> None:
+    media_source = replace(
+        source(),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+        collector=CollectorKind.API,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index; original publisher shown per item",
+        publisher_key=None,
+    )
+    item = CollectedItem(
+        url="https://www.reuters.com/example",
+        body=b'{"title":"Indexed article"}',
+        content_type="application/json",
+        publisher_key="reuters.com",
+    )
+
+    document = ContentExtractor(FixedLanguageDetector()).extract(
+        media_source,
+        item,
+        fetched_at=FETCHED_AT,
+    )
+
+    assert document.metadata == {
+        "publisher_key": "reuters.com",
+        "attribution": "GDELT index; original publisher shown per item",
+        "content_scope": "metadata_only",
+    }
+
+
+def test_media_without_final_publisher_identity_fails_with_safe_code() -> None:
+    media_source = replace(
+        source(),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+        collector=CollectorKind.API,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT",
+        publisher_key=None,
+    )
+    item = CollectedItem(
+        url="https://publisher.example/article?marker=private-value",
+        body=b'{"title":"Indexed article"}',
+        content_type="application/json",
+    )
+
+    with pytest.raises(ExtractionError) as error:
+        ContentExtractor(FixedLanguageDetector()).extract(
+            media_source,
+            item,
+            fetched_at=FETCHED_AT,
+        )
+
+    assert error.value.code == "missing_publisher_identity"
+    assert "private-value" not in str(error.value)
 
 
 def test_blank_content_is_rejected() -> None:

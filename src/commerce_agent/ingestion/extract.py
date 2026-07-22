@@ -12,7 +12,13 @@ from lingua import Language, LanguageDetectorBuilder
 from lxml import html as lxml_html
 
 from commerce_agent.ingestion.dedupe import canonicalize_url, normalize_text
-from commerce_agent.ingestion.models import CollectedItem, ExtractedDocument, SourceDefinition
+from commerce_agent.ingestion.models import (
+    CollectedItem,
+    ExtractedDocument,
+    SourceAdapter,
+    SourceDefinition,
+    TrustTier,
+)
 
 _SUPPORTED_LANGUAGES = (Language.CHINESE, Language.ENGLISH, Language.RUSSIAN)
 _SELECTOR_PART = re.compile(r"^(?P<tag>[a-zA-Z][\w-]*|\*)?(?P<suffix>(?:[.#][\w-]+)*)$")
@@ -104,6 +110,7 @@ class ContentExtractor:
             title = canonicalize_url(item.url)
         author = normalize_text(item.author or metadata.author or "") or None
         published_at = item.published_at or _parse_timestamp(metadata.published_at)
+        provenance = _media_provenance(source, item)
         return ExtractedDocument(
             source_id=source.source_id,
             canonical_url=canonicalize_url(item.url),
@@ -114,6 +121,7 @@ class ContentExtractor:
             fetched_at=fetched_at,
             author=author,
             published_at=published_at,
+            metadata=provenance,
         )
 
 
@@ -122,6 +130,28 @@ class _HtmlMetadata:
     title: str | None = None
     author: str | None = None
     published_at: str | None = None
+
+
+def _media_provenance(
+    source: SourceDefinition,
+    item: CollectedItem,
+) -> dict[str, str]:
+    if source.trust_tier is not TrustTier.MEDIA:
+        return {}
+    publisher_key = (
+        item.publisher_key
+        if source.adapter is SourceAdapter.GDELT
+        else source.publisher_key
+    )
+    if not publisher_key:
+        raise ExtractionError("missing_publisher_identity")
+    if source.attribution is None or source.content_scope is None:
+        raise ExtractionError("missing_media_provenance")
+    return {
+        "publisher_key": publisher_key,
+        "attribution": source.attribution,
+        "content_scope": source.content_scope.value,
+    }
 
 
 def _is_html(item: CollectedItem) -> bool:
