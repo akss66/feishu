@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from commerce_agent.ingestion.models import Platform
 from commerce_agent.intelligence.models import RiskLevel
 from commerce_agent.intelligence.retrieval import (
@@ -136,6 +138,24 @@ async def test_search_ranks_risk_then_confidence_then_recency_deterministically(
     results = await retriever.search(CorpusQuery(text="policy", now=NOW))
 
     assert [result.document_version_id for result in results] == [2, 5, 4, 3, 1]
+
+
+@pytest.mark.parametrize("query_text", ["shipping deadline", "物流截止日期"])
+async def test_search_excludes_candidates_without_any_lexical_overlap(query_text: str) -> None:
+    candidate = _candidate(
+        1,
+        title="Account fee policy",
+        summary="Seller commission changed",
+        quotes=("The fee increased",),
+        risk_level=RiskLevel.HIGH,
+        evidence_confidence=100,
+    )
+
+    results = await CorpusRetriever(_RepositorySpy((candidate,))).search(
+        CorpusQuery(text=query_text, now=NOW)
+    )
+
+    assert results == ()
 
 
 async def test_search_honors_zero_limit_without_query_or_content_persistence() -> None:

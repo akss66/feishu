@@ -259,10 +259,12 @@ class SqlAlchemyIntelligenceRepository:
             )
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
+            .join(AnalysisJob, AnalysisJob.document_version_id == DocumentVersion.id)
             .join(SourcePlatform, SourcePlatform.source_id == Source.id)
             .where(
                 Document.current_version_id == DocumentVersion.id,
                 Source.compliance == "allowed",
+                AnalysisJob.status == "completed",
                 candidate_time >= since,
                 candidate_time <= until,
             )

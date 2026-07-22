@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
+from sqlalchemy import update
+
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
@@ -18,7 +20,7 @@ from commerce_agent.persistence.ingestion import (
     PersistableDocument,
     SqlAlchemyIngestionRepository,
 )
-from commerce_agent.persistence.models import DocumentAnalysis
+from commerce_agent.persistence.models import AnalysisJob, DocumentAnalysis
 
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
 
@@ -82,8 +84,15 @@ async def _add_analysis(
     title: str,
     risk: RiskLevel = RiskLevel.MEDIUM,
     confidence: int = 80,
+    job_status: str = "completed",
 ) -> int:
     async with database.session.begin() as session:
+        updated = await session.execute(
+            update(AnalysisJob)
+            .where(AnalysisJob.document_version_id == version_id)
+            .values(status=job_status, updated_at=NOW)
+        )
+        assert updated.rowcount == 1
         analysis = DocumentAnalysis(
             document_version_id=version_id,
             schema_version="1",
@@ -166,6 +175,39 @@ async def test_real_sqlite_returns_only_current_analyzed_currently_allowed_sourc
             result for result in results if result.source_id == "allowed-disabled"
         )
         assert disabled_result.evidence_quotes == ("evidence allowed-disabled",)
+    finally:
+        await database.dispose()
+
+
+async def test_real_sqlite_requires_completed_job_even_when_analysis_row_exists(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'retrieval-job-state.db'}")
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    retriever = CorpusRetriever(repository)
+    statuses = ("completed", "pending", "failed")
+    try:
+        await database.create_schema()
+        await ingestion.sync_sources([_source(f"job-{status}") for status in statuses])
+        for index, status in enumerate(statuses):
+            outcome = await ingestion.persist_version(
+                _document(
+                    f"job-{status}",
+                    chr(ord("k") + index),
+                    title=f"Policy job {status}",
+                )
+            )
+            await _add_analysis(
+                database,
+                outcome.version_id,
+                title=f"job-{status}",
+                job_status=status,
+            )
+
+        results = await retriever.search(CorpusQuery(text="policy", now=NOW))
+
+        assert [result.source_id for result in results] == ["job-completed"]
     finally:
         await database.dispose()
 

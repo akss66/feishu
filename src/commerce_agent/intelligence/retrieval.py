@@ -12,6 +12,11 @@ _CHINESE_RUN = re.compile(r"[\u3400-\u9fff]+")
 _MAX_QUERY_CHARACTERS = 2_000
 _MAX_SEARCH_TERMS = 40
 _MAX_RESULTS = 8
+_RISK_WEIGHT = {
+    RiskLevel.HIGH: 3.0,
+    RiskLevel.MEDIUM: 2.0,
+    RiskLevel.LOW: 1.0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,14 +104,7 @@ def lexical_score(query: str, candidate: CorpusCandidate, now: datetime) -> floa
     title_hits = sum(title.count(term) for term in terms)
     summary_hits = sum(summary.count(term) for term in terms)
     quote_hits = sum(quote.count(term) for quote in quotes for term in terms)
-    age_days = max(0.0, (now - candidate.fetched_at).total_seconds() / 86_400)
-    recency = max(0.0, 3.0 - age_days / 10)
-    risk = {
-        RiskLevel.HIGH: 3.0,
-        RiskLevel.MEDIUM: 2.0,
-        RiskLevel.LOW: 1.0,
-    }[candidate.risk_level]
-    return title_hits * 5.0 + summary_hits * 2.0 + quote_hits * 1.5 + recency + risk
+    return title_hits * 5.0 + summary_hits * 2.0 + quote_hits * 1.5
 
 
 class CorpusRetriever:
@@ -123,11 +121,26 @@ class CorpusRetriever:
             risk_levels=query.risk_levels,
             limit=100,
         )
+        matched = (
+            (score, item)
+            for item in candidates
+            if (score := lexical_score(query.text, item, query.now)) > 0
+        )
         ranked = sorted(
-            ((lexical_score(query.text, item, query.now), item) for item in candidates),
+            matched,
             key=lambda pair: (
                 pair[0],
+                _RISK_WEIGHT[pair[1].risk_level],
                 pair[1].evidence_confidence,
+                max(
+                    0.0,
+                    3.0
+                    - max(
+                        0.0,
+                        (query.now - pair[1].fetched_at).total_seconds() / 86_400,
+                    )
+                    / 10,
+                ),
                 pair[1].fetched_at,
                 pair[1].analysis_id,
                 pair[1].document_version_id,
@@ -136,7 +149,5 @@ class CorpusRetriever:
         )
         result_limit = max(0, min(query.limit, _MAX_RESULTS))
         return tuple(
-            EvidenceDocument(**asdict(item), score=score)
-            for score, item in ranked[:result_limit]
-            if score > 0
+            EvidenceDocument(**asdict(item), score=score) for score, item in ranked[:result_limit]
         )
