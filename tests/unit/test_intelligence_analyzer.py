@@ -23,7 +23,8 @@ from commerce_agent.intelligence.models import AnalysisCandidate, EventType
 
 class FakeJsonGateway:
     def __init__(self, responses: list[str | BaseException]) -> None:
-        self._responses = iter(responses)
+        self._responses = list(responses)
+        self._index = 0
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     @property
@@ -34,7 +35,11 @@ class FakeJsonGateway:
         self, system_prompt: str, user_payload: dict[str, object]
     ) -> str:
         self.calls.append((system_prompt, user_payload))
-        response = next(self._responses)
+        if not self._responses:
+            raise AssertionError("the model gateway must not be called")
+        index = min(self._index, len(self._responses) - 1)
+        response = self._responses[index]
+        self._index += 1
         if isinstance(response, BaseException):
             raise response
         return response
@@ -142,7 +147,7 @@ async def test_analyzer_rejects_an_unanchored_quote_after_one_repair(
     with pytest.raises(InvalidModelOutput, match="evidence_not_anchored"):
         await analyzer.analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_analyzer_repairs_invalid_json_once(candidate: AnalysisCandidate) -> None:
@@ -173,7 +178,7 @@ async def test_analyzer_rejects_empty_output_after_one_repair(
     with pytest.raises(InvalidModelOutput, match="^empty_output$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1] == {
         "article": gateway.calls[0][1]["article"],
         "schema": gateway.calls[0][1]["schema"],
@@ -214,22 +219,52 @@ async def test_analyzer_accepts_body_at_hard_character_limit(
     assert gateway.calls[0][1]["article"]["body"] == body
 
 
-async def test_analyzer_rejects_body_over_hard_limit_before_gateway_call(
+async def test_analyzer_sends_a_bounded_first_and_last_excerpt_for_long_articles(
     candidate: AnalysisCandidate,
 ) -> None:
-    secret_marker = "SECRET-OVERSIZED-ARTICLE"
-    body = secret_marker + "界" * (
-        analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS + 1 - len(secret_marker)
+    body = (
+        "PREFIX-EVIDENCE "
+        + "甲" * 40_000
+        + " MIDDLE-ONLY-EVIDENCE "
+        + "乙" * 40_000
+        + " SUFFIX-EVIDENCE"
     )
-    oversized_candidate = replace(candidate, body=body)
-    gateway = FakeJsonGateway([])
+    long_candidate = replace(candidate, body=body)
+    gateway = FakeJsonGateway(
+        [
+            valid_json(
+                rationale=[
+                    {"claim": "保留末尾证据", "quote": "SUFFIX-EVIDENCE"}
+                ]
+            )
+        ]
+    )
 
-    with pytest.raises(errors_module.OversizedAnalysisInput) as raised:
-        await IntelligenceAnalyzer(gateway).analyze(oversized_candidate)
+    result = await IntelligenceAnalyzer(gateway).analyze(long_candidate)
 
-    assert gateway.call_count == 0
-    assert body not in repr(raised.value)
-    assert secret_marker not in repr(raised.value)
+    excerpt = gateway.calls[0][1]["article"]["body"]
+    assert isinstance(excerpt, str)
+    assert len(excerpt) == analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS
+    assert excerpt.startswith("PREFIX-EVIDENCE")
+    assert excerpt.endswith("SUFFIX-EVIDENCE")
+    assert "MIDDLE-ONLY-EVIDENCE" not in excerpt
+    assert result.rationale[0].quote == "SUFFIX-EVIDENCE"
+
+
+async def test_long_article_evidence_must_exist_in_the_sent_excerpt(
+    candidate: AnalysisCandidate,
+) -> None:
+    body = "甲" * 40_000 + "MIDDLE-ONLY-EVIDENCE" + "乙" * 40_000
+    long_candidate = replace(candidate, body=body)
+    response = valid_json(
+        rationale=[{"claim": "中段证据", "quote": "MIDDLE-ONLY-EVIDENCE"}]
+    )
+    gateway = FakeJsonGateway([response])
+
+    with pytest.raises(InvalidModelOutput, match="^evidence_not_anchored$"):
+        await IntelligenceAnalyzer(gateway).analyze(long_candidate)
+
+    assert gateway.call_count == 3
 
 
 async def test_analyzer_rejects_extra_fields_as_schema_mismatch(
@@ -242,7 +277,7 @@ async def test_analyzer_rejects_extra_fields_as_schema_mismatch(
     with pytest.raises(InvalidModelOutput, match="schema_mismatch"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1]["error_code"] == "schema_mismatch"
     assert gateway.calls[1][1]["validation_issues"] == ["$:extra_forbidden"]
 
@@ -257,7 +292,7 @@ async def test_analyzer_rejects_an_invented_platform(
     with pytest.raises(InvalidModelOutput, match="^platform_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1]["error_code"] == "platform_not_grounded"
 
 
@@ -271,7 +306,7 @@ async def test_analyzer_rejects_an_invented_region(
     with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1]["error_code"] == "region_not_grounded"
 
 
@@ -301,7 +336,7 @@ async def test_region_cannot_be_grounded_by_common_or_injected_quote_text(
     with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(injected_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_region_cannot_be_grounded_by_a_newline_structured_injection(
@@ -320,7 +355,7 @@ async def test_region_cannot_be_grounded_by_a_newline_structured_injection(
     with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(injected_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_analyzer_rejects_a_blank_region(candidate: AnalysisCandidate) -> None:
@@ -329,7 +364,7 @@ async def test_analyzer_rejects_a_blank_region(candidate: AnalysisCandidate) -> 
     with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_analyzer_rejects_an_invented_effective_date(
@@ -345,7 +380,7 @@ async def test_analyzer_rejects_an_invented_effective_date(
     with pytest.raises(InvalidModelOutput, match="^date_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1]["error_code"] == "date_not_grounded"
 
 
@@ -359,7 +394,7 @@ async def test_effective_date_cannot_borrow_month_and_day_from_another_year(
     with pytest.raises(InvalidModelOutput, match="^date_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(dated_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 @pytest.mark.parametrize(
@@ -377,7 +412,7 @@ async def test_date_only_source_cannot_ground_time_or_timezone_precision(
     with pytest.raises(InvalidModelOutput, match="^date_precision_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(dated_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_analyzer_accepts_explicit_full_datetime_and_timezone(
@@ -430,7 +465,7 @@ async def test_analyzer_rejects_an_invented_concrete_amount(
     with pytest.raises(InvalidModelOutput, match="^amount_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1]["error_code"] == "amount_not_grounded"
 
 
@@ -506,7 +541,7 @@ async def test_analyzer_rejects_unsupported_all_seller_scope(
     with pytest.raises(InvalidModelOutput, match="^seller_scope_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_all_seller_scope_requires_an_explicit_scope_field(
@@ -527,7 +562,7 @@ async def test_all_seller_scope_requires_an_explicit_scope_field(
     with pytest.raises(InvalidModelOutput, match="^seller_scope_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(scoped_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_unknown_seller_scope_requires_a_scope_uncertainty(
@@ -539,7 +574,7 @@ async def test_unknown_seller_scope_requires_a_scope_uncertainty(
     with pytest.raises(InvalidModelOutput, match="^seller_scope_uncertain$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_analyzer_rejects_explicit_all_seller_scope_without_metadata(
@@ -555,7 +590,7 @@ async def test_analyzer_rejects_explicit_all_seller_scope_without_metadata(
     with pytest.raises(InvalidModelOutput, match="^seller_scope_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(scoped_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_seller_scope_cannot_be_grounded_by_a_newline_structured_injection(
@@ -579,7 +614,7 @@ async def test_seller_scope_cannot_be_grounded_by_a_newline_structured_injection
     with pytest.raises(InvalidModelOutput, match="^seller_scope_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(injected_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 async def test_scope_uncertainty_must_explicitly_say_unknown(
@@ -594,7 +629,7 @@ async def test_scope_uncertainty_must_explicitly_say_unknown(
     with pytest.raises(InvalidModelOutput, match="^seller_scope_uncertain$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
 
 
 @pytest.mark.parametrize(
@@ -618,5 +653,5 @@ async def test_provenance_anchor_rejects_non_substantive_quotes(
     with pytest.raises(InvalidModelOutput, match="^evidence_not_substantive$"):
         await IntelligenceAnalyzer(gateway).analyze(grounded_candidate)
 
-    assert gateway.call_count == 2
+    assert gateway.call_count == 3
     assert gateway.calls[1][1]["error_code"] == "evidence_not_substantive"

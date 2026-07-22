@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import datetime
 from typing import Protocol
 
 from pydantic import ValidationError
 
 from commerce_agent.ingestion.models import TrustTier
-from commerce_agent.intelligence.errors import EmptyModelOutput, OversizedAnalysisInput
+from commerce_agent.intelligence.errors import EmptyModelOutput
 from commerce_agent.intelligence.models import AnalysisCandidate, AnalysisResult
 from commerce_agent.media.catalog import publisher_name, publisher_profile
 
 MAX_ANALYSIS_BODY_CHARACTERS = 50_000
+ANALYSIS_EXCERPT_PREFIX_CHARACTERS = 35_000
+MAX_ANALYSIS_ATTEMPTS = 3
 
 
 class JsonModelGateway(Protocol):
@@ -208,6 +211,30 @@ def candidate_payload(candidate: AnalysisCandidate) -> dict[str, object]:
     }
 
 
+def analysis_excerpt(
+    body: str,
+    *,
+    limit: int = MAX_ANALYSIS_BODY_CHARACTERS,
+) -> str:
+    """Keep a deterministic beginning/end excerpt within the model input budget."""
+
+    if limit < 1:
+        raise ValueError("analysis excerpt limit must be positive")
+    if len(body) <= limit:
+        return body
+    separator = "\n\n"
+    if limit <= len(separator):
+        return body[:limit]
+    prefix_size = min(
+        ANALYSIS_EXCERPT_PREFIX_CHARACTERS,
+        limit - len(separator),
+    )
+    suffix_size = limit - len(separator) - prefix_size
+    if suffix_size == 0:
+        return body[:limit]
+    return body[:prefix_size] + separator + body[-suffix_size:]
+
+
 def require_anchored_evidence(result: AnalysisResult, body: str) -> None:
     """Verify substantive source provenance, not semantic claim entailment."""
     if any(
@@ -370,12 +397,11 @@ class IntelligenceAnalyzer:
         self._gateway = gateway
 
     async def analyze(self, candidate: AnalysisCandidate) -> AnalysisResult:
-        if len(candidate.body) > MAX_ANALYSIS_BODY_CHARACTERS:
-            raise OversizedAnalysisInput
-        payload = candidate_payload(candidate)
+        bounded_candidate = replace(candidate, body=analysis_excerpt(candidate.body))
+        payload = candidate_payload(bounded_candidate)
         last_code = "invalid_model_output"
         last_issues: tuple[str, ...] = ()
-        for attempt in range(2):
+        for attempt in range(MAX_ANALYSIS_ATTEMPTS):
             try:
                 raw = await self._gateway.complete_json(
                     SYSTEM_PROMPT if attempt == 0 else REPAIR_PROMPT,
@@ -395,8 +421,8 @@ class IntelligenceAnalyzer:
                     ),
                 )
                 result = AnalysisResult.model_validate_json(raw)
-                require_anchored_evidence(result, candidate.body)
-                require_grounded_facts(result, candidate)
+                require_anchored_evidence(result, bounded_candidate.body)
+                require_grounded_facts(result, bounded_candidate)
                 return result
             except EmptyModelOutput:
                 last_code = "empty_output"
