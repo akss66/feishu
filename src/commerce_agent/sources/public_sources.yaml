@@ -1,5 +1,24 @@
 version: 1
 sources:
+  # Amazon explicitly publishes this SP-API changelog as an RSS subscription.
+  - source_id: amazon-sp-api-changelog-rss
+    name: Amazon SP-API Changelog RSS
+    entry_url: https://developer-docs.amazon/sp-api/changelog.rss
+    platforms: [amazon]
+    trust_tier: official
+    collector: rss
+    compliance: allowed
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://developer-docs.amazon/sp-api/changelog/october-2022-sp-api-release-announcement
+    robots_url: https://developer-docs.amazon/robots.txt
+    reviewed_at: 2026-07-22
+    compliance_notes: Amazon's official October 2022 SP-API announcement explicitly provides the changelog RSS subscription; initially disabled pending a local live smoke test.
+    collector_config:
+      item_limit: 50
+
   # Amazon candidates remain disabled until Amazon confirms automated reuse terms.
   - &amazon
     source_id: amazon-seller-blog
@@ -327,6 +346,33 @@ sources:
     entry_url: https://seller-sg.tiktok.com/university/essay?knowledge_id=2526777789482753
     regions: [sg]
     robots_url: https://seller-sg.tiktok.com/robots.txt
+
+  # GDELT indexes public article metadata only; original article URLs are never fetched.
+  - source_id: media-gdelt-cross-border
+    name: GDELT Cross-border Commerce Discovery
+    entry_url: https://api.gdeltproject.org/api/v2/doc/doc?query=%28Amazon%20OR%20TEMU%20OR%20SHEIN%20OR%20AliExpress%20OR%20Shopee%20OR%20eBay%20OR%20Coupang%20OR%20Ozon%20OR%20Joybuy%20OR%20%22TikTok%20Shop%22%29%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=50&timespan=1d&sort=datedesc
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    adapter: gdelt
+    content_scope: metadata_only
+    attribution: GDELT index; original publisher shown per item
+    collector: api
+    compliance: allowed
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
+    robots_url: https://api.gdeltproject.org/robots.txt
+    reviewed_at: 2026-07-22
+    compliance_notes: Uses GDELT DOC 2.0 ArtList JSON metadata only, one bounded API request per run, and never fetches original article URLs; initially disabled pending a local live smoke test.
+    collector_config:
+      items_path: $.articles
+      url_field: $.url
+      title_field: $.title
+      published_at_field: $.seendate
+      publisher_field: $.domain
+      item_limit: 50
 
   # Industry publishers are discovery candidates only and remain disabled.
   - source_id: media-marketplace-pulse

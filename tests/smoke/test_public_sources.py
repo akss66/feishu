@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from commerce_agent.ingestion.collectors import FeedCollector
+from commerce_agent.ingestion.bootstrap import build_resolver_bundle
+from commerce_agent.ingestion.collectors import ApiCollector, FeedCollector
 from commerce_agent.ingestion.collectors.base import HttpPort
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse, IngestionHttpClient
 from commerce_agent.ingestion.models import (
@@ -20,12 +21,15 @@ from commerce_agent.ingestion.models import (
     TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry
-from commerce_agent.ingestion.security import UrlSafetyPolicy
 
 _REGISTRY_PATH = (
     Path(__file__).parents[2] / "src" / "commerce_agent" / "sources" / "public_sources.yaml"
 )
-_SMOKE_SOURCE_IDS = ("ebay-newsroom-rss",)
+_SMOKE_SOURCE_IDS = (
+    "amazon-sp-api-changelog-rss",
+    "ebay-newsroom-rss",
+    "media-gdelt-cross-border",
+)
 _FEED_CONTENT_TYPES = frozenset(
     {
         "application/atom+xml",
@@ -39,11 +43,15 @@ _FEED_CONTENT_TYPES = frozenset(
 def test_smoke_selection_is_small_reviewed_and_official() -> None:
     sources = _selected_smoke_sources()
 
-    assert tuple(source.source_id for source in sources) == ("ebay-newsroom-rss",)
+    assert tuple(source.source_id for source in sources) == _SMOKE_SOURCE_IDS
 
 
 async def test_feed_smoke_budget_allows_one_list_and_no_detail_request() -> None:
-    source = _selected_smoke_sources()[0]
+    source = next(
+        source
+        for source in _selected_smoke_sources()
+        if source.source_id == "ebay-newsroom-rss"
+    )
     client = _SingleRequestBudget(_StaticFeedClient(source.entry_url))
     context = FetchContext(trigger=Trigger.MANUAL, started_at=datetime.now(UTC))
 
@@ -61,7 +69,7 @@ async def test_feed_smoke_budget_allows_one_list_and_no_detail_request() -> None
 async def test_reviewed_official_sources_are_reachable_and_yield_candidates() -> None:
     sources = _selected_smoke_sources()
 
-    assert tuple(source.source_id for source in sources) == ("ebay-newsroom-rss",)
+    assert tuple(source.source_id for source in sources) == _SMOKE_SOURCE_IDS
     for source in sources:
         metrics = FetchMetrics()
         context = FetchContext(
@@ -69,8 +77,9 @@ async def test_reviewed_official_sources_are_reachable_and_yield_candidates() ->
             started_at=datetime.now(UTC),
             metrics=metrics,
         )
+        resolver_bundle = build_resolver_bundle("cloudflare_doh")
         client = IngestionHttpClient(
-            safety_policy=UrlSafetyPolicy(),
+            safety_policy=resolver_bundle.safety_policy,
             global_concurrency=1,
             domain_rps=0.5,
             timeout_seconds=20,
@@ -80,32 +89,36 @@ async def test_reviewed_official_sources_are_reachable_and_yield_candidates() ->
         )
         budgeted_client = _SingleRequestBudget(client)
         try:
-            candidates = [
-                candidate
-                async for candidate in FeedCollector(budgeted_client).collect(source, context)
-            ]
+            collector = (
+                FeedCollector(budgeted_client)
+                if source.collector is CollectorKind.RSS
+                else ApiCollector(budgeted_client)
+            )
+            candidates = [candidate async for candidate in collector.collect(source, context)]
         finally:
             await client.aclose()
+            for resource in resolver_bundle.resources:
+                await resource.aclose()
 
         assert budgeted_client.requests == 1
         assert metrics.http_requests == 1
-        assert candidates
-        artifact = candidates[0].artifact
-        assert artifact is not None
-        assert artifact.status_code == 200
-        content_type = artifact.headers.get("content-type", "").split(";", 1)[0].lower()
-        assert content_type in _FEED_CONTENT_TYPES
+        if source.collector is CollectorKind.RSS:
+            assert candidates
+            artifact = candidates[0].artifact
+            assert artifact is not None
+            assert artifact.status_code == 200
+            content_type = artifact.headers.get("content-type", "").split(";", 1)[0].lower()
+            assert content_type in _FEED_CONTENT_TYPES
         assert all(urlsplit(candidate.url).scheme == "https" for candidate in candidates)
 
 
 def _selected_smoke_sources() -> tuple[SourceDefinition, ...]:
     registry = SourceRegistry.from_yaml(_REGISTRY_PATH)
     sources = tuple(registry.require(source_id) for source_id in _SMOKE_SOURCE_IDS)
-    assert len(sources) <= 2
-    assert all(source.trust_tier is TrustTier.OFFICIAL for source in sources)
+    assert len(sources) <= 3
+    assert {source.trust_tier for source in sources} == {TrustTier.OFFICIAL, TrustTier.MEDIA}
     assert all(source.compliance is ComplianceStatus.ALLOWED for source in sources)
-    assert all(source.enabled for source in sources)
-    assert all(source.collector is CollectorKind.RSS for source in sources)
+    assert {source.collector for source in sources} == {CollectorKind.RSS, CollectorKind.API}
     return sources
 
 

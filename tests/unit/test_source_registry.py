@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import yaml
@@ -332,11 +333,61 @@ def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled(
 
     assert media
     for source in media:
-        assert source.adapter is SourceAdapter.GENERIC
+        assert source.adapter in {SourceAdapter.GENERIC, SourceAdapter.GDELT}
         assert source.content_scope in {
             ContentScope.METADATA_ONLY,
             ContentScope.FEED_SUMMARY,
         }
         assert source.attribution
-        assert source.publisher_key
+        if source.adapter is SourceAdapter.GENERIC:
+            assert source.publisher_key
+        else:
+            assert source.publisher_key is None
         assert source.enabled is False
+
+
+def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    amazon = registry.require("amazon-sp-api-changelog-rss")
+    ebay = registry.require("ebay-newsroom-rss")
+    gdelt = registry.require("media-gdelt-cross-border")
+
+    assert amazon.entry_url == "https://developer-docs.amazon/sp-api/changelog.rss"
+    assert amazon.collector is CollectorKind.RSS
+    assert amazon.compliance is ComplianceStatus.ALLOWED
+    assert amazon.enabled is False
+    assert ebay.collector is CollectorKind.RSS
+    assert ebay.enabled is True
+    assert gdelt.adapter is SourceAdapter.GDELT
+    assert gdelt.collector is CollectorKind.API
+    assert gdelt.content_scope is ContentScope.METADATA_ONLY
+    assert gdelt.publisher_key is None
+    assert set(gdelt.platforms) == set(Platform)
+    assert gdelt.enabled is False
+    assert gdelt.collector_config == {
+        "items_path": "$.articles",
+        "url_field": "$.url",
+        "title_field": "$.title",
+        "published_at_field": "$.seendate",
+        "publisher_field": "$.domain",
+        "item_limit": 50,
+    }
+    query = parse_qs(urlsplit(gdelt.entry_url).query)
+    assert query["mode"] == ["artlist"]
+    assert query["format"] == ["json"]
+    assert query["maxrecords"] == ["50"]
+    assert query["timespan"] == ["1d"]
+    assert query["sort"] == ["datedesc"]
+    for platform_name in (
+        "Amazon",
+        "TEMU",
+        "SHEIN",
+        "AliExpress",
+        "Shopee",
+        "eBay",
+        "Coupang",
+        "Ozon",
+        "Joybuy",
+        "TikTok Shop",
+    ):
+        assert platform_name in query["query"][0]
