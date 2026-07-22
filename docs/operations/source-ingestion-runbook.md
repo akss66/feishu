@@ -48,6 +48,16 @@ User-Agent、代理、Cookie 或安全规则来绕过；应禁用来源并转为
 RSS reader；robots 为通用客户端设置 2 秒 crawl delay，未禁止 RSS 路径。该结论仅覆盖
 RSS feed，不自动批准新闻详情页采集。
 
+媒体发现层的逐站结论记录在
+[`media-source-compliance-review-2026-07-22.md`](media-source-compliance-review-2026-07-22.md)。
+GDELT 只负责发现，不能替代原出版商授权。只有代码目录中明确标记为 `allowed_public` 的
+出版商才能请求原文页；`licensed_api` 必须走单独的授权连接器。其他状态不得请求原文，
+元数据也不会进入 LLM。新增媒体必须先更新该审计表和目录测试，再执行一次受控冒烟。
+
+GDELT 首次冒烟若返回 429、`retry_exhausted` 或其他网络错误，必须继续保持禁用；不要增加
+重试次数或改用代理。等待出口限流解除后，手动重跑 `run --source media-gdelt-cross-border`。
+仅在单次逻辑请求成功后才修改 `enabled`，并同时更新审计记录和登记表测试。
+
 ## 手动命令与退出码
 
 ```powershell
@@ -92,6 +102,7 @@ python -m commerce_agent.ingestion_cli health
 
 - `DATABASE_URL` 默认指向工作目录下的 `commerce_agent.db`；生产环境应使用权限受控的路径。
 - `SNAPSHOT_DIR` 默认是 `./data/snapshots`，按日期、来源 ID 和 SHA-256 压缩保存原始响应。
+- GDELT 媒体原始快照默认只保留 30 天；清理严格限制在该来源的日期子目录内。
 - `.db`、`data/`、日志和 `.env` 已被 Git 忽略；备份同样必须限制访问。
 - 快照不得保存 Cookie、Authorization、令牌或请求查询串。不要手动编辑已入库版本。
 

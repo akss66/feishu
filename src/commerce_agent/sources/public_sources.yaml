@@ -371,7 +371,7 @@ sources:
     regions: [sg]
     robots_url: https://seller-sg.tiktok.com/robots.txt
 
-  # GDELT indexes public article metadata only; original article URLs are never fetched.
+  # GDELT discovers article metadata; per-publisher policy gates any original-page request.
   - source_id: media-gdelt-cross-border
     name: GDELT Cross-border Commerce Discovery
     entry_url: https://api.gdeltproject.org/api/v2/doc/doc?query=%28Amazon%20OR%20TEMU%20OR%20SHEIN%20OR%20AliExpress%20OR%20Shopee%20OR%20eBay%20OR%20Coupang%20OR%20Ozon%20OR%20Joybuy%20OR%20%22TikTok%20Shop%22%29%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=50&timespan=1d&sort=datedesc
@@ -389,7 +389,7 @@ sources:
     terms_url: https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
     robots_url: https://api.gdeltproject.org/robots.txt
     reviewed_at: 2026-07-22
-    compliance_notes: Uses GDELT DOC 2.0 ArtList JSON metadata only, one bounded API request per run, and never fetches original article URLs; initially disabled pending a local live smoke test.
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList JSON request per run. Results must match the reviewed publisher catalog; unknown and denied publishers are discarded. No reviewed publisher currently permits direct article-page collection, so accepted results remain metadata-only and are excluded from LLM analysis. The 2026-07-22 local live smoke reached the GDELT server but received HTTP 429; keep disabled until a later manual smoke succeeds.
     collector_config:
       items_path: $.articles
       url_field: $.url

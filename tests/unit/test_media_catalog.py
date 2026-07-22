@@ -3,6 +3,7 @@ from commerce_agent.media.catalog import (
     MediaCategory,
     publisher_name,
     publisher_profile,
+    publisher_profiles,
 )
 
 
@@ -33,3 +34,28 @@ def test_catalog_matches_subdomains_and_rejects_unknown_hosts() -> None:
 def test_publisher_name_falls_back_to_key_for_unknown_publisher() -> None:
     assert publisher_name("digitalcommerce360.com") == "Digital Commerce 360"
     assert publisher_name("unknown.example") == "unknown.example"
+
+
+def test_catalog_access_decisions_match_the_compliance_review() -> None:
+    expected = {
+        "reuters.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "apnews.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "bloomberg.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "ft.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "cnbc.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "bbc.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "retaildive.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "digitalcommerce360.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "ecommercebytes.com": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "modernretail.co": ArticleAccess.AUTHORIZATION_REQUIRED,
+        "marketplacepulse.com": ArticleAccess.DENIED,
+        "cifnews.com": ArticleAccess.METADATA_ONLY,
+        "ebrun.com": ArticleAccess.METADATA_ONLY,
+        "baijing.cn": ArticleAccess.METADATA_ONLY,
+        "36kr.com": ArticleAccess.METADATA_ONLY,
+    }
+
+    assert {
+        profile.publisher_key: profile.article_access
+        for profile in publisher_profiles()
+    } == expected
