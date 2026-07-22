@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ class DeliverySendError(RuntimeError):
 
 
 def safe_feishu_error_code(error: object | None) -> str:
+    if getattr(error, "raw_code", None) == 99992402:
+        return "format_error"
     code = getattr(error, "code", None)
     value = getattr(code, "value", code)
     if not isinstance(value, str):
@@ -86,7 +89,24 @@ class FeishuDeliveryPort:
         try:
             result = await self._channel.send(claim.group_id, message, options)
             if not getattr(result, "success", False):
-                raise DeliverySendError(safe_feishu_error_code(getattr(result, "error", None)))
+                code = safe_feishu_error_code(getattr(result, "error", None))
+                if code != "format_error" or "card" not in message:
+                    raise DeliverySendError(code)
+                fallback_options = {
+                    **options,
+                    "uuid": hashlib.sha256(
+                        f"{claim.idempotency_key}:text".encode()
+                    ).hexdigest()[:32],
+                }
+                result = await self._channel.send(
+                    claim.group_id,
+                    {"text": semantic_to_text(claim.payload)},
+                    fallback_options,
+                )
+                if not getattr(result, "success", False):
+                    raise DeliverySendError(
+                        safe_feishu_error_code(getattr(result, "error", None))
+                    )
             message_id = getattr(result, "message_id", None)
             if not isinstance(message_id, str) or not message_id:
                 raise DeliverySendError("unknown_feishu_error")

@@ -466,6 +466,38 @@ async def test_port_sends_proactively_with_stable_uuid() -> None:
     ]
 
 
+async def test_port_falls_back_to_text_when_feishu_rejects_card_shape() -> None:
+    class CardRejectingChannel(FakeChannel):
+        async def send(
+            self,
+            group_id: str,
+            message: dict[str, object],
+            options: dict[str, object],
+        ) -> object:
+            self.sent.append((group_id, message, options))
+            if len(self.sent) == 1:
+                return SimpleNamespace(
+                    success=False,
+                    message_id=None,
+                    error=SimpleNamespace(
+                        code=SimpleNamespace(value="unknown"),
+                        raw_code=99992402,
+                    ),
+                )
+            return SimpleNamespace(success=True, message_id="om_text", error=None)
+
+    channel = CardRejectingChannel()
+    claim = _claim(kind=MessageKind.DAILY_REPORT)
+
+    message_id = await FeishuDeliveryPort(channel, FeishuMessageRenderer()).send(claim)
+
+    assert message_id == "om_text"
+    assert "card" in channel.sent[0][1]
+    assert "text" in channel.sent[1][1]
+    assert "原文：" in str(channel.sent[1][1]["text"])
+    assert channel.sent[1][2]["uuid"] != claim.idempotency_key
+
+
 async def test_port_sends_thread_reply_options() -> None:
     channel = FakeChannel()
     claim = _claim(reply_to="om_parent", reply_in_thread=True)
@@ -495,6 +527,15 @@ def test_feishu_error_codes_are_reduced_to_whitelist(sdk_code: str, safe_code: s
     error = SimpleNamespace(code=SimpleNamespace(value=sdk_code))
 
     assert safe_feishu_error_code(error) == safe_code
+
+
+def test_feishu_field_validation_code_maps_to_format_error() -> None:
+    error = SimpleNamespace(
+        code=SimpleNamespace(value="unknown"),
+        raw_code=99992402,
+    )
+
+    assert safe_feishu_error_code(error) == "format_error"
 
 
 async def test_port_converts_failed_result_without_logging_sensitive_fields(
