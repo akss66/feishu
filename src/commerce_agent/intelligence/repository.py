@@ -58,6 +58,46 @@ class SqlAlchemyIntelligenceRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
+    async def health_summary(self, *, now: datetime) -> dict[str, int | str]:
+        """Return only aggregate operational state suitable for administrator output."""
+
+        if now.tzinfo is None:
+            raise ValueError("health timestamp must be timezone-aware")
+        async with self._session_factory() as session:
+            analysis_rows = (
+                await session.execute(
+                    select(AnalysisJob.status, func.count(AnalysisJob.id))
+                    .where(AnalysisJob.status.in_(("pending", "retry_wait", "failed")))
+                    .group_by(AnalysisJob.status)
+                )
+            ).all()
+            outbox_rows = (
+                await session.execute(
+                    select(DeliveryOutbox.status, func.count(DeliveryOutbox.id))
+                    .where(DeliveryOutbox.status.in_(("pending", "retry_wait", "failed")))
+                    .group_by(DeliveryOutbox.status)
+                )
+            ).all()
+        analysis = dict(analysis_rows)
+        outbox = dict(outbox_rows)
+        unhealthy = any(
+            (
+                analysis.get("retry_wait", 0),
+                analysis.get("failed", 0),
+                outbox.get("retry_wait", 0),
+                outbox.get("failed", 0),
+            )
+        )
+        return {
+            "status": "partial" if unhealthy else "healthy",
+            "analysis_pending": analysis.get("pending", 0),
+            "analysis_retry_wait": analysis.get("retry_wait", 0),
+            "analysis_failed": analysis.get("failed", 0),
+            "outbox_pending": outbox.get("pending", 0),
+            "outbox_retry_wait": outbox.get("retry_wait", 0),
+            "outbox_failed": outbox.get("failed", 0),
+        }
+
     async def claim_next(
         self, *, now: datetime, lease_seconds: int = 300
     ) -> AnalysisCandidate | None:
@@ -635,39 +675,13 @@ class SqlAlchemyIntelligenceRepository:
 
         queued_ids: list[int] = []
         async with self._session_factory.begin() as session:
-            recent_rows = list(
-                (
-                    await session.scalars(
-                        select(DeliveryOutbox)
-                        .where(
-                            DeliveryOutbox.group_id.in_(
-                                {message.group_id for message in messages}
-                            ),
-                            DeliveryOutbox.message_kind.in_(_ALERT_KINDS),
-                            DeliveryOutbox.status.in_(_ALERT_DEDUP_STATUSES),
-                            DeliveryOutbox.created_at > now - timedelta(hours=dedup_hours),
-                            DeliveryOutbox.created_at <= now,
-                        )
-                        .order_by(DeliveryOutbox.id)
-                    )
-                ).all()
+            deduplicated = await _deduplicate_alert_messages(
+                session,
+                messages,
+                now=now,
+                dedup_hours=dedup_hours,
             )
-            recent_items_by_group: dict[str, list[dict[str, object]]] = {}
-            for row in recent_rows:
-                recent_items_by_group.setdefault(row.group_id, []).extend(
-                    _payload_items(row.payload)
-                )
-
-            for message in messages:
-                recent_items = recent_items_by_group.setdefault(message.group_id, [])
-                new_items = [
-                    item
-                    for item in _payload_items(message.payload)
-                    if _alert_item_allowed(item, recent_items)
-                ]
-                if _payload_items(message.payload) and not new_items:
-                    continue
-                queued_message = _with_alert_items(message, new_items)
+            for queued_message in deduplicated:
                 queued_message = replace(
                     queued_message,
                     idempotency_key=await _next_alert_idempotency_key(
@@ -695,8 +709,26 @@ class SqlAlchemyIntelligenceRepository:
                 if inserted_id is None:
                     continue
                 queued_ids.append(inserted_id)
-                recent_items.extend(new_items)
         return tuple(queued_ids)
+
+    async def preview_alerts(
+        self,
+        messages: tuple[DeliveryMessage, ...],
+        *,
+        now: datetime,
+        dedup_hours: int,
+    ) -> tuple[DeliveryMessage, ...]:
+        if not messages:
+            return ()
+        if dedup_hours <= 0:
+            raise ValueError("dedup_hours must be positive")
+        async with self._session_factory() as session:
+            return await _deduplicate_alert_messages(
+                session,
+                messages,
+                now=now,
+                dedup_hours=dedup_hours,
+            )
 
     async def list_unqueued_alert_candidates(
         self, *, since: datetime, until: datetime
@@ -1091,6 +1123,48 @@ def _payload_items(payload: dict[str, object]) -> list[dict[str, object]]:
     if not isinstance(items, list):
         return []
     return [item for item in items if isinstance(item, dict)]
+
+
+async def _deduplicate_alert_messages(
+    session: AsyncSession,
+    messages: tuple[DeliveryMessage, ...],
+    *,
+    now: datetime,
+    dedup_hours: int,
+) -> tuple[DeliveryMessage, ...]:
+    recent_rows = list(
+        (
+            await session.scalars(
+                select(DeliveryOutbox)
+                .where(
+                    DeliveryOutbox.group_id.in_({message.group_id for message in messages}),
+                    DeliveryOutbox.message_kind.in_(_ALERT_KINDS),
+                    DeliveryOutbox.status.in_(_ALERT_DEDUP_STATUSES),
+                    DeliveryOutbox.created_at > now - timedelta(hours=dedup_hours),
+                    DeliveryOutbox.created_at <= now,
+                )
+                .order_by(DeliveryOutbox.id)
+            )
+        ).all()
+    )
+    recent_items_by_group: dict[str, list[dict[str, object]]] = {}
+    for row in recent_rows:
+        recent_items_by_group.setdefault(row.group_id, []).extend(
+            _payload_items(row.payload)
+        )
+
+    deduplicated: list[DeliveryMessage] = []
+    for message in messages:
+        recent_items = recent_items_by_group.setdefault(message.group_id, [])
+        original_items = _payload_items(message.payload)
+        new_items = [
+            item for item in original_items if _alert_item_allowed(item, recent_items)
+        ]
+        if original_items and not new_items:
+            continue
+        deduplicated.append(_with_alert_items(message, new_items))
+        recent_items.extend(new_items)
+    return tuple(deduplicated)
 
 
 def _alert_item_allowed(

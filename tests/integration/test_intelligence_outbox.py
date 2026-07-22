@@ -223,6 +223,97 @@ async def test_same_event_can_be_queued_again_at_24_hour_boundary(tmp_path) -> N
         await database.dispose()
 
 
+async def test_alert_preview_shares_pending_and_sent_dedup_without_writing(
+    tmp_path,
+) -> None:
+    database, repository, _, composer = await _services(tmp_path, "preview-active.db")
+    try:
+        item = _analysis(1)
+        queued = await composer.queue_batch("chat-one", (item,), now=NOW)
+
+        pending_preview = await composer.preview_batch(
+            "chat-one", (item,), now=NOW + timedelta(hours=1)
+        )
+        claim = await repository.claim_delivery_by_id(
+            queued[0], now=NOW + timedelta(hours=1)
+        )
+        assert claim is not None
+        await repository.mark_delivery_sent(
+            claim,
+            message_id="message-one",
+            now=NOW + timedelta(hours=1),
+        )
+        sent_preview = await composer.preview_batch(
+            "chat-one", (item,), now=NOW + timedelta(hours=2)
+        )
+
+        assert pending_preview == ()
+        assert sent_preview == ()
+        assert len(await repository.list_outbox(queued)) == 1
+    finally:
+        await database.dispose()
+
+
+async def test_alert_preview_allows_upgrade_or_changed_version_without_writing(
+    tmp_path,
+) -> None:
+    database, repository, _, composer = await _services(tmp_path, "preview-upgrade.db")
+    try:
+        medium = _analysis(1, version_id=10, content_hash="a" * 64)
+        queued = await composer.queue_batch("chat-one", (medium,), now=NOW)
+
+        upgraded = await composer.preview_batch(
+            "chat-one",
+            (replace(medium, result=_result(RiskLevel.HIGH)),),
+            now=NOW + timedelta(hours=1),
+        )
+        same_content = await composer.preview_batch(
+            "chat-one",
+            (_analysis(2, version_id=11, content_hash="a" * 64),),
+            now=NOW + timedelta(hours=1),
+        )
+        changed_content = await composer.preview_batch(
+            "chat-one",
+            (_analysis(3, version_id=12, content_hash="b" * 64),),
+            now=NOW + timedelta(hours=1),
+        )
+
+        assert len(upgraded) == 1
+        assert same_content == ()
+        assert len(changed_content) == 1
+        assert len(await repository.list_outbox(queued)) == 1
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "skipped"])
+async def test_alert_preview_matches_queue_contract_for_terminal_rows(
+    tmp_path,
+    terminal_status: str,
+) -> None:
+    database, repository, _, composer = await _services(
+        tmp_path, f"preview-{terminal_status}.db"
+    )
+    try:
+        item = _analysis(1)
+        queued = await composer.queue_batch("chat-one", (item,), now=NOW)
+        terminal_at = await _make_terminal(
+            repository,
+            queued[0],
+            terminal_status,
+            now=NOW + timedelta(minutes=1),
+        )
+
+        preview = await composer.preview_batch(
+            "chat-one", (item,), now=terminal_at + timedelta(minutes=1)
+        )
+
+        assert len(preview) == 1
+        assert len(await repository.list_outbox(queued)) == 1
+    finally:
+        await database.dispose()
+
+
 async def test_alert_deduplication_is_scoped_to_group(tmp_path) -> None:
     database, repository, _, _ = await _services(tmp_path, "group-scope.db")
     payload = {

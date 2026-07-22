@@ -388,6 +388,26 @@ class AlertComposer:
         *,
         now: datetime,
     ) -> tuple[int, ...]:
+        messages = await self._compose_messages(group_id, analyses, now=now)
+        return await self._repository.queue_alerts(messages, now=now, dedup_hours=24)
+
+    async def preview_batch(
+        self,
+        group_id: str,
+        analyses: tuple[ScoredAnalysis, ...],
+        *,
+        now: datetime,
+    ) -> tuple[DeliveryMessage, ...]:
+        messages = await self._compose_messages(group_id, analyses, now=now)
+        return await self._repository.preview_alerts(messages, now=now, dedup_hours=24)
+
+    async def _compose_messages(
+        self,
+        group_id: str,
+        analyses: tuple[ScoredAnalysis, ...],
+        *,
+        now: datetime,
+    ) -> tuple[DeliveryMessage, ...]:
         profile = await self._preferences.get(group_id, default=self._default_profile)
         evaluated = tuple(
             (item, self._policy.assess(item.result, item.evidence_confidence, profile))
@@ -408,7 +428,7 @@ class AlertComposer:
             ]
             + ([medium_alert_message(group_id, orange, now)] if orange else [])
         )
-        return await self._repository.queue_alerts(messages, now=now, dedup_hours=24)
+        return messages
 
     async def queue_due(self, group_id: str, *, now: datetime) -> tuple[int, ...]:
         analyses = await self._repository.list_unqueued_alert_candidates(
