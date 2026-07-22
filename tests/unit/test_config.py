@@ -24,9 +24,25 @@ def test_settings_apply_safe_ingestion_defaults(monkeypatch: pytest.MonkeyPatch)
     assert settings.ingestion_http_timeout_seconds == 20.0
     assert settings.ingestion_max_response_bytes == 10_485_760
     assert settings.ingestion_browser_enabled is False
+    assert settings.ingestion_dns_mode == "system"
     assert settings.snapshot_dir == Path("data/snapshots")
     assert settings.ingestion_user_agent.strip()
     assert settings.ingestion_scheduler_enabled is False
+
+
+def test_settings_accept_cloudflare_doh_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv("INGESTION_DNS_MODE", "cloudflare_doh")
+
+    assert Settings(_env_file=None).ingestion_dns_mode == "cloudflare_doh"
+
+
+def test_settings_reject_unknown_ingestion_dns_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv("INGESTION_DNS_MODE", "unknown")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_intelligence_flags_are_safe_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

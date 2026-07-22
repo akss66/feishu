@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     ingestion_http_timeout_seconds: float = Field(default=20.0, gt=0)
     ingestion_max_response_bytes: int = Field(default=10_485_760, gt=0)
     ingestion_browser_enabled: bool = False
+    ingestion_dns_mode: Literal["system", "cloudflare_doh"] = "system"
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
     ingestion_scheduler_enabled: bool = False
