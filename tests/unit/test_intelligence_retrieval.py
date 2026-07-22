@@ -118,6 +118,7 @@ async def test_search_applies_default_window_filters_and_eight_item_cap() -> Non
         "regions": ("global",),
         "risk_levels": (RiskLevel.LOW,),
         "limit": 100,
+        "before": None,
     }
     assert len(results) == 8
     assert all(result.score > 0 for result in results)

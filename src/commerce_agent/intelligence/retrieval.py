@@ -77,6 +77,7 @@ class CorpusRepository(Protocol):
         regions: tuple[str, ...],
         risk_levels: tuple[RiskLevel, ...],
         limit: int,
+        before: tuple[datetime, int] | None,
     ) -> tuple[CorpusCandidate, ...]: ...
 
 
@@ -113,41 +114,59 @@ class CorpusRetriever:
 
     async def search(self, query: CorpusQuery) -> tuple[EvidenceDocument, ...]:
         since = query.since or query.now - timedelta(days=30)
-        candidates = await self._repository.list_corpus_candidates(
-            since=since,
-            until=query.now,
-            platforms=query.platforms,
-            regions=query.regions,
-            risk_levels=query.risk_levels,
-            limit=100,
-        )
-        matched = (
-            (score, item)
-            for item in candidates
-            if (score := lexical_score(query.text, item, query.now)) > 0
-        )
-        ranked = sorted(
-            matched,
-            key=lambda pair: (
-                pair[0],
-                _RISK_WEIGHT[pair[1].risk_level],
-                pair[1].evidence_confidence,
-                max(
-                    0.0,
-                    3.0
-                    - max(
-                        0.0,
-                        (query.now - pair[1].fetched_at).total_seconds() / 86_400,
-                    )
-                    / 10,
-                ),
-                pair[1].fetched_at,
-                pair[1].analysis_id,
-                pair[1].document_version_id,
-            ),
-            reverse=True,
-        )
         result_limit = max(0, min(query.limit, _MAX_RESULTS))
+        before: tuple[datetime, int] | None = None
+        ranked: list[tuple[float, CorpusCandidate]] = []
+        while True:
+            candidates = await self._repository.list_corpus_candidates(
+                since=since,
+                until=query.now,
+                platforms=query.platforms,
+                regions=query.regions,
+                risk_levels=query.risk_levels,
+                limit=100,
+                before=before,
+            )
+            if result_limit == 0 or not candidates:
+                break
+
+            matched = (
+                (score, item)
+                for item in candidates
+                if (score := lexical_score(query.text, item, query.now)) > 0
+            )
+            ranked = sorted(
+                (*ranked, *matched),
+                key=lambda pair: _ranking_key(pair, query.now),
+                reverse=True,
+            )[:_MAX_RESULTS]
+            if len(candidates) < 100:
+                break
+
+            last_candidate = candidates[-1]
+            next_before = (last_candidate.fetched_at, last_candidate.analysis_id)
+            if next_before == before:
+                break
+            before = next_before
+
         return tuple(
             EvidenceDocument(**asdict(item), score=score) for score, item in ranked[:result_limit]
         )
+
+
+def _ranking_key(
+    pair: tuple[float, CorpusCandidate], now: datetime
+) -> tuple[float, float, int, float, datetime, int, int]:
+    score, item = pair
+    return (
+        score,
+        _RISK_WEIGHT[item.risk_level],
+        item.evidence_confidence,
+        max(
+            0.0,
+            3.0 - max(0.0, (now - item.fetched_at).total_seconds() / 86_400) / 10,
+        ),
+        item.fetched_at,
+        item.analysis_id,
+        item.document_version_id,
+    )

@@ -242,6 +242,7 @@ class SqlAlchemyIntelligenceRepository:
         regions: tuple[str, ...],
         risk_levels: tuple[RiskLevel, ...],
         limit: int,
+        before: tuple[datetime, int] | None,
     ) -> tuple[CorpusCandidate, ...]:
         candidate_limit = min(max(limit, 0), 100)
         if candidate_limit == 0:
@@ -285,6 +286,15 @@ class SqlAlchemyIntelligenceRepository:
         if risk_levels:
             statement = statement.where(
                 DocumentAnalysis.risk_level.in_(risk.value for risk in risk_levels)
+            )
+        if before is not None:
+            before_fetched_at, before_analysis_id = before
+            statement = statement.where(
+                or_(
+                    DocumentVersion.fetched_at < before_fetched_at,
+                    (DocumentVersion.fetched_at == before_fetched_at)
+                    & (DocumentAnalysis.id < before_analysis_id),
+                )
             )
         statement = (
             statement.distinct()

@@ -259,3 +259,42 @@ async def test_real_sqlite_applies_platform_region_risk_and_time_filters(tmp_pat
         assert results[0].published_at == NOW - timedelta(days=2)
     finally:
         await database.dispose()
+
+
+async def test_real_sqlite_finds_older_match_beyond_first_hundred_candidates(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'retrieval-pagination.db'}")
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    retriever = CorpusRetriever(repository)
+    try:
+        await database.create_schema()
+        await ingestion.sync_sources([_source("pagination")])
+
+        matching = await ingestion.persist_version(
+            _document(
+                "pagination",
+                "matching",
+                title="Singular retrieval needle",
+                fetched_at=NOW - timedelta(days=29),
+            )
+        )
+        await _add_analysis(database, matching.version_id, title="older-match")
+
+        for index in range(101):
+            recent = await ingestion.persist_version(
+                _document(
+                    "pagination",
+                    f"noise-{index}",
+                    title=f"Routine seller bulletin {index}",
+                    fetched_at=NOW - timedelta(days=1, minutes=index),
+                )
+            )
+            await _add_analysis(database, recent.version_id, title=f"noise-{index}")
+
+        results = await retriever.search(CorpusQuery(text="needle", now=NOW))
+
+        assert [result.document_version_id for result in results] == [matching.version_id]
+    finally:
+        await database.dispose()
