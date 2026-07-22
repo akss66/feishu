@@ -386,6 +386,58 @@ async def test_three_consecutive_unsuccessful_runs_suspend_a_source_and_manual_s
         await database.dispose()
 
 
+async def test_manual_skipped_run_does_not_recover_a_suspended_source(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    started_at = datetime(2026, 7, 20, 7, tzinfo=UTC)
+    try:
+        await repository.sync_sources([_source()])
+        for index in range(3):
+            run_id = await repository.start_run(
+                "amazon-news",
+                Trigger.SCHEDULED,
+                started_at=started_at + timedelta(minutes=index),
+            )
+            await repository.finish_run(
+                run_id,
+                RunSummary(
+                    source_id="amazon-news",
+                    trigger=Trigger.SCHEDULED,
+                    status=RunStatus.FAILED,
+                    started_at=started_at + timedelta(minutes=index),
+                    finished_at=started_at + timedelta(minutes=index, seconds=1),
+                    failed=1,
+                    error_code="fetch_failed",
+                ),
+            )
+
+        skipped_run = await repository.start_run(
+            "amazon-news",
+            Trigger.MANUAL,
+            started_at=started_at + timedelta(minutes=3),
+        )
+        await repository.finish_run(
+            skipped_run,
+            RunSummary(
+                source_id="amazon-news",
+                trigger=Trigger.MANUAL,
+                status=RunStatus.SKIPPED,
+                started_at=started_at + timedelta(minutes=3),
+                finished_at=started_at + timedelta(minutes=3, seconds=1),
+                error_code="source_disabled",
+            ),
+        )
+
+        async with database.session() as session:
+            health = await session.get(SourceHealth, "amazon-news")
+
+        assert health is not None
+        assert health.consecutive_failures == 3
+        assert health.health_status == "suspended"
+        assert await repository.is_source_suspended("amazon-news") is True
+    finally:
+        await database.dispose()
+
+
 async def test_finish_run_preserves_the_started_at_recorded_by_start_run(tmp_path) -> None:
     database, repository = await _repository(tmp_path)
     persisted_started_at = datetime(2026, 7, 20, 6, tzinfo=UTC)

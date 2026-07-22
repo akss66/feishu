@@ -344,7 +344,8 @@ class SqlAlchemyIngestionRepository:
                 health.last_error_code = None
                 health.health_status = "healthy"
             elif summary.status is RunStatus.SKIPPED:
-                health.health_status = "healthy"
+                if health.health_status != "suspended":
+                    health.health_status = "healthy"
             else:
                 health.consecutive_failures += 1
                 health.last_error_code = summary.error_code
