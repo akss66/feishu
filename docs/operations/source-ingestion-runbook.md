@@ -54,20 +54,26 @@ GDELT 只负责发现，不能替代原出版商授权。只有代码目录中�
 出版商才能请求原文页；`licensed_api` 必须走单独的授权连接器。其他状态不得请求原文，
 元数据也不会进入 LLM。新增媒体必须先更新该审计表和目录测试，再执行一次受控冒烟。
 
-GDELT 首次冒烟若返回 429、`retry_exhausted` 或其他网络错误，必须继续保持禁用；不要增加
-重试次数或改用代理。等待出口限流解除后，手动重跑 `run --source media-gdelt-cross-border`。
+GDELT 首次冒烟若返回 429、`rate_limited` 或其他网络错误，必须继续保持禁用；不要增加
+重试次数或改用代理。等待出口限流解除后，手动重跑 `probe --source media-gdelt-cross-border`。
 仅在单次逻辑请求成功后才修改 `enabled`，并同时更新审计记录和登记表测试。
 
 ## 手动命令与退出码
 
 ```powershell
 python -m commerce_agent.ingestion_cli sources list
+python -m commerce_agent.ingestion_cli sources coverage
+python -m commerce_agent.ingestion_cli probe --source <disabled-allowed-source-id>
 python -m commerce_agent.ingestion_cli run --source <source-id>
 python -m commerce_agent.ingestion_cli run --all
 python -m commerce_agent.ingestion_cli health
 ```
 
 - `sources list` 只加载登记表，不初始化数据库、HTTP 客户端、飞书或 DeepSeek。
+- `sources coverage` 按十个平台显示 enabled/allowed/需授权/待审核/禁止/总候选数，
+  不会把候选来源误报成已经接通。
+- `probe --source` 只允许 `compliance=allowed` 的来源忽略 `enabled=false` 做一次手工探测；
+  不修改登记表，也不放宽任何网络安全或出版机构门控。
 - `run --source` 先做轻量来源校验；未知来源返回 2，且不会回显输入值。
 - 退出码 0 表示成功或合规跳过，2 表示参数/目标错误，3 表示部分失败、运行失败或清理失败。
 - 输出只用于运维摘要；不得包含或粘贴秘密、Cookie、Authorization、完整查询串或绑定码。

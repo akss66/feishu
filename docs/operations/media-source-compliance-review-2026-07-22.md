@@ -53,10 +53,11 @@ GDELT 仅作为新闻发现层。系统每次最多请求一次 DOC 2.0 ArtList 
 2026-07-22 在 `INGESTION_DNS_MODE=cloudflare_doh` 下执行：
 
 ```powershell
-python -m commerce_agent.ingestion_cli run --source media-gdelt-cross-border
+python -m commerce_agent.ingestion_cli probe --source media-gdelt-cross-border
 ```
 
-安全客户端发出 1 次逻辑请求，结果为 `retry_exhausted`、0 条发现、0 字节终态响应。只读诊断
+安全客户端发出 1 次逻辑请求，旧版本结果为 `retry_exhausted`、0 条发现、0 字节终态响应；
+第一版整改后同类 HTTP 429 会明确记录为 `rate_limited`。只读诊断
 显示系统 DNS 返回异常地址，而 Cloudflare DoH 返回 `104.197.47.124`；固定连接该正确地址后，
 GDELT 服务器明确返回 HTTP 429。结论是当前出口受到 GDELT 限流，并非解析器或目录门控错误。
 

@@ -202,3 +202,26 @@ COMMIT;
 将示例 ID 替换为已复核的真实内部 ID，并保存变更数作为审计证据。`sending` 行不在该操作范围内；
 先保持进程停止并调查 lease，不能强行覆盖。恢复时确认跳过行仍可查询、健康计数稳定、目标测试群正确，
 然后按阶段重新预览和手动发送。绝不通过删除 `.db`、`delivery_outbox` 或历史分析来“恢复”。
+
+## 本机长期运行（第一版）
+
+项目提供两个不接触密钥内容的脚本：
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\run-commerce-agent.ps1
+powershell.exe -NoProfile -File .\scripts\install-commerce-agent-autostart.ps1 -StartNow
+```
+
+运行脚本只设置 Cloudflare DoH、采集、分析、日报、预警、问答、INFO 日志和 60 秒模型超时；
+应用仍按现有 Pydantic Settings 规则在进程内加载本机配置。安装脚本创建当前 Windows 用户登录触发的
+`CrossBorderCommerceAgent` 计划任务，限制为普通用户权限，重复启动采用 `IgnoreNew`，失败后每分钟
+重启、最多 10 次。同名任务若不是由本项目脚本管理会被拒绝覆盖。
+
+日志按日期追加到 `data/runtime/bot-YYYYMMDD.stdout.log` 和
+`data/runtime/bot-YYYYMMDD.stderr.log`。变更代码或运行参数后先停止现有任务，确认没有手工启动的第二个
+`python -m commerce_agent` 进程，再启动计划任务。计划任务存在不等于运行健康，仍须检查日志中的两个
+调度器启动记录，并运行采集和智能 health 命令。
+
+超过 50,000 字符的文章会固定保留前 35,000 字符与末尾 14,998 字符，中间以两个换行分隔；
+证据引用只能来自这段实际送模内容。结构化分析最多尝试三次，后两次只携带受控错误码和字段路径。
+这能降低超长输入和偶发格式错误，但不会把外部模型不可用或持续超时伪装成成功。
