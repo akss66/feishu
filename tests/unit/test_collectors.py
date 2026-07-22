@@ -27,7 +27,6 @@ from commerce_agent.ingestion.collectors import (
     SitemapCollector,
 )
 from commerce_agent.ingestion.collectors.base import candidate_url
-from commerce_agent.ingestion.collectors.html import links_from_html
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
     CollectedFailure,
@@ -530,21 +529,50 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
     )
 
 
-def test_ebay_press_room_registry_selector_matches_public_announcement_links() -> None:
+@pytest.mark.asyncio
+async def test_ebay_press_room_registry_selector_collects_public_announcement_details() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     source_definition = registry.require("ebay-press-room")
-
-    items = links_from_html(
-        (FIXTURES / "ebay_press_room_selector.html").read_bytes(),
-        base_url=source_definition.entry_url,
-        selector=source_definition.collector_config["link_selector"],
-        limit=20,
+    detail_body = (FIXTURES / "article_en.html").read_bytes()
+    company_update_url = "https://www.ebayinc.com/stories/company-update/"
+    marketplace_update_url = "https://www.ebayinc.com/stories/marketplace-update/"
+    http = FakeHttpPort(
+        {
+            source_definition.entry_url: FetchResponse(
+                url=source_definition.entry_url,
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=(FIXTURES / "ebay_press_room_selector.html").read_bytes(),
+            ),
+            company_update_url: FetchResponse(
+                url=company_update_url,
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=detail_body,
+            ),
+            marketplace_update_url: FetchResponse(
+                url=marketplace_update_url,
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=detail_body,
+            ),
+        }
     )
 
+    items = await collected(HtmlCollector(http), source_definition, context())
+
     assert [item.url for item in items] == [
-        "https://www.ebayinc.com/stories/company-update/",
-        "https://www.ebayinc.com/stories/marketplace-update/",
+        company_update_url,
+        marketplace_update_url,
     ]
+    assert [item.title for item in items] == ["Company update", "Marketplace update"]
+    assert all(item.body == detail_body for item in items)
+    assert [request.url for request in http.requests] == [
+        source_definition.entry_url,
+        company_update_url,
+        marketplace_update_url,
+    ]
+    assert all(request.allowed_hosts == ("www.ebayinc.com",) for request in http.requests)
 
 
 @pytest.mark.asyncio

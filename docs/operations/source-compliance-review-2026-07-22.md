@@ -6,10 +6,11 @@
 
 ## 结论摘要
 
-- 初步允许：7 个（eBay Press Room、3 个 Coupang、3 个 Joybuy）。
+- 最终启用：5 个（eBay Press Room、Coupang Seller University、3 个 Joybuy）。
 - 明确禁止：0 个。
 - 需要事先授权：4 个（3 个 Shopee、eBay Seller Updates）。
-- 证据或访问边界不足，继续待审：6 个（3 个 Amazon、3 个 Ozon）。
+- Live smoke 后回滚：2 个（Coupang Rules and Policies、Coupang Step-by-step Guide），均为 `pending_review` 且禁用。
+- 证据或访问边界不足，继续待审：8 个（3 个 Amazon、3 个 Ozon、2 个 live-smoke 回滚来源）。
 
 ## 逐来源证据
 
@@ -45,9 +46,10 @@
 2. 逐个执行真实生产采集器测试；任何 401、403、验证码、登录跳转、异常跨域、结构不匹配或零有效内容都在同一批次回滚到 `pending_review + disabled`。
 3. Amazon 等待能够直接核实的 Conditions of Use / Agent Policy 与采集器身份声明要求；Ozon 等待无需绕过的稳定公开入口。
 4. Shopee 与 eBay Seller News 仅在取得发布方明确书面许可或改用官方授权 API 后再复核。
+
 ## Live-smoke amendment (2026-07-22)
 
-The following persisted runs supersede the provisional `Live smoke` values below. All commands ran sequentially from the configured root with the project's `cloudflare_doh` DNS safety mode; no proxies, cookies, login sessions, alternate identity, or request-rate increase were used.
+The following persisted runs supersede the provisional `Live smoke` values in the preceding review table. All commands ran sequentially from the configured root with the project's `cloudflare_doh` DNS safety mode; no proxies, cookies, login sessions, alternate identity, or request-rate increase were used.
 
 | Source ID | Exit | Status | discovered / new / duplicate | Error / boundary | Final decision |
 |---|---:|---|---|---|---|
