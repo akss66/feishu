@@ -5,6 +5,7 @@ import importlib
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,16 +26,19 @@ from commerce_agent.ingestion.collectors import (
     RenderedPage,
     SitemapCollector,
 )
+from commerce_agent.ingestion.collectors.base import candidate_url
 from commerce_agent.ingestion.http import FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
     CollectedFailure,
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     FetchContext,
     FetchMetrics,
     Platform,
     ResponseArtifact,
+    SourceAdapter,
     SourceDefinition,
     Trigger,
     TrustTier,
@@ -561,6 +565,63 @@ async def test_api_collector_extracts_public_json_path_and_configured_fields() -
         http_requests=1,
         bytes_received=len((FIXTURES / "api.json").read_bytes()),
     )
+
+
+@pytest.mark.asyncio
+async def test_gdelt_adapter_keeps_safe_article_metadata_and_publisher_identity() -> None:
+    url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    http = FakeHttpPort({url: (FIXTURES / "gdelt_articles.json").read_bytes()})
+    definition = replace(
+        source(
+            CollectorKind.API,
+            entry_url=url,
+            config={
+                "items_path": "articles",
+                "url_field": "url",
+                "title_field": "title",
+                "published_at_field": "seendate",
+                "publisher_field": "domain",
+                "item_limit": 50,
+            },
+        ),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index; original publisher shown per item",
+    )
+
+    items = await collected(ApiCollector(http), definition)
+
+    assert len(items) == 1
+    assert items[0].url == "https://www.reuters.com/world/example-story/"
+    assert items[0].title == "Example marketplace policy story"
+    assert items[0].publisher_key == "reuters.com"
+    assert items[0].published_at == datetime(2026, 7, 22, 8, 15, tzinfo=UTC)
+    assert json.loads(items[0].body) == {
+        "domain": "reuters.com",
+        "seendate": "20260722T081500Z",
+        "title": "Example marketplace policy story",
+        "url": "https://www.reuters.com/world/example-story/",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw_url",
+    [
+        "https://localhost/private",
+        "https://sub.localhost/private",
+        "https://169.254.169.254/latest/meta-data",
+        "https://metadata.google.internal/computeMetadata/v1",
+        "https://10.0.0.1/private",
+        "https://[::1]/private",
+        "https://[fe80::1]/private",
+        "https://user:password@example.com/private",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+    ],
+)
+def test_candidate_url_rejects_unsafe_discovered_targets(raw_url: str) -> None:
+    assert candidate_url("https://public.example/news", raw_url) is None
 
 
 @pytest.mark.asyncio

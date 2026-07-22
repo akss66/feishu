@@ -203,6 +203,7 @@ class CollectedItem:
     title: str | None = None
     author: str | None = None
     published_at: datetime | None = None
+    publisher_key: str | None = None
     etag: str | None = None
     last_modified: str | None = None
     artifact: ResponseArtifact | None = None

@@ -1,0 +1,35 @@
+{
+  "articles": [
+    {
+      "url": "https://www.reuters.com/world/example-story/",
+      "title": "Example marketplace policy story",
+      "seendate": "20260722T081500Z",
+      "domain": "Reuters.com",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://news.example.com/missing-publisher",
+      "title": "Missing publisher",
+      "seendate": "20260722T081600Z"
+    },
+    {
+      "url": "http://reuters.com/not-https",
+      "title": "Insecure original URL",
+      "seendate": "20260722T081700Z",
+      "domain": "reuters.com"
+    },
+    {
+      "url": "https://127.0.0.1/internal",
+      "title": "Local target",
+      "seendate": "20260722T081800Z",
+      "domain": "127.0.0.1"
+    },
+    {
+      "url": "https://attacker.example/spoofed",
+      "title": "Mismatched publisher",
+      "seendate": "20260722T081900Z",
+      "domain": "reuters.com"
+    }
+  ]
+}

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
+from urllib.parse import urlsplit
+
+import idna
 
 from commerce_agent.ingestion.collectors.base import (
     CollectorError,
@@ -14,7 +17,12 @@ from commerce_agent.ingestion.collectors.base import (
     response_artifact,
 )
 from commerce_agent.ingestion.collectors.feed import _parse_datetime
-from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
+from commerce_agent.ingestion.models import (
+    CollectedItem,
+    FetchContext,
+    SourceAdapter,
+    SourceDefinition,
+)
 
 
 class ApiCollector:
@@ -50,6 +58,15 @@ class ApiCollector:
                 continue
             raw_url = _path_value(raw_item, url_field)
             url = candidate_url(response.url, raw_url if isinstance(raw_url, str) else None)
+            publisher_key: str | None = None
+            if source.adapter is SourceAdapter.GDELT:
+                publisher_field = _config_string(source, "publisher_field")
+                publisher_key = _gdelt_publisher_key(
+                    _path_value(raw_item, publisher_field),
+                    url,
+                )
+                if url is None or not url.startswith("https://") or publisher_key is None:
+                    continue
             if url is None or url in seen:
                 continue
             seen.add(url)
@@ -63,10 +80,18 @@ class ApiCollector:
             published_at = _parse_datetime(
                 raw_published if isinstance(raw_published, str) else None
             )
+            stored_item: Mapping[str, Any] = raw_item
+            if source.adapter is SourceAdapter.GDELT:
+                stored_item = {
+                    "url": url,
+                    "title": title,
+                    "seendate": raw_published if isinstance(raw_published, str) else None,
+                    "domain": publisher_key,
+                }
             yield CollectedItem(
                 url=url,
                 body=json.dumps(
-                    raw_item,
+                    stored_item,
                     ensure_ascii=False,
                     separators=(",", ":"),
                     sort_keys=True,
@@ -74,6 +99,7 @@ class ApiCollector:
                 content_type="application/json",
                 title=title,
                 published_at=published_at,
+                publisher_key=publisher_key,
                 etag=response.etag,
                 last_modified=response.last_modified,
                 artifact=artifact,
@@ -116,3 +142,36 @@ def _path_value(value: Any, path: str | None) -> Any:
         else:
             return None
     return current
+
+
+def _gdelt_publisher_key(value: Any, article_url: str | None) -> str | None:
+    if not isinstance(value, str) or article_url is None:
+        return None
+    raw_domain = value.strip().rstrip(".").lower()
+    if not raw_domain or "://" in raw_domain or "/" in raw_domain:
+        return None
+    try:
+        publisher = idna.encode(
+            raw_domain,
+            uts46=True,
+            std3_rules=True,
+            transitional=False,
+        ).decode("ascii")
+        article_host = urlsplit(article_url).hostname
+        if article_host is None:
+            return None
+        normalized_host = idna.encode(
+            article_host.rstrip(".").lower(),
+            uts46=True,
+            std3_rules=True,
+            transitional=False,
+        ).decode("ascii")
+    except (idna.IDNAError, ValueError):
+        return None
+    publisher = publisher.removeprefix("www.")
+    normalized_host = normalized_host.removeprefix("www.")
+    if "." not in publisher:
+        return None
+    if normalized_host != publisher and not normalized_host.endswith(f".{publisher}"):
+        return None
+    return publisher

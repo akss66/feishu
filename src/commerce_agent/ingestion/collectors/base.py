@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
+from ipaddress import IPv6Address, ip_address
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 from urllib.parse import urljoin, urlsplit
@@ -17,6 +18,16 @@ from commerce_agent.ingestion.models import (
 )
 
 DEFAULT_ITEM_LIMIT = 100
+_METADATA_HOSTS = frozenset(
+    {
+        "instance-data.ec2.internal",
+        "metadata.aws.internal",
+        "metadata.azure.internal",
+        "metadata.google.internal",
+        "metadata.goog",
+    }
+)
+_METADATA_IPS = frozenset({"100.100.100.200", "169.254.169.254", "169.254.170.2"})
 _CONTROLLED_DETAIL_ERROR_CODES = frozenset(
     {
         "compliance_review_required",
@@ -113,13 +124,37 @@ def item_limit(source: SourceDefinition) -> int:
 def candidate_url(base_url: str, raw_url: str | None) -> str | None:
     if raw_url is None or not raw_url.strip():
         return None
-    absolute = urljoin(base_url, raw_url.strip())
-    parsed = urlsplit(absolute)
+    try:
+        absolute = urljoin(base_url, raw_url.strip())
+        parsed = urlsplit(absolute)
+        _ = parsed.port
+    except ValueError:
+        return None
     if parsed.scheme.lower() not in {"http", "https"} or parsed.hostname is None:
         return None
     if parsed.username is not None or parsed.password is not None:
         return None
+    if _is_forbidden_discovered_host(parsed.hostname):
+        return None
     return absolute
+
+
+def _is_forbidden_discovered_host(hostname: str) -> bool:
+    host = hostname.rstrip(".").lower()
+    if (
+        host == "localhost"
+        or host.endswith(".localhost")
+        or host in _METADATA_HOSTS
+        or host in _METADATA_IPS
+    ):
+        return True
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return not address.is_global or address.is_multicast
 
 
 def fetch_request(
