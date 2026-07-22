@@ -33,6 +33,7 @@ from commerce_agent.persistence.models import (
     DeliveryOutbox,
     Document,
     DocumentAnalysis,
+    DocumentProvenance,
     DocumentVersion,
     Source,
     SourcePlatform,
@@ -226,9 +227,13 @@ class SqlAlchemyIntelligenceRepository:
             candidate.document_version_id for candidate in (claim, *batch_claims)
         }
         async with self._session_factory() as session:
-            persisted_source_ids = set(
-                await session.scalars(
-                    select(func.distinct(Document.source_id))
+            persisted_rows = (
+                await session.execute(
+                    select(
+                        Source.id,
+                        Source.trust_tier,
+                        DocumentProvenance.publisher_key,
+                    )
                     .select_from(DocumentAnalysis)
                     .join(
                         DocumentVersion,
@@ -236,6 +241,10 @@ class SqlAlchemyIntelligenceRepository:
                     )
                     .join(Document, Document.id == DocumentVersion.document_id)
                     .join(Source, Source.id == Document.source_id)
+                    .outerjoin(
+                        DocumentProvenance,
+                        DocumentProvenance.document_version_id == DocumentVersion.id,
+                    )
                     .join(
                         AnalysisJob,
                         AnalysisJob.document_version_id == DocumentVersion.id,
@@ -247,21 +256,33 @@ class SqlAlchemyIntelligenceRepository:
                         AnalysisJob.status == "completed",
                     )
                 )
-            )
-            batch_source_ids = set(
-                await session.scalars(
-                    select(func.distinct(Document.source_id))
+            ).all()
+            batch_rows = (
+                await session.execute(
+                    select(
+                        Source.id,
+                        Source.trust_tier,
+                        DocumentProvenance.publisher_key,
+                    )
                     .select_from(DocumentVersion)
                     .join(Document, Document.id == DocumentVersion.document_id)
                     .join(Source, Source.id == Document.source_id)
+                    .outerjoin(
+                        DocumentProvenance,
+                        DocumentProvenance.document_version_id == DocumentVersion.id,
+                    )
                     .where(
                         DocumentVersion.id.in_(candidate_version_ids),
                         Document.current_version_id == DocumentVersion.id,
                         Source.compliance == "allowed",
                     )
                 )
-            )
-        return len(persisted_source_ids | batch_source_ids)
+            ).all()
+        identities = {
+            _evidence_identity(source_id, trust_tier, publisher_key)
+            for source_id, trust_tier, publisher_key in (*persisted_rows, *batch_rows)
+        }
+        return len(identities)
 
     async def list_analyses(self) -> list[DocumentAnalysis]:
         async with self._session_factory() as session:
@@ -385,13 +406,24 @@ class SqlAlchemyIntelligenceRepository:
         self, *, window_start: datetime, window_end: datetime
     ) -> tuple[ScoredAnalysis, ...]:
         statement = (
-            select(DocumentAnalysis, AnalysisJob, DocumentVersion, Document, Source)
+            select(
+                DocumentAnalysis,
+                AnalysisJob,
+                DocumentVersion,
+                Document,
+                Source,
+                DocumentProvenance,
+            )
             .join(
                 DocumentVersion,
                 DocumentVersion.id == DocumentAnalysis.document_version_id,
             )
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
+            .outerjoin(
+                DocumentProvenance,
+                DocumentProvenance.document_version_id == DocumentVersion.id,
+            )
             .join(
                 AnalysisJob,
                 AnalysisJob.document_version_id == DocumentVersion.id,
@@ -415,7 +447,7 @@ class SqlAlchemyIntelligenceRepository:
                     select(SourcePlatform.source_id, SourcePlatform.platform)
                     .where(
                         SourcePlatform.source_id.in_(
-                            {source.id for _, _, _, _, source in rows}
+                            {source.id for _, _, _, _, source, _ in rows}
                         )
                     )
                     .order_by(SourcePlatform.source_id, SourcePlatform.platform)
@@ -431,9 +463,10 @@ class SqlAlchemyIntelligenceRepository:
                     version,
                     document,
                     source,
+                    provenance,
                     platforms=tuple(platforms_by_source.get(source.id, ())),
                 )
-                for analysis, job, version, document, source in rows
+                for analysis, job, version, document, source, provenance in rows
             )
 
     async def list_coverage(
@@ -756,13 +789,24 @@ class SqlAlchemyIntelligenceRepository:
         self, *, since: datetime, until: datetime
     ) -> tuple[ScoredAnalysis, ...]:
         statement = (
-            select(DocumentAnalysis, AnalysisJob, DocumentVersion, Document, Source)
+            select(
+                DocumentAnalysis,
+                AnalysisJob,
+                DocumentVersion,
+                Document,
+                Source,
+                DocumentProvenance,
+            )
             .join(
                 DocumentVersion,
                 DocumentVersion.id == DocumentAnalysis.document_version_id,
             )
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
+            .outerjoin(
+                DocumentProvenance,
+                DocumentProvenance.document_version_id == DocumentVersion.id,
+            )
             .join(AnalysisJob, AnalysisJob.document_version_id == DocumentVersion.id)
             .where(
                 AnalysisJob.status == "completed",
@@ -782,7 +826,7 @@ class SqlAlchemyIntelligenceRepository:
                     select(SourcePlatform.source_id, SourcePlatform.platform)
                     .where(
                         SourcePlatform.source_id.in_(
-                            {source.id for _, _, _, _, source in rows}
+                            {source.id for _, _, _, _, source, _ in rows}
                         )
                     )
                     .order_by(SourcePlatform.source_id, SourcePlatform.platform)
@@ -799,9 +843,10 @@ class SqlAlchemyIntelligenceRepository:
                     version,
                     document,
                     source,
+                    provenance,
                     platforms=tuple(platforms_by_source.get(source.id, ())),
                 )
-                for analysis, job, version, document, source in rows
+                for analysis, job, version, document, source, provenance in rows
             )
 
     async def claim_delivery(
@@ -1078,17 +1123,27 @@ class SqlAlchemyIntelligenceRepository:
     ) -> AnalysisCandidate:
         row = (
             await session.execute(
-                select(AnalysisJob, DocumentVersion, Document, Source)
+                select(
+                    AnalysisJob,
+                    DocumentVersion,
+                    Document,
+                    Source,
+                    DocumentProvenance,
+                )
                 .join(
                     DocumentVersion,
                     DocumentVersion.id == AnalysisJob.document_version_id,
                 )
                 .join(Document, Document.id == DocumentVersion.document_id)
                 .join(Source, Source.id == Document.source_id)
+                .outerjoin(
+                    DocumentProvenance,
+                    DocumentProvenance.document_version_id == DocumentVersion.id,
+                )
                 .where(AnalysisJob.id == job_id)
             )
         ).one()
-        job, version, document, source = row
+        job, version, document, source, provenance = row
         platforms = tuple(
             Platform(platform)
             for platform in (
@@ -1117,6 +1172,9 @@ class SqlAlchemyIntelligenceRepository:
             fetched_at=version.fetched_at,
             platforms=platforms,
             regions=tuple(source.regions),
+            publisher_key=provenance.publisher_key if provenance is not None else None,
+            attribution=provenance.attribution if provenance is not None else None,
+            content_scope=provenance.content_scope if provenance is not None else None,
         )
 
 
@@ -1336,12 +1394,23 @@ def _report_date_from_key(idempotency_key: str) -> date:
         raise ValueError("invalid daily report idempotency key") from error
 
 
+def _evidence_identity(
+    source_id: str,
+    trust_tier: str,
+    publisher_key: str | None,
+) -> str:
+    if trust_tier == TrustTier.MEDIA.value:
+        return f"media:{publisher_key}" if publisher_key else "media:unknown"
+    return f"official:{source_id}"
+
+
 def _scored_analysis(
     analysis: DocumentAnalysis,
     job: AnalysisJob,
     version: DocumentVersion,
     document: Document,
     source: Source,
+    provenance: DocumentProvenance | None,
     *,
     platforms: tuple[Platform, ...],
 ) -> ScoredAnalysis:
@@ -1363,6 +1432,9 @@ def _scored_analysis(
         fetched_at=version.fetched_at,
         platforms=platforms,
         regions=tuple(source.regions),
+        publisher_key=provenance.publisher_key if provenance is not None else None,
+        attribution=provenance.attribution if provenance is not None else None,
+        content_scope=provenance.content_scope if provenance is not None else None,
     )
     risk = RiskLevel(analysis.risk_level)
     return ScoredAnalysis(

@@ -95,6 +95,9 @@ class AnalysisCandidate:
     fetched_at: datetime
     platforms: tuple[Platform, ...]
     regions: tuple[str, ...]
+    publisher_key: str | None = None
+    attribution: str | None = None
+    content_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

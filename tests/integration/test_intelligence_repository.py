@@ -11,7 +11,9 @@ from sqlalchemy.exc import IntegrityError
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     Platform,
+    SourceAdapter,
     SourceDefinition,
     TrustTier,
 )
@@ -407,6 +409,62 @@ async def test_same_source_batch_rows_do_not_add_corroboration_points(tmp_path) 
 
         assert batch.succeeded == 2
         assert [item.evidence_confidence for item in batch.completed] == [90, 90]
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.parametrize(
+    ("publishers", "expected_count"),
+    [(("reuters.com", "reuters.com"), 1), (("reuters.com", "apnews.com"), 2)],
+)
+async def test_media_corroboration_counts_publishers_not_collection_channels(
+    tmp_path,
+    publishers: tuple[str, str],
+    expected_count: int,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'publisher-count.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    sources = [
+        replace(
+            _source(source_id=f"media-{index}"),
+            trust_tier=TrustTier.MEDIA,
+            adapter=SourceAdapter.GENERIC,
+            content_scope=ContentScope.METADATA_ONLY,
+            attribution=f"Publisher {index}",
+            publisher_key=publisher,
+        )
+        for index, publisher in enumerate(publishers, start=1)
+    ]
+    try:
+        await ingestion.sync_sources(sources)
+        for index, publisher in enumerate(publishers, start=1):
+            await ingestion.persist_version(
+                replace(
+                    _candidate(
+                        source_id=f"media-{index}",
+                        content_hash=str(index) * 64,
+                        canonical_url=f"https://{publisher}/story/{index}",
+                    ),
+                    publisher_key=publisher,
+                    attribution=f"Publisher {index}",
+                    content_scope="metadata_only",
+                )
+            )
+
+        first = await repository.claim_next(now=NOW)
+        second = await repository.claim_next(now=NOW)
+
+        assert first is not None
+        assert second is not None
+        assert {first.publisher_key, second.publisher_key} == set(publishers)
+        count = await repository.count_corroborating_sources(
+            "same-event",
+            first,
+            batch_claims=(second,),
+        )
+        assert count == expected_count
     finally:
         await database.dispose()
 
