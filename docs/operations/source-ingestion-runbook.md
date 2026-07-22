@@ -77,6 +77,17 @@ python -m commerce_agent.ingestion_cli health
 不会在启动瞬间补跑。不要由脚本或部署任务静默修改用户的 `.env`。任何 `.env` 修改只在
 进程启动时读取，因此修改后必须正常停止并重启 `python -m commerce_agent`。
 
+### 熔断与人工恢复
+
+同一来源连续 3 次 `failed` 或 `partial` 运行后，健康状态会变为 `suspended`。后续定时调度会以
+`source_circuit_open` 跳过该来源，不发起网络请求，也不会自动解除熔断。先检查最近运行记录、快照、
+来源合规状态和错误码；不得通过放宽网络安全规则、登录、Cookie、代理或提高频率来消除故障。
+
+确认来源仍为 `allowed + enabled` 且修复或证据已完成后，运维人员使用 `python -m commerce_agent.ingestion_cli run --source <source-id>`
+执行一次受控手动运行。仅手动运行成功才会将连续失败计数清零并恢复 `healthy`；手动运行失败或部分成功
+继续累计失败，仍保持或重新进入 `suspended`。恢复后运行 `python -m commerce_agent.ingestion_cli health` 确认状态，
+再允许下一次定时调度。
+
 ## 数据库与快照
 
 - `DATABASE_URL` 默认指向工作目录下的 `commerce_agent.db`；生产环境应使用权限受控的路径。
