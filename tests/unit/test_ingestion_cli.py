@@ -11,6 +11,7 @@ import pytest
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    Platform,
     RunStatus,
     RunSummary,
     SourceDefinition,
@@ -191,6 +192,63 @@ async def test_sources_list_uses_only_registry_factory() -> None:
     assert "amazon-news" in stdout.getvalue()
     assert stderr.getvalue() == ""
     assert app_factory_calls == []
+
+
+async def test_sources_coverage_lists_all_ten_platforms_with_compliance_counts() -> None:
+    registry = SourceRegistry(
+        [
+            source("amazon-live", platform="amazon"),
+            source(
+                "amazon-pending",
+                platform="amazon",
+                compliance=ComplianceStatus.PENDING_REVIEW,
+                enabled=False,
+            ),
+            source(
+                "temu-denied",
+                platform="temu",
+                compliance=ComplianceStatus.DENIED,
+                enabled=False,
+            ),
+            source(
+                "temu-auth",
+                platform="temu",
+                compliance=ComplianceStatus.AUTHORIZATION_REQUIRED,
+                enabled=False,
+            ),
+        ]
+    )
+    app = FakeApplication(registry)
+
+    exit_code, stdout, stderr = await invoke(app, "sources", "coverage")
+
+    assert exit_code == 0
+    assert stderr == ""
+    rows = {
+        line.split()[0]: line.split()[1:]
+        for line in stdout.splitlines()[2:]
+        if line.strip()
+    }
+    assert set(rows) == {platform.value for platform in Platform}
+    assert rows["amazon"] == [
+        "1",
+        "1",
+        "0",
+        "1",
+        "0",
+        "2",
+        "official_public_covered",
+    ]
+    assert rows["temu"] == [
+        "0",
+        "0",
+        "1",
+        "0",
+        "1",
+        "2",
+        "public_covered_seller_center_pending",
+    ]
+    assert rows["shein"] == ["0", "0", "0", "0", "0", "0", "unconnected"]
 
 
 @pytest.mark.parametrize(

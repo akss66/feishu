@@ -27,7 +27,14 @@ from commerce_agent.ingestion.collectors import (
 from commerce_agent.ingestion.compliance import CompliancePolicy
 from commerce_agent.ingestion.extract import ContentExtractor, LinguaLanguageDetector
 from commerce_agent.ingestion.http import IngestionHttpClient
-from commerce_agent.ingestion.models import CollectorKind, RunStatus, RunSummary, Trigger
+from commerce_agent.ingestion.models import (
+    CollectorKind,
+    ComplianceStatus,
+    Platform,
+    RunStatus,
+    RunSummary,
+    Trigger,
+)
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.service import IngestionService
 from commerce_agent.ingestion.snapshots import SnapshotStore
@@ -236,6 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     sources_parser = commands.add_parser("sources")
     source_commands = sources_parser.add_subparsers(dest="sources_command", required=True)
     source_commands.add_parser("list")
+    source_commands.add_parser("coverage")
 
     run_parser = commands.add_parser("run")
     target = run_parser.add_mutually_exclusive_group(required=True)
@@ -286,7 +294,11 @@ async def run_cli(
 
     if arguments.command == "sources":
         try:
-            _write_sources(registry_factory(), output)
+            registry = registry_factory()
+            if arguments.sources_command == "coverage":
+                _write_coverage(registry, output)
+            else:
+                _write_sources(registry, output)
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
                 raise
@@ -355,6 +367,52 @@ def _write_sources(registry: SourceRegistry, output: TextIO) -> None:
         )
     _write_table(
         ("SOURCE", "PLATFORM", "TRUST", "COMPLIANCE", "ENABLED", "COLLECTOR", "COVERAGE"),
+        rows,
+        output,
+    )
+
+
+def _write_coverage(registry: SourceRegistry, output: TextIO) -> None:
+    coverage = registry.platform_coverage()
+    rows: list[tuple[str, ...]] = []
+    for platform in Platform:
+        sources = tuple(
+            source for source in registry.sources if platform in source.platforms
+        )
+        rows.append(
+            (
+                platform.value,
+                str(sum(source.enabled for source in sources)),
+                str(
+                    sum(
+                        source.compliance is ComplianceStatus.ALLOWED
+                        for source in sources
+                    )
+                ),
+                str(
+                    sum(
+                        source.compliance is ComplianceStatus.AUTHORIZATION_REQUIRED
+                        for source in sources
+                    )
+                ),
+                str(
+                    sum(
+                        source.compliance is ComplianceStatus.PENDING_REVIEW
+                        for source in sources
+                    )
+                ),
+                str(
+                    sum(
+                        source.compliance is ComplianceStatus.DENIED
+                        for source in sources
+                    )
+                ),
+                str(len(sources)),
+                coverage[platform].value,
+            )
+        )
+    _write_table(
+        ("PLATFORM", "ENABLED", "ALLOWED", "AUTH", "PENDING", "DENIED", "TOTAL", "STATUS"),
         rows,
         output,
     )
