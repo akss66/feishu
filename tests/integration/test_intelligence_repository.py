@@ -619,6 +619,13 @@ async def test_report_query_uses_current_allowed_versions_and_exact_window(tmp_p
                 )
                 session.add(analysis)
                 await session.flush()
+                job = await session.scalar(
+                    select(AnalysisJob).where(
+                        AnalysisJob.document_version_id == outcome.version_id
+                    )
+                )
+                assert job is not None
+                job.status = "completed"
                 return analysis.id
 
         expected_id = await add_analysis("allowed", "https://example.com/start", start, 60, "a")
@@ -670,6 +677,13 @@ async def test_coverage_lists_every_platform_and_counts_enabled_verified_sources
             )
         )
         async with database.session.begin() as session:
+            job = await session.scalar(
+                select(AnalysisJob).where(
+                    AnalysisJob.document_version_id == outcome.version_id
+                )
+            )
+            assert job is not None
+            job.status = "completed"
             session.add(
                 DocumentAnalysis(
                     document_version_id=outcome.version_id,
@@ -695,6 +709,76 @@ async def test_coverage_lists_every_platform_and_counts_enabled_verified_sources
         assert by_platform[Platform.EBAY].verified_update_count == 1
         assert by_platform[Platform.TEMU].enabled_source_count == 0
         assert by_platform[Platform.TEMU].verified_update_count == 0
+    finally:
+        await database.dispose()
+
+
+async def test_reports_and_coverage_require_completed_analysis_jobs(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'completed-reports.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    start = datetime(2026, 7, 20, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 21, 1, tzinfo=UTC)
+    try:
+        await ingestion.sync_sources([_source(source_id="completed-only")])
+        outcome = await ingestion.persist_version(
+            replace(
+                _candidate(source_id="completed-only", content_hash="8" * 64),
+                fetched_at=start,
+            )
+        )
+        async with database.session.begin() as session:
+            analysis = DocumentAnalysis(
+                document_version_id=outcome.version_id,
+                schema_version="1",
+                prompt_version="1",
+                model_name="test-model",
+                headline_zh=_valid_result().headline_zh,
+                summary_zh=_valid_result().summary_zh,
+                event_type=_valid_result().event_type.value,
+                risk_level=_valid_result().risk_level.value,
+                evidence_confidence=75,
+                event_fingerprint="pending-event",
+                structured_payload=_valid_result().model_dump(mode="json"),
+                analyzed_at=NOW,
+            )
+            session.add(analysis)
+            await session.flush()
+            analysis_id = analysis.id
+
+        pending_reports = await repository.list_report_analyses(
+            window_start=start, window_end=end
+        )
+        pending_coverage = await repository.list_coverage(
+            window_start=start, window_end=end
+        )
+
+        assert pending_reports == ()
+        assert next(
+            row for row in pending_coverage if row.platform is Platform.EBAY
+        ).verified_update_count == 0
+
+        async with database.session.begin() as session:
+            job = await session.scalar(
+                select(AnalysisJob).where(
+                    AnalysisJob.document_version_id == outcome.version_id
+                )
+            )
+            assert job is not None
+            job.status = "completed"
+
+        completed_reports = await repository.list_report_analyses(
+            window_start=start, window_end=end
+        )
+        completed_coverage = await repository.list_coverage(
+            window_start=start, window_end=end
+        )
+
+        assert [row.analysis_id for row in completed_reports] == [analysis_id]
+        assert next(
+            row for row in completed_coverage if row.platform is Platform.EBAY
+        ).verified_update_count == 1
     finally:
         await database.dispose()
 

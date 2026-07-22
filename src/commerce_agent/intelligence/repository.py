@@ -399,6 +399,7 @@ class SqlAlchemyIntelligenceRepository:
             .where(
                 Document.current_version_id == DocumentVersion.id,
                 Source.compliance == "allowed",
+                AnalysisJob.status == "completed",
                 DocumentAnalysis.evidence_confidence >= 60,
                 DocumentVersion.fetched_at >= window_start,
                 DocumentVersion.fetched_at < window_end,
@@ -461,6 +462,10 @@ class SqlAlchemyIntelligenceRepository:
                             DocumentVersion,
                             DocumentVersion.id == DocumentAnalysis.document_version_id,
                         )
+                        .join(
+                            AnalysisJob,
+                            AnalysisJob.document_version_id == DocumentVersion.id,
+                        )
                         .join(Document, Document.id == DocumentVersion.document_id)
                         .join(Source, Source.id == Document.source_id)
                         .join(SourcePlatform, SourcePlatform.source_id == Source.id)
@@ -468,6 +473,7 @@ class SqlAlchemyIntelligenceRepository:
                             Document.current_version_id == DocumentVersion.id,
                             Source.compliance == "allowed",
                             Source.enabled.is_(True),
+                            AnalysisJob.status == "completed",
                             DocumentAnalysis.evidence_confidence >= 75,
                             DocumentVersion.fetched_at >= window_start,
                             DocumentVersion.fetched_at < window_end,
