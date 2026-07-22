@@ -19,7 +19,7 @@ sources:
     collector_config:
       item_limit: 50
 
-  # Amazon candidates remain disabled until Amazon confirms automated reuse terms.
+  # Amazon candidates remain disabled until Amazon confirms directly applicable automation terms.
   - &amazon
     source_id: amazon-seller-blog
     name: Amazon Selling Partner Blog
@@ -34,8 +34,8 @@ sources:
     interval_minutes: 120
     terms_url: https://www.amazon.com/gp/help/customer/display.html?nodeId=508088
     robots_url: https://sell.amazon.com/robots.txt
-    reviewed_at: 2026-07-20
-    compliance_notes: Public official page confirmed; automated reuse permission was not confirmed.
+    reviewed_at: 2026-07-22
+    compliance_notes: Anonymous access reaches the public blog without a redirect; the registered Amazon terms URL returned 403, so its automation scope is unverified; robots permits /blog/; no login or redirect bypass was used, so review remains pending.
     collector_config: &html_config
       link_selector: "article a"
       article_selector: article
@@ -45,13 +45,14 @@ sources:
     source_id: amazon-seller-announcements
     name: Amazon Seller Announcements
     entry_url: https://sell.amazon.com/blog/announcements
+    compliance_notes: Anonymous access reaches the announcements list without a redirect; the registered Amazon terms URL returned 403, so its automation scope is unverified; robots permits /blog/announcements; no login or redirect bypass was used, so review remains pending.
 
   - <<: *amazon
     source_id: amazon-seller-forums
     name: Amazon Seller Forums
     entry_url: https://sellercentral.amazon.com/seller-forums
     robots_url: https://sellercentral.amazon.com/robots.txt
-    compliance_notes: Public forum entry retained for review; login boundaries must not be crossed.
+    compliance_notes: Anonymous access provides read-only forum content without a redirect; forum guidance references an Agent Policy that could not be verified, while robots explicitly allows /seller-forums; no login or redirect bypass was used, so review remains pending.
 
   # Temu terms prohibit crawling or scraping; these entries are visible but denied.
   - &temu
@@ -145,7 +146,7 @@ sources:
     entry_url: https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html
     robots_url: https://terms.alicdn.com/robots.txt
 
-  # Regional Shopee seller pages require separate terms and robots review.
+  # Regional Shopee seller pages require prior written authorization for automated collection.
   - &shopee
     source_id: shopee-sg-seller-education
     name: Shopee Singapore Seller Education Hub
@@ -153,15 +154,15 @@ sources:
     platforms: [shopee]
     trust_tier: official
     collector: html
-    compliance: pending_review
+    compliance: authorization_required
     enabled: false
     regions: [sg]
     language_hint: en
     interval_minutes: 120
     terms_url: https://shopee.sg/legaldoc/termsOfService/
     robots_url: https://seller.shopee.sg/robots.txt
-    reviewed_at: 2026-07-20
-    compliance_notes: Regional page is public, but automated access permission is not confirmed.
+    reviewed_at: 2026-07-22
+    compliance_notes: Anonymous access reaches the Singapore education hub without a redirect; Shopee terms require prior written permission for automation; robots permits /edu/home; no login or redirect bypass was used, so authorization is required.
     collector_config: *html_config
 
   - <<: *shopee
@@ -169,14 +170,18 @@ sources:
     name: Shopee Malaysia Seller Education Hub
     entry_url: https://seller.shopee.com.my/edu/home
     regions: [my]
+    terms_url: https://shopee.com.my/legaldoc/termsOfService/
     robots_url: https://seller.shopee.com.my/robots.txt
+    compliance_notes: Anonymous access reaches the Malaysia education hub without a redirect; Shopee terms require prior written permission for automation; robots permits /edu/home; no login or redirect bypass was used, so authorization is required.
 
   - <<: *shopee
     source_id: shopee-ph-seller-education
     name: Shopee Philippines Seller Education Hub
     entry_url: https://seller.shopee.ph/edu/home
     regions: [ph]
+    terms_url: https://shopee.ph/legaldoc/termsOfService/
     robots_url: https://seller.shopee.ph/robots.txt
+    compliance_notes: Anonymous access reaches the Philippines education hub without a redirect; Shopee terms require prior written permission for automation; robots permits /edu/home; no login or redirect bypass was used, so authorization is required.
 
   # eBay explicitly publishes the newsroom RSS endpoint for RSS-reader subscription.
   - source_id: ebay-newsroom-rss
@@ -197,33 +202,38 @@ sources:
     collector_config:
       item_limit: 50
 
-  - &ebay_pending
+  - &ebay_press_room
     source_id: ebay-press-room
     name: eBay Press Room
     entry_url: https://www.ebayinc.com/stories/press-room/
     platforms: [ebay]
     trust_tier: official
     collector: html
-    compliance: pending_review
-    enabled: false
+    compliance: allowed
+    enabled: true
     regions: [global]
     language_hint: en
     interval_minutes: 120
     terms_url: https://www.ebayinc.com/terms-of-use/
     robots_url: https://www.ebayinc.com/robots.txt
-    reviewed_at: 2026-07-20
-    compliance_notes: RSS is allowed separately; full-page article collection remains under review.
-    collector_config: *html_config
+    reviewed_at: 2026-07-22
+    compliance_notes: Anonymous access reaches the public press room without a redirect; eBay Inc. terms show no automation prohibition; robots returned 403 and is not treated as permission; no login or redirect bypass was used, so low-frequency collection is allowed.
+    collector_config:
+      link_selector: "article a"
+      article_selector: article
+      item_limit: 20
 
-  - <<: *ebay_pending
+  - <<: *ebay_press_room
     source_id: ebay-seller-updates
     name: eBay Seller Updates
     entry_url: https://www.ebay.com/sellercenter/news
     terms_url: https://www.ebay.com/help/policies/member-behaviour-policies/user-agreement?id=4259
     robots_url: https://www.ebay.com/robots.txt
-    compliance_notes: Public seller-update page retained pending separate marketplace terms review.
+    compliance: authorization_required
+    enabled: false
+    compliance_notes: Anonymous access reaches Seller News without a redirect; eBay terms require express prior permission for automation; robots also prohibits unapproved automated access; no login or redirect bypass was used, so authorization is required.
 
-  # Coupang pages are public, but no publisher authorization for automation was located.
+  # Coupang public seller resources may be collected conservatively at low frequency.
   - &coupang
     source_id: coupang-rules-and-policies
     name: Coupang Global Seller Rules and Policies
@@ -231,26 +241,31 @@ sources:
     platforms: [coupang]
     trust_tier: official
     collector: html
-    compliance: pending_review
-    enabled: false
+    compliance: allowed
+    enabled: true
     regions: [global]
     language_hint: en
     interval_minutes: 120
     terms_url: https://globalsellers.coupang.com/en/rules-and-policies/
     robots_url: https://globalsellers.coupang.com/robots.txt
-    reviewed_at: 2026-07-20
-    compliance_notes: Official public policy page confirmed; automated reuse permission not located.
-    collector_config: *html_config
+    reviewed_at: 2026-07-22
+    compliance_notes: Anonymous access reaches the Rules and Policies list without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow; no login or redirect bypass was used, so low-frequency collection is allowed.
+    collector_config:
+      link_selector: "article a"
+      article_selector: article
+      item_limit: 20
 
   - <<: *coupang
     source_id: coupang-seller-university
     name: Coupang Seller University Before You Start
     entry_url: https://globalsellers.coupang.com/en/seller-university/category/before-you-start/
+    compliance_notes: Anonymous access reaches Seller University without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow; no login or redirect bypass was used, so low-frequency collection is allowed.
 
   - <<: *coupang
     source_id: coupang-global-news
     name: Coupang Global Seller Step-by-Step Guide
     entry_url: https://globalsellers.coupang.com/en/step-by-step-guide/
+    compliance_notes: Anonymous access reaches the Step-by-step Guide without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow; no login or redirect bypass was used, so low-frequency collection is allowed.
 
   # Ozon regional redirects and publisher terms require review before collection.
   - &ozon
@@ -267,21 +282,23 @@ sources:
     interval_minutes: 120
     terms_url: https://docs.ozon.ru/legal/en/partners/logistics/contract/
     robots_url: https://seller.ozon.ru/robots.txt
-    reviewed_at: 2026-07-20
-    compliance_notes: Public page confirmed; redirect behavior and automation terms remain unresolved.
+    reviewed_at: 2026-07-22
+    compliance_notes: Anonymous access enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
     collector_config: *html_config
 
   - <<: *ozon
     source_id: ozon-seller-media
     name: Ozon Seller Analytics News
     entry_url: https://seller.ozon.ru/media/news/ocenivajte-effektivnost-vashih-promokodov/
+    compliance_notes: Anonymous access enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
 
   - <<: *ozon
     source_id: ozon-global-docs
     name: Ozon Seller Documents Topic
     entry_url: https://seller.ozon.ru/media/tags/dokumenty/
+    compliance_notes: Anonymous access enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
 
-  # Joybuy has a current public newsroom but no automation terms were found in its footer.
+  # Joybuy public newsrooms may be collected conservatively at low frequency.
   - &joybuy
     source_id: joybuy-news
     name: Joybuy Newsroom
@@ -289,16 +306,19 @@ sources:
     platforms: [joybuy]
     trust_tier: official
     collector: html
-    compliance: pending_review
-    enabled: false
+    compliance: allowed
+    enabled: true
     regions: [uk, eu]
     language_hint: en
     interval_minutes: 120
     terms_url: https://about.joybuy.com/
     robots_url: https://about.joybuy.com/robots.txt
-    reviewed_at: 2026-07-20
-    compliance_notes: Current newsroom verified; dedicated automation terms were not located.
-    collector_config: *html_config
+    reviewed_at: 2026-07-22
+    compliance_notes: Anonymous access reaches the English newsroom without a redirect; the official site shows no automation terms prohibition; robots permits /news/; no login or redirect bypass was used, so low-frequency collection is allowed.
+    collector_config:
+      link_selector: "article a"
+      article_selector: article
+      item_limit: 20
 
   - <<: *joybuy
     source_id: joybuy-german-news
@@ -306,6 +326,7 @@ sources:
     entry_url: https://about.joybuy.com/de/news/
     regions: [de]
     language_hint: de
+    compliance_notes: Anonymous access reaches the German newsroom without a redirect; the official site shows no automation terms prohibition; robots permits /de/news/; no login or redirect bypass was used, so low-frequency collection is allowed.
 
   - <<: *joybuy
     source_id: joybuy-dutch-news
@@ -313,6 +334,7 @@ sources:
     entry_url: https://about.joybuy.com/nl/news/
     regions: [nl]
     language_hint: nl
+    compliance_notes: Anonymous access reaches the Dutch newsroom without a redirect; the official site shows no automation terms prohibition; robots permits /nl/news/; no login or redirect bypass was used, so low-frequency collection is allowed.
 
   # TikTok Shop seller terms require express written permission for automated access.
   - &tiktok

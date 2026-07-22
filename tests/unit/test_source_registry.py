@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -22,6 +23,71 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "ingestion"
 PUBLIC_SOURCES = (
     Path(__file__).parents[2] / "src" / "commerce_agent" / "sources" / "public_sources.yaml"
 )
+
+BALANCED_REVIEW_SOURCE_IDS = {
+    "amazon-seller-blog",
+    "amazon-seller-announcements",
+    "amazon-seller-forums",
+    "shopee-sg-seller-education",
+    "shopee-my-seller-education",
+    "shopee-ph-seller-education",
+    "ebay-press-room",
+    "ebay-seller-updates",
+    "coupang-rules-and-policies",
+    "coupang-seller-university",
+    "coupang-global-news",
+    "ozon-seller-news",
+    "ozon-seller-media",
+    "ozon-global-docs",
+    "joybuy-news",
+    "joybuy-german-news",
+    "joybuy-dutch-news",
+}
+
+BALANCED_REVIEW_STATUS = {
+    "amazon-seller-blog": ComplianceStatus.PENDING_REVIEW,
+    "amazon-seller-announcements": ComplianceStatus.PENDING_REVIEW,
+    "amazon-seller-forums": ComplianceStatus.PENDING_REVIEW,
+    "shopee-sg-seller-education": ComplianceStatus.AUTHORIZATION_REQUIRED,
+    "shopee-my-seller-education": ComplianceStatus.AUTHORIZATION_REQUIRED,
+    "shopee-ph-seller-education": ComplianceStatus.AUTHORIZATION_REQUIRED,
+    "ebay-press-room": ComplianceStatus.ALLOWED,
+    "ebay-seller-updates": ComplianceStatus.AUTHORIZATION_REQUIRED,
+    "coupang-rules-and-policies": ComplianceStatus.ALLOWED,
+    "coupang-seller-university": ComplianceStatus.ALLOWED,
+    "coupang-global-news": ComplianceStatus.ALLOWED,
+    "ozon-seller-news": ComplianceStatus.PENDING_REVIEW,
+    "ozon-seller-media": ComplianceStatus.PENDING_REVIEW,
+    "ozon-global-docs": ComplianceStatus.PENDING_REVIEW,
+    "joybuy-news": ComplianceStatus.ALLOWED,
+    "joybuy-german-news": ComplianceStatus.ALLOWED,
+    "joybuy-dutch-news": ComplianceStatus.ALLOWED,
+}
+
+OUT_OF_SCOPE_STATUS = {
+    "amazon-sp-api-changelog-rss": (ComplianceStatus.ALLOWED, True),
+    "temu-seller-center": (ComplianceStatus.DENIED, False),
+    "temu-about": (ComplianceStatus.DENIED, False),
+    "temu-support-center": (ComplianceStatus.DENIED, False),
+    "shein-group-newsroom": (ComplianceStatus.DENIED, False),
+    "shein-group-press-releases": (ComplianceStatus.DENIED, False),
+    "shein-group-company-updates": (ComplianceStatus.DENIED, False),
+    "aliexpress-marketplace": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "aliexpress-seller-portal": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "aliexpress-terms-center": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "ebay-newsroom-rss": (ComplianceStatus.ALLOWED, True),
+    "tiktok-shop-academy": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "tiktok-shop-policy-pulse": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "tiktok-shop-sg-seller-terms": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "media-digital-commerce-360-feed": (
+        ComplianceStatus.AUTHORIZATION_REQUIRED,
+        False,
+    ),
+    "media-ecommercebytes-feed": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+    "media-gdelt-cross-border": (ComplianceStatus.ALLOWED, False),
+    "media-marketplace-pulse": (ComplianceStatus.DENIED, False),
+    "media-reuters-retail": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
+}
 
 
 def _valid_document() -> dict[str, object]:
@@ -325,6 +391,35 @@ def test_public_registry_has_required_platform_coverage_and_seed_mix() -> None:
             )
             for source in registry.sources
         ), platform
+
+
+def test_public_registry_applies_balanced_review_decisions_without_scope_drift() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    reviewed = tuple(registry.require(source_id) for source_id in BALANCED_REVIEW_SOURCE_IDS)
+
+    assert set(BALANCED_REVIEW_STATUS) == BALANCED_REVIEW_SOURCE_IDS
+    assert {
+        source.source_id: source.compliance
+        for source in reviewed
+    } == BALANCED_REVIEW_STATUS
+    assert all(source.reviewed_at == date(2026, 7, 22) for source in reviewed)
+    assert all(len(source.compliance_notes) >= 80 for source in reviewed)
+    assert all(
+        source.enabled == (source.compliance is ComplianceStatus.ALLOWED)
+        for source in reviewed
+    )
+    assert all(
+        source.collector_config.get("item_limit", 20) <= 20
+        for source in reviewed
+        if source.compliance is ComplianceStatus.ALLOWED
+    )
+    assert {
+        source_id: (
+            registry.require(source_id).compliance,
+            registry.require(source_id).enabled,
+        )
+        for source_id in OUT_OF_SCOPE_STATUS
+    } == OUT_OF_SCOPE_STATUS
 
 
 def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled() -> None:
