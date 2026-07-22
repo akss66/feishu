@@ -172,6 +172,44 @@ def _verified_risk_line(item: ScoredAnalysis, profile: RiskProfile) -> str:
     return f"{item.resolution.risk_level.value}｜{item.result.impact}{suffix}"
 
 
+def _daily_actions(
+    item: ScoredAnalysis,
+    profile: RiskProfile,
+    *,
+    verified: bool,
+) -> list[dict[str, object]]:
+    if profile is RiskProfile.CONSERVATIVE:
+        return [dict(_CONSERVATIVE_ALERT_ACTION)]
+    if not verified:
+        count = 2 if profile is RiskProfile.AGGRESSIVE else 1
+        return [dict(action) for action in _EARLY_SIGNAL_ACTIONS[:count]]
+    actions = [action.model_dump(mode="json") for action in item.result.action_items]
+    return actions or [dict(_EARLY_SIGNAL_ACTIONS[0])]
+
+
+def _daily_item(item: ScoredAnalysis, profile: RiskProfile) -> dict[str, object]:
+    verified = item.evidence_confidence >= 75
+    return {
+        "analysis_id": item.analysis_id,
+        "document_version_id": item.candidate.document_version_id,
+        "content_hash": item.candidate.content_hash,
+        "event_fingerprint": item.event_fingerprint,
+        "risk_level": item.resolution.risk_level.value,
+        "evidence_confidence": item.evidence_confidence,
+        "risk_profile": profile.value,
+        "verification_status": "verified" if verified else "early_signal",
+        "headline": item.result.headline_zh,
+        "summary": item.result.summary_zh,
+        "impact": item.result.impact,
+        "rationale": [claim.model_dump(mode="json") for claim in item.result.rationale],
+        "actions": _daily_actions(item, profile, verified=verified),
+        "uncertainties": list(item.result.uncertainties),
+        "source_name": item.candidate.attribution or item.candidate.source_name,
+        "source_url": item.candidate.canonical_url,
+        "publisher_key": item.candidate.publisher_key,
+    }
+
+
 def build_b_payload(
     report_date: date,
     selected: tuple[ScoredAnalysis, ...],
@@ -214,6 +252,7 @@ def build_b_payload(
         "title": _title(report_date, profile),
         "theme": "blue",
         "risk_profile": profile.value,
+        "items": [_daily_item(item, profile) for item in selected],
         "sections": [
             {
                 "title": "AI 今日提炼",

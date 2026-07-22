@@ -85,6 +85,31 @@ def _claim(
     )
 
 
+def test_daily_card_prefers_evidence_rich_items_when_updates_exist() -> None:
+    item = _alert_item(confidence=70, status="early_signal")
+    claim = _claim(
+        kind=MessageKind.DAILY_REPORT,
+        payload={
+            "title": "Daily intelligence",
+            "theme": "blue",
+            "risk_profile": "default",
+            "sections": [{"title": "Summary", "items": ["One pending update"]}],
+            "items": [item],
+        },
+    )
+
+    rendered = FeishuMessageRenderer().render(claim)
+    encoded = json.dumps(rendered, ensure_ascii=False)
+
+    assert "One pending update" not in encoded
+    assert item["headline"] in encoded
+    assert item["summary"] in encoded
+    assert item["rationale"][0]["quote"] in encoded
+    assert item["actions"][0]["action"] in encoded
+    assert item["source_url"] in encoded
+    assert rendered["card"]["header"]["template"] == "blue"
+
+
 @pytest.mark.parametrize(
     ("kind", "payload", "expected_theme"),
     [

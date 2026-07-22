@@ -55,6 +55,9 @@ def _analysis(
         fetched_at=fetched_at or datetime(2026, 7, 20, 12, tzinfo=UTC),
         platforms=(Platform.EBAY,),
         regions=("global",),
+        publisher_key=f"publisher-{analysis_id}.example" if trust_tier is TrustTier.MEDIA else None,
+        attribution=f"媒体署名 {analysis_id}" if trust_tier is TrustTier.MEDIA else None,
+        content_scope="metadata_only" if trust_tier is TrustTier.MEDIA else None,
     )
     result = AnalysisResult(
         headline_zh=f"eBay 政策更新 {analysis_id}",
@@ -246,6 +249,49 @@ def test_default_profile_keeps_verified_model_action() -> None:
     )
 
     assert "复核成本表" in json.dumps(draft.payload, ensure_ascii=False)
+
+
+def test_report_items_include_risk_confidence_basis_action_attribution_and_original() -> None:
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(
+            _analysis(1, confidence=90, trust_tier=TrustTier.OFFICIAL),
+            _analysis(2, confidence=70, trust_tier=TrustTier.MEDIA),
+        ),
+    )
+
+    items = {item["analysis_id"]: item for item in draft.payload["items"]}
+    assert items[1]["verification_status"] == "verified"
+    assert items[2]["verification_status"] == "early_signal"
+    assert items[2]["risk_level"] == "medium"
+    assert items[2]["evidence_confidence"] == 70
+    assert items[2]["summary"]
+    assert items[2]["rationale"][0]["quote"] == "policy changed"
+    assert items[2]["actions"]
+    assert items[2]["source_name"] == "媒体署名 2"
+    assert items[2]["source_url"] == "https://example.com/2"
+    assert items[2]["publisher_key"] == "publisher-2.example"
+
+
+def test_profiles_change_actions_but_not_evidence_or_verification_status() -> None:
+    analysis = _analysis(1, confidence=70, model_action="irreversible model action")
+    payloads = {
+        profile: DailyReportComposer().compose(
+            report_date=date(2026, 7, 21),
+            analyses=(analysis,),
+            profile=profile,
+        ).payload
+        for profile in RiskProfile
+    }
+
+    items = {profile: payload["items"][0] for profile, payload in payloads.items()}
+    assert {item["evidence_confidence"] for item in items.values()} == {70}
+    assert {item["verification_status"] for item in items.values()} == {"early_signal"}
+    assert len({json.dumps(item["actions"], ensure_ascii=False) for item in items.values()}) >= 2
+    assert "irreversible model action" not in json.dumps(
+        items[RiskProfile.DEFAULT]["actions"],
+        ensure_ascii=False,
+    )
 
 
 class _RepositorySpy:

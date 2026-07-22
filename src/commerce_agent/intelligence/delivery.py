@@ -209,14 +209,14 @@ def alert_markdown(item: dict[str, object], *, compact: bool = False) -> str:
 
 
 def _message_theme(payload: dict[str, object], kind: MessageKind | None) -> str:
+    if kind is MessageKind.DAILY_REPORT:
+        return "blue"
     items = payload.get("items", [])
     if isinstance(items, list) and any(
         isinstance(item, dict) and item.get("verification_status") == "early_signal"
         for item in items
     ):
         return "orange"
-    if kind is MessageKind.DAILY_REPORT:
-        return "blue"
     if kind is MessageKind.HIGH_ALERT:
         return "red"
     if kind is MessageKind.MEDIUM_ALERT_BATCH:
@@ -237,7 +237,10 @@ def semantic_to_card(
     payload: dict[str, object], *, kind: MessageKind | None = None
 ) -> dict[str, object]:
     sections = payload.get("sections")
-    if isinstance(sections, list):
+    items = payload.get("items", [])
+    if isinstance(items, list) and items:
+        blocks = [{"tag": "markdown", "content": alert_markdown(item)} for item in items]
+    elif isinstance(sections, list):
         blocks = [
             {
                 "tag": "markdown",
@@ -247,7 +250,6 @@ def semantic_to_card(
             for section in sections
         ]
     else:
-        items = payload.get("items", [])
         blocks = [{"tag": "markdown", "content": alert_markdown(item)} for item in items]
     return {
         "card": {
@@ -274,8 +276,13 @@ def semantic_to_text(payload: dict[str, object]) -> str:
         used_bytes += len(encoded)
         return True
 
+    items = payload.get("items", [])
     sections = payload.get("sections")
-    if isinstance(sections, list):
+    if isinstance(items, list) and items:
+        for item in items[:MAX_FALLBACK_ITEMS]:
+            if not append_complete(alert_markdown(item, compact=True)):
+                break
+    elif isinstance(sections, list):
         remaining = MAX_FALLBACK_ITEMS
         for section in sections:
             if remaining == 0:
@@ -288,7 +295,6 @@ def semantic_to_text(payload: dict[str, object]) -> str:
                     return "\n".join(lines)
                 remaining -= 1
     else:
-        items = list(payload.get("items", []))[:MAX_FALLBACK_ITEMS]
         for item in items:
             if not append_complete(alert_markdown(item, compact=True)):
                 break
