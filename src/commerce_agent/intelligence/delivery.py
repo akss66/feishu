@@ -32,8 +32,13 @@ _PROFILE_LABELS = {
     "aggressive": "激进",
 }
 _STATUS_LABELS = {
-    "verified": "已验证预警",
-    "early_signal": "早期信号·待核实",
+    "verified": "已有可靠原文支持",
+    "early_signal": "初步线索，暂勿直接调整业务",
+}
+_RISK_LABELS = {
+    "low": "低（了解即可）",
+    "medium": "中（建议检查）",
+    "high": "高（建议尽快处理）",
 }
 
 
@@ -183,7 +188,7 @@ def _safe_source_reference(name: object, url: object) -> str:
         or parsed.password is not None
         or unsafe_netloc
     ):
-        return f"原文：{label}（链接不可用）"
+        return f"查看原文：{label}（链接不可用）"
     safe_url = urlunsplit(
         (
             parsed.scheme.casefold(),
@@ -193,39 +198,67 @@ def _safe_source_reference(name: object, url: object) -> str:
             quote(parsed.fragment, safe="%:@/?"),
         )
     )
-    return f"原文：[{label}]({safe_url})"
+    return f"查看原文：[{label}]({safe_url})"
+
+
+def _confidence_label(value: object) -> str:
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return "未知"
+    if score >= 90:
+        return f"很高（{score}/100）"
+    if score >= 75:
+        return f"较高（{score}/100）"
+    if score >= 60:
+        return f"一般（{score}/100，建议再核实）"
+    return f"较低（{score}/100，仅供参考）"
+
+
+def _friendly_deadline(value: object) -> str:
+    text = _plain(value or "未明确")
+    if (
+        len(text) >= 10
+        and text[:4].isdigit()
+        and text[4] == "-"
+        and text[5:7].isdigit()
+        and text[7] == "-"
+        and text[8:10].isdigit()
+    ):
+        return text[:10]
+    return text
 
 
 def alert_markdown(item: dict[str, object], *, compact: bool = False) -> str:
     field_limit = 50 if compact else None
     rationale = "；".join(
         f"{_plain(row['claim'], limit=field_limit)}"
-        f"（原文：{_plain(row['quote'], limit=field_limit)}）"
+        f"（原文依据：{_plain(row['quote'], limit=field_limit)}）"
         for row in item["rationale"]
     )
-    actions = "；".join(
-        f"{_plain(row['action'], limit=field_limit)}"
-        f"｜负责人：{_plain(row['owner_type'], limit=field_limit)}"
-        f"｜期限：{_plain(row.get('deadline') or '未明确', limit=field_limit)}"
-        for row in item["actions"]
-    )
+    actions = "\n".join(
+        f"{index}. {_plain(row['action'], limit=field_limit)}"
+        f"（负责人：{_plain(row['owner_type'], limit=field_limit)}；"
+        f"建议完成：{_friendly_deadline(row.get('deadline'))}）"
+        for index, row in enumerate(item["actions"], start=1)
+    ) or "暂时不用立即调整，先保存原文并关注后续公告。"
     uncertainties = (
         "；".join(_plain(value, limit=field_limit) for value in item["uncertainties"]) or "无"
     )
     profile = _PROFILE_LABELS.get(str(item["risk_profile"]), "未知")
     status = _STATUS_LABELS.get(str(item["verification_status"]), "待核实")
+    risk = _RISK_LABELS.get(str(item["risk_level"]), "未知")
     headline_limit = 50 if compact else None
     value_limit = 50 if compact else None
     return (
         f"**{_plain(item['headline'], limit=headline_limit)}**\n"
-        f"策略：{profile}｜状态：{status}\n"
-        f"风险：{_plain(item['risk_level'])}"
-        f"｜证据可信度：{_plain(item['evidence_confidence'])}\n"
-        f"摘要：{_plain(item['summary'], limit=value_limit)}\n"
-        f"影响：{_plain(item['impact'], limit=value_limit)}\n"
-        f"判断依据：{rationale}\n"
-        f"建议动作：{actions}\n"
-        f"不确定性：{uncertainties}\n"
+        f"关注程度：{risk}｜信息可靠度：{_confidence_label(item['evidence_confidence'])}\n"
+        f"一句话看懂：{_plain(item['summary'], limit=value_limit)}\n"
+        f"对店铺可能有什么影响：{_plain(item['impact'], limit=value_limit)}\n"
+        f"建议你这样做：\n{actions}\n"
+        f"为什么这样判断：{rationale}\n"
+        f"目前还不确定：{uncertainties}\n"
+        f"分析策略：{profile}｜信息状态：{status}\n"
         f"{_safe_source_reference(item['source_name'], item['source_url'])}"
     )
 

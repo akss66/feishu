@@ -157,18 +157,21 @@ def test_alert_card_contains_decision_fields_and_source_link() -> None:
     encoded = json.dumps(rendered, ensure_ascii=False)
 
     for expected in (
-        "策略：默认",
-        "状态：已验证预警",
-        "风险：high",
-        "证据可信度：91",
-        "摘要：平台发布了会影响跨境卖家的规则更新。",
-        "影响：相关商品需要在生效日前完成合规检查。",
-        "判断依据：规则适用于目标卖家（原文：本规则适用于跨境卖家）",
-        "建议动作：核对受影响商品｜负责人：运营负责人｜期限：2026-07-22T00:00:00Z",
-        "不确定性：部分地区的适用范围仍待确认",
-        "原文：[平台公告](https://example.com/source/one)",
+        "关注程度：高（建议尽快处理）",
+        "信息可靠度：很高（91/100）",
+        "一句话看懂：平台发布了会影响跨境卖家的规则更新。",
+        "对店铺可能有什么影响：相关商品需要在生效日前完成合规检查。",
+        "建议你这样做：",
+        "1. 核对受影响商品（负责人：运营负责人；建议完成：2026-07-22）",
+        "为什么这样判断：规则适用于目标卖家（原文依据：本规则适用于跨境卖家）",
+        "目前还不确定：部分地区的适用范围仍待确认",
+        "分析策略：默认｜信息状态：已有可靠原文支持",
+        "查看原文：[平台公告](https://example.com/source/one)",
     ):
         assert expected in encoded
+
+    for professional_label in ("风险：high", "证据可信度：", "建议动作：", "不确定性："):
+        assert professional_label not in encoded
 
 
 def test_alert_card_rejects_markdown_injection_in_source_url() -> None:
@@ -202,7 +205,7 @@ def test_early_signal_is_forced_orange_even_when_payload_requests_red() -> None:
     encoded = json.dumps(rendered, ensure_ascii=False)
 
     assert rendered["card"]["header"]["template"] == "orange"
-    assert "早期信号·待核实" in encoded
+    assert "初步线索，暂勿直接调整业务" in encoded
     assert "激进" in encoded
 
 
@@ -297,12 +300,12 @@ def test_alert_card_sanitizes_untrusted_controls_and_preserves_unicode() -> None
     assert rendered["card"]["header"]["title"]["content"] == "高 风险 预警🙂"
     for expected in (
         "**平台规则 更新🙂**",
-        "摘要：中文 摘要 保留🚀",
-        "影响：影响 说明",
-        "判断依据：判断（原文：原 文）",
-        "建议动作：核对商品｜负责人：运 营｜期限：2026-07-22",
-        "不确定性：范围 待确认",
-        "原文：[平台公告🙂](https://example.com/source/one)",
+        "一句话看懂：中文 摘要 保留🚀",
+        "对店铺可能有什么影响：影响 说明",
+        "为什么这样判断：判断（原文依据：原 文）",
+        "1. 核对商品（负责人：运 营；建议完成：2026-07-22）",
+        "目前还不确定：范围 待确认",
+        "查看原文：[平台公告🙂](https://example.com/source/one)",
     ):
         assert expected in content
     assert not any(character in content for character in ("\x00", "\x1b", "\x7f", "\r", "\t"))
@@ -332,7 +335,7 @@ def test_oversized_alert_card_degrades_to_text_with_at_most_15_linked_items() ->
     assert "https://example.com/source/14" in rendered["text"]
     assert "https://example.com/source/15" not in rendered["text"]
     assert "策略：默认" in rendered["text"]
-    assert "状态：已验证预警" in rendered["text"]
+    assert "信息状态：已有可靠原文支持" in rendered["text"]
 
 
 def test_oversized_daily_card_degrades_to_utf8_bounded_text() -> None:
