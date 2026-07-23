@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy import case, exists, func, literal, or_, select, update
@@ -727,6 +729,61 @@ class SqlAlchemyIntelligenceRepository:
             report.status = "queued"
             return outbox_id
 
+    async def queue_report_variant(
+        self,
+        group_id: str,
+        draft: DailyReportDraft,
+        *,
+        variant: Literal["test", "correction"],
+        now: datetime,
+    ) -> int:
+        labels = {"test": "测试", "correction": "补发"}
+        if variant not in labels:
+            raise ValueError("unsupported report delivery variant")
+        payload = copy.deepcopy(draft.payload)
+        title = payload.get("title")
+        if not isinstance(title, str) or not title:
+            raise ValueError("daily report payload title is required")
+        payload["title"] = f"{labels[variant]} · {title}"
+        rendered = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+        idempotency_key = (
+            f"daily-{variant}:{group_id}:{draft.report_date.isoformat()}:{digest}"
+        )
+        async with self._session_factory.begin() as session:
+            outbox_id = (
+                await session.execute(
+                    sqlite_insert(DeliveryOutbox)
+                    .values(
+                        idempotency_key=idempotency_key,
+                        group_id=group_id,
+                        message_kind=MessageKind.DAILY_REPORT.value,
+                        payload=payload,
+                        reply_to_message_id=None,
+                        reply_in_thread=False,
+                        status="pending",
+                        attempt_count=0,
+                        created_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                    .returning(DeliveryOutbox.id)
+                )
+            ).scalar_one_or_none()
+            if outbox_id is not None:
+                return outbox_id
+            return (
+                await session.execute(
+                    select(DeliveryOutbox.id).where(
+                        DeliveryOutbox.idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one()
+
     async def queue_alerts(
         self,
         messages: tuple[DeliveryMessage, ...],
@@ -967,7 +1024,11 @@ class SqlAlchemyIntelligenceRepository:
             if updated_id is None:
                 raise StaleLeaseError("delivery lease is no longer current")
             if claim.kind is MessageKind.DAILY_REPORT:
-                report_date = _report_date_from_key(claim.idempotency_key)
+                report_date, linked_to_official_report = _report_identity_from_key(
+                    claim.idempotency_key
+                )
+                if not linked_to_official_report:
+                    return
                 report_id = (
                     await session.execute(
                         update(DailyReport)
@@ -1395,12 +1456,22 @@ def _delivery_claim(row: DeliveryOutbox) -> DeliveryClaim:
     )
 
 
-def _report_date_from_key(idempotency_key: str) -> date:
+def _report_identity_from_key(idempotency_key: str) -> tuple[date, bool]:
     try:
-        prefix, _, raw_date = idempotency_key.partition(":")
-        if prefix != "daily":
+        prefix, separator, remainder = idempotency_key.partition(":")
+        if not separator:
             raise ValueError
-        return date.fromisoformat(raw_date.rsplit(":", 1)[-1])
+        if prefix == "daily":
+            return date.fromisoformat(remainder.rsplit(":", 1)[-1]), True
+        if prefix not in {"daily-test", "daily-correction"}:
+            raise ValueError
+        parts = remainder.rsplit(":", 2)
+        if len(parts) != 3:
+            raise ValueError
+        _, raw_date, digest = parts
+        if len(digest) != 16 or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError
+        return date.fromisoformat(raw_date), False
     except ValueError as error:
         raise ValueError("invalid daily report idempotency key") from error
 

@@ -941,6 +941,57 @@ async def test_sent_report_cannot_be_overwritten(tmp_path) -> None:
         await database.dispose()
 
 
+async def test_correction_report_is_idempotent_and_marks_sent_without_official_row(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'report-correction.db'}")
+    await database.create_schema()
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 23), analyses=())
+    now = datetime(2026, 7, 23, 1, 10, tzinfo=UTC)
+    try:
+        first = await repository.queue_report_variant(
+            "chat-one", draft, variant="correction", now=now
+        )
+        second = await repository.queue_report_variant(
+            "chat-one", draft, variant="correction", now=now
+        )
+        claim = await repository.claim_delivery_by_id(first, now=now)
+        assert claim is not None
+
+        await repository.mark_delivery_sent(claim, message_id="om_correction", now=now)
+
+        async with database.session() as session:
+            outbox = await session.get(DeliveryOutbox, first)
+            reports = (await session.scalars(select(DailyReport))).all()
+
+        assert first == second
+        assert outbox is not None
+        assert outbox.idempotency_key.startswith(
+            "daily-correction:chat-one:2026-07-23:"
+        )
+        assert outbox.status == "sent"
+        assert outbox.feishu_message_id == "om_correction"
+        assert outbox.payload["title"].startswith("补发 · ")
+        assert reports == []
+    finally:
+        await database.dispose()
+
+
+async def test_report_variant_rejects_unknown_namespace(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'report-variant.db'}")
+    await database.create_schema()
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 23), analyses=())
+    try:
+        with pytest.raises(ValueError, match="unsupported report delivery variant"):
+            await repository.queue_report_variant(
+                "chat-one", draft, variant="unknown", now=NOW
+            )
+    finally:
+        await database.dispose()
+
+
 async def test_backfill_jobs_adds_missing_versions_up_to_limit(tmp_path) -> None:
     database, ingestion_repository, repository = await _repositories(tmp_path)
     try:

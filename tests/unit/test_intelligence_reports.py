@@ -325,6 +325,7 @@ class _RepositorySpy:
         self.saved: tuple[str, object, datetime] | None = None
         self.previewed: int | None = None
         self.queued: tuple[int, datetime] | None = None
+        self.variant: tuple[str, object, str, datetime] | None = None
 
     async def list_report_analyses(self, *, window_start, window_end):
         self.window = (window_start, window_end)
@@ -348,6 +349,10 @@ class _RepositorySpy:
     async def queue_report(self, report_id, *, now):
         self.queued = (report_id, now)
         return 73
+
+    async def queue_report_variant(self, group_id, draft, *, variant, now):
+        self.variant = (group_id, draft, variant, now)
+        return 83
 
 
 class _PreferenceSpy:
@@ -395,3 +400,26 @@ async def test_queue_previewed_rejects_a_report_whose_window_is_still_open() -> 
         await service.queue_previewed("chat-one", date(2026, 7, 23))
 
     assert repository.queued is None
+
+
+async def test_variant_build_does_not_save_an_official_report() -> None:
+    repository = _RepositorySpy((_analysis(1),), ())
+    now = datetime(2026, 7, 23, 1, 10, tzinfo=UTC)
+    service = DailyReportService(
+        repository,
+        DailyReportComposer(),
+        _PreferenceSpy(RiskProfile.DEFAULT),
+        timezone=ZoneInfo("Asia/Shanghai"),
+        clock=lambda: now,
+    )
+
+    outbox_id = await service.generate_variant_and_queue(
+        "chat-one", date(2026, 7, 23), variant="test"
+    )
+
+    assert outbox_id == 83
+    assert repository.saved is None
+    assert repository.previewed is None
+    assert repository.variant is not None
+    assert repository.variant[0] == "chat-one"
+    assert repository.variant[2:] == ("test", now)

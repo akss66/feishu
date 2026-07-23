@@ -4,7 +4,7 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from zoneinfo import ZoneInfo
 
 from commerce_agent.ingestion.models import Platform, TrustTier
@@ -320,19 +320,22 @@ class DailyReportService:
         self._default_profile = default_profile
         self._clock = clock
 
-    async def preview(self, group_id: str, report_date: date) -> DailyReportDraft:
+    async def build(self, group_id: str, report_date: date) -> DailyReportDraft:
         start, end = report_window(report_date, self._timezone)
         analyses = await self._repository.list_report_analyses(
             window_start=start, window_end=end
         )
         coverage = await self._repository.list_coverage(window_start=start, window_end=end)
         profile = await self._preferences.get(group_id, default=self._default_profile)
-        draft = self._composer.compose(
+        return self._composer.compose(
             report_date=report_date,
             analyses=analyses,
             coverage=coverage,
             profile=profile,
         )
+
+    async def preview(self, group_id: str, report_date: date) -> DailyReportDraft:
+        draft = await self.build(group_id, report_date)
         report_id = await self._repository.save_report(group_id, draft, now=self._clock())
         await self._repository.mark_report_previewed(report_id)
         return draft
@@ -348,6 +351,21 @@ class DailyReportService:
     async def generate_and_queue(self, group_id: str, report_date: date) -> int:
         await self.preview(group_id, report_date)
         return await self.queue_previewed(group_id, report_date)
+
+    async def generate_variant_and_queue(
+        self,
+        group_id: str,
+        report_date: date,
+        *,
+        variant: Literal["test", "correction"],
+    ) -> int:
+        draft = await self.build(group_id, report_date)
+        return await self._repository.queue_report_variant(
+            group_id,
+            draft,
+            variant=variant,
+            now=self._clock(),
+        )
 
 
 def _alert_actions(

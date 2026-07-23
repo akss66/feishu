@@ -107,6 +107,7 @@ git commit -m "fix: protect open daily report windows"
 
 **Interfaces:**
 - Produces: `SqlAlchemyIntelligenceRepository.queue_report_variant(group_id: str, draft: DailyReportDraft, *, variant: Literal["test", "correction"], now: datetime) -> int`.
+- Changes: `mark_delivery_sent` updates `daily_reports` only for the official `daily:` namespace; valid test/correction keys update only their outbox row.
 - Produces: `DailyReportService.build(group_id: str, report_date: date) -> DailyReportDraft`.
 - Produces: `DailyReportService.generate_variant_and_queue(group_id: str, report_date: date, *, variant: Literal["test", "correction"]) -> int`.
 
@@ -127,8 +128,10 @@ async def test_report_variant_uses_separate_idempotency_and_does_not_create_dail
     )
 
     assert first == second
-    # Assert one DAILY_REPORT outbox row with a daily-correction prefix.
-    # Assert no DailyReport row exists for chat-one/2026-07-23.
+    assert outbox.idempotency_key.startswith("daily-correction:chat-one:2026-07-23:")
+    assert outbox.status == "sent"
+    assert outbox.feishu_message_id == "om_correction"
+    assert reports == []
 ```
 
 Also assert `variant="unknown"` raises `ValueError` before opening a transaction.
@@ -152,6 +155,8 @@ async def queue_report_variant(self, group_id, draft, *, variant, now):
 ```
 
 Copy the trusted payload before prefixing its title with `测试 · ` or `补发 · `; do not mutate `draft.payload`.
+
+Update the daily-report key parser to accept the two variant prefixes and validate their 16-character lowercase hexadecimal digest. The successful-delivery transaction must return after updating a valid variant outbox row, without looking for a linked `DailyReport`.
 
 - [ ] **Step 4: Add service build/variant tests and implement composition separation**
 
