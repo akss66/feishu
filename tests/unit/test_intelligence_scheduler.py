@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from commerce_agent.intelligence.reports import ReportAlreadySent
 from commerce_agent.intelligence.scheduler import (
     ANALYSIS_JOB_ID,
     DAILY_JOB_ID,
@@ -170,6 +171,24 @@ async def test_active_binding_absence_safely_skips_alerts_and_daily_report() -> 
     assert analysis.calls == [10]
     assert alerts.calls == []
     assert reports.calls == []
+
+
+async def test_already_sent_daily_report_is_an_idempotent_scheduler_noop(caplog) -> None:
+    class AlreadySentReports(Reports):
+        async def generate_and_queue(self, group_id: str, report_date: object) -> int:
+            del group_id, report_date
+            raise ReportAlreadySent("private group and report details")
+
+    scheduler, backend, *_ = build_scheduler()
+    scheduler._reports = AlreadySentReports()
+    scheduler.start()
+
+    with caplog.at_level(logging.INFO):
+        await backend.jobs[DAILY_JOB_ID][0]()
+
+    assert "daily report already sent; skipping" in caplog.text
+    assert "intelligence daily job failed" not in caplog.text
+    assert "private" not in caplog.text
 
 
 async def test_jobs_contain_failures_without_logging_sensitive_details(

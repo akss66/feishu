@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from commerce_agent.intelligence.reports import ReportAlreadySent
+
 ANALYSIS_JOB_ID = "intelligence-analysis-drain"
 DELIVERY_JOB_ID = "intelligence-delivery-retry"
 DAILY_JOB_ID = "intelligence-daily-report"
@@ -143,6 +145,8 @@ class IntelligenceScheduler:
             if group_id is not None:
                 report_date = self._clock().astimezone(self._timezone).date()
                 await self._reports.generate_and_queue(group_id, report_date)
+        except ReportAlreadySent:
+            _LOGGER.info("daily report already sent; skipping")
         except Exception as error:
             _LOGGER.error(
                 "intelligence daily job failed (exception_type=%s)",
