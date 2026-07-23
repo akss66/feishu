@@ -8,7 +8,7 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
-from typing import NoReturn, Protocol, TextIO
+from typing import Literal, NoReturn, Protocol, TextIO
 
 from lark_channel import FeishuChannel, LogLevel, SecurityConfig
 from openai import AsyncOpenAI
@@ -76,6 +76,10 @@ class IntelligenceCliApplication(Protocol):
 
     async def send_report(self, report_date: date) -> dict[str, int | str]: ...
 
+    async def test_send_report(self, report_date: date) -> dict[str, int | str]: ...
+
+    async def resend_report(self, report_date: date) -> dict[str, int | str]: ...
+
     async def preview_alerts(self, since_hours: int) -> dict[str, int | str]: ...
 
     async def health(self) -> dict[str, int | str]: ...
@@ -124,9 +128,10 @@ def build_parser() -> argparse.ArgumentParser:
     report_commands = report.add_subparsers(dest="report_command", required=True)
     preview = report_commands.add_parser("preview")
     preview.add_argument("--date", type=_strict_date, required=True)
-    send = report_commands.add_parser("send")
-    send.add_argument("--date", type=_strict_date, required=True)
-    send.add_argument("--confirm", action="store_true")
+    for command in ("send", "test-send", "resend"):
+        sending = report_commands.add_parser(command)
+        sending.add_argument("--date", type=_strict_date, required=True)
+        sending.add_argument("--confirm", action="store_true")
 
     alerts = commands.add_parser("alerts")
     alert_commands = alerts.add_subparsers(dest="alerts_command", required=True)
@@ -167,7 +172,11 @@ async def run_cli(
         destination.write("error=invalid_arguments\n")
         return 2
 
-    if args.command == "report" and args.report_command == "send" and not args.confirm:
+    if (
+        args.command == "report"
+        and args.report_command in {"send", "test-send", "resend"}
+        and not args.confirm
+    ):
         destination.write("error=confirm_required\n")
         return 2
 
@@ -187,8 +196,12 @@ async def run_cli(
             )
         elif args.command == "report" and args.report_command == "preview":
             result = await current.preview_report(args.date)
-        elif args.command == "report":
+        elif args.command == "report" and args.report_command == "send":
             result = await current.send_report(args.date)
+        elif args.command == "report" and args.report_command == "test-send":
+            result = await current.test_send_report(args.date)
+        elif args.command == "report":
+            result = await current.resend_report(args.date)
         elif args.command == "alerts":
             result = await current.preview_alerts(args.since_hours)
         else:
@@ -274,6 +287,29 @@ class ProductionCliApplication:
     async def send_report(self, report_date: date) -> dict[str, int | str]:
         group_id = await self._active_group()
         outbox_id = await self._runtime.reports.queue_previewed(group_id, report_date)
+        summary = await self._runtime.delivery.send_id(outbox_id)
+        return {
+            "status": "sent" if summary.sent else "partial",
+            "sent": summary.sent,
+            "failed": summary.failed,
+            "skipped": summary.skipped,
+        }
+
+    async def test_send_report(self, report_date: date) -> dict[str, int | str]:
+        return await self._send_report_variant(report_date, "test")
+
+    async def resend_report(self, report_date: date) -> dict[str, int | str]:
+        return await self._send_report_variant(report_date, "correction")
+
+    async def _send_report_variant(
+        self, report_date: date, variant: Literal["test", "correction"]
+    ) -> dict[str, int | str]:
+        group_id = await self._active_group()
+        outbox_id = await self._runtime.reports.generate_variant_and_queue(
+            group_id,
+            report_date,
+            variant=variant,
+        )
         summary = await self._runtime.delivery.send_id(outbox_id)
         return {
             "status": "sent" if summary.sent else "partial",

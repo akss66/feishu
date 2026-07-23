@@ -46,6 +46,14 @@ class FakeCliApplication:
         self.delivery_calls += 1
         return await self._call("send_report", report_date)
 
+    async def test_send_report(self, report_date: date) -> dict[str, int | str]:
+        self.delivery_calls += 1
+        return await self._call("test_send_report", report_date)
+
+    async def resend_report(self, report_date: date) -> dict[str, int | str]:
+        self.delivery_calls += 1
+        return await self._call("resend_report", report_date)
+
     async def preview_alerts(self, since_hours: int) -> dict[str, int | str]:
         return await self._call("preview_alerts", since_hours)
 
@@ -72,6 +80,18 @@ def test_parser_exposes_only_the_documented_command_surface() -> None:
     )
     assert (
         parser.parse_args(["report", "send", "--date", "2026-07-21", "--confirm"]).confirm is True
+    )
+    assert (
+        parser.parse_args(
+            ["report", "test-send", "--date", "2026-07-21", "--confirm"]
+        ).confirm
+        is True
+    )
+    assert (
+        parser.parse_args(
+            ["report", "resend", "--date", "2026-07-21", "--confirm"]
+        ).confirm
+        is True
     )
     assert parser.parse_args(["alerts", "preview", "--since-hours", "24"]).since_hours == 24
     assert parser.parse_args(["health"]).command == "health"
@@ -187,6 +207,17 @@ async def test_report_send_requires_confirm_without_building_application() -> No
     assert build_calls == 0
 
 
+@pytest.mark.parametrize("command", ["test-send", "resend"])
+async def test_report_variant_send_requires_confirmation(command: str) -> None:
+    app = FakeCliApplication()
+
+    code, output = await invoke(["report", command, "--date", "2026-07-23"], app)
+
+    assert code == 2
+    assert output == "error=confirm_required\n"
+    assert app.calls == []
+
+
 async def test_confirmed_report_send_delivers_once() -> None:
     app = FakeCliApplication(result={"status": "sent", "sent": 1, "failed": 0})
 
@@ -194,6 +225,25 @@ async def test_confirmed_report_send_delivers_once() -> None:
 
     assert code == 0
     assert app.delivery_calls == 1
+    assert output == "failed=0 sent=1 status=sent\n"
+
+
+@pytest.mark.parametrize(
+    ("command", "method"),
+    [("test-send", "test_send_report"), ("resend", "resend_report")],
+)
+async def test_confirmed_report_variant_send_dispatches_once(
+    command: str, method: str
+) -> None:
+    app = FakeCliApplication(result={"status": "sent", "sent": 1, "failed": 0})
+
+    code, output = await invoke(
+        ["report", command, "--date", "2026-07-23", "--confirm"], app
+    )
+
+    assert code == 0
+    assert app.delivery_calls == 1
+    assert app.calls == [(method, date(2026, 7, 23))]
     assert output == "failed=0 sent=1 status=sent\n"
 
 

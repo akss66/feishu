@@ -212,6 +212,23 @@ powershell.exe -NoProfile -File .\scripts\run-commerce-agent.ps1
 powershell.exe -NoProfile -File .\scripts\install-commerce-agent-autostart.ps1 -StartNow
 ```
 
+## 日报测试、正式发送与补发隔离
+
+正式日报只能在对应的北京时间 09:00 窗口结束后发送；窗口尚未结束时，命令返回
+`report_window_open`，不得提前占用第二天的正式日报日期。
+
+```powershell
+# 只发送测试卡片，不创建或更新正式 daily_reports 记录
+python -m commerce_agent.intelligence_cli report test-send --date 2026-07-23 --confirm
+
+# 正式日报已经发送但内容需要更正时，使用独立补发审计编号
+python -m commerce_agent.intelligence_cli report resend --date 2026-07-23 --confirm
+```
+
+测试使用 `daily-test:`，补发使用 `daily-correction:`，正式日报继续使用 `daily:`。
+两条发送命令都必须显式提供 `--confirm`；相同日期和相同内容重复执行保持幂等。
+不要通过删除或重置已发送记录来补发。
+
 运行脚本只设置 Cloudflare DoH、采集、分析、日报、预警、问答、INFO 日志和 60 秒模型超时；
 应用仍按现有 Pydantic Settings 规则在进程内加载本机配置。安装脚本创建当前 Windows 用户登录触发的
 `CrossBorderCommerceAgent` 计划任务，限制为普通用户权限，重复启动采用 `IgnoreNew`，失败后每分钟
