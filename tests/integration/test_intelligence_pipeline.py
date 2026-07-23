@@ -224,7 +224,7 @@ async def build_offline_pipeline(tmp_path) -> OfflinePipeline:
             preferences,
             timezone=ZoneInfo("Asia/Shanghai"),
             default_profile=RiskProfile.DEFAULT,
-            clock=lambda: NOW,
+            clock=lambda: NOW + timedelta(hours=14),
         ),
         qa=QaService(
             CorpusRetriever(repository),
