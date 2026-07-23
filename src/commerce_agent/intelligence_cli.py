@@ -16,7 +16,7 @@ from openai import AsyncOpenAI
 from commerce_agent.config import Settings
 from commerce_agent.integrations.deepseek import DeepSeekGateway
 from commerce_agent.intelligence.analyzer import InvalidModelOutput
-from commerce_agent.intelligence.reports import ReportAlreadySent
+from commerce_agent.intelligence.reports import ReportAlreadySent, ReportWindowOpen
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.group_bindings import SqlAlchemyGroupBindingStore
 from commerce_agent.runtime import IntelligenceRuntime, _build_intelligence
@@ -221,6 +221,8 @@ async def run_cli(
 def controlled_cli_error(error: Exception) -> str:
     if isinstance(error, ReportAlreadySent):
         return "report_already_sent"
+    if isinstance(error, ReportWindowOpen):
+        return "report_window_open"
     if isinstance(error, InvalidModelOutput):
         return "invalid_model_output"
     if isinstance(error, TimeoutError):

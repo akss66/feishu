@@ -324,6 +324,7 @@ class _RepositorySpy:
         self.coverage = coverage
         self.saved: tuple[str, object, datetime] | None = None
         self.previewed: int | None = None
+        self.queued: tuple[int, datetime] | None = None
 
     async def list_report_analyses(self, *, window_start, window_end):
         self.window = (window_start, window_end)
@@ -339,6 +340,14 @@ class _RepositorySpy:
 
     async def mark_report_previewed(self, report_id):
         self.previewed = report_id
+
+    async def get_report_id(self, group_id, report_date):
+        del group_id, report_date
+        return 41
+
+    async def queue_report(self, report_id, *, now):
+        self.queued = (report_id, now)
+        return 73
 
 
 class _PreferenceSpy:
@@ -369,3 +378,20 @@ async def test_preview_loads_current_group_profile_and_persists_that_payload() -
     assert draft.payload["risk_profile"] == "conservative"
     assert repository.saved == ("chat-one", draft, now)
     assert repository.previewed == 41
+
+
+async def test_queue_previewed_rejects_a_report_whose_window_is_still_open() -> None:
+    repository = _RepositorySpy((), ())
+    now = datetime(2026, 7, 22, 5, tzinfo=UTC)
+    service = DailyReportService(
+        repository,
+        DailyReportComposer(),
+        _PreferenceSpy(RiskProfile.DEFAULT),
+        timezone=ZoneInfo("Asia/Shanghai"),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(RuntimeError, match="daily report window is still open"):
+        await service.queue_previewed("chat-one", date(2026, 7, 23))
+
+    assert repository.queued is None

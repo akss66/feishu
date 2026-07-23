@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from commerce_agent.intelligence.models import RiskProfile
+from commerce_agent.intelligence.reports import ReportWindowOpen
 from commerce_agent.intelligence_cli import (
     MAX_ALERT_PREVIEW_HOURS,
     MAX_BATCH_LIMIT,
@@ -254,6 +255,18 @@ async def test_target_failure_is_safe_and_exits_two() -> None:
     assert output == "error=target_not_found\n"
     assert "chat-one" not in output
     assert "token" not in output
+
+
+async def test_open_report_window_returns_a_safe_cli_error() -> None:
+    app = FakeCliApplication(failure=ReportWindowOpen("private report timing"))
+
+    code, output = await invoke(
+        ["report", "send", "--date", "2026-07-23", "--confirm"], app
+    )
+
+    assert code == 3
+    assert output == "error=report_window_open\n"
+    assert "private" not in output
 
 
 @pytest.mark.parametrize(

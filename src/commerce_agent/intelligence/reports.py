@@ -74,6 +74,10 @@ class ReportAlreadySent(RuntimeError):
     pass
 
 
+class ReportWindowOpen(RuntimeError):
+    pass
+
+
 def report_window(report_date: date, timezone: ZoneInfo) -> tuple[datetime, datetime]:
     end_local = datetime.combine(report_date, time(hour=9), tzinfo=timezone)
     start_local = end_local - timedelta(days=1)
@@ -334,8 +338,12 @@ class DailyReportService:
         return draft
 
     async def queue_previewed(self, group_id: str, report_date: date) -> int:
+        _, window_end = report_window(report_date, self._timezone)
+        now = self._clock()
+        if now < window_end:
+            raise ReportWindowOpen("daily report window is still open")
         report_id = await self._repository.get_report_id(group_id, report_date)
-        return await self._repository.queue_report(report_id, now=self._clock())
+        return await self._repository.queue_report(report_id, now=now)
 
     async def generate_and_queue(self, group_id: str, report_date: date) -> int:
         await self.preview(group_id, report_date)
