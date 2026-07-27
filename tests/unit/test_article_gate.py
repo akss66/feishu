@@ -103,11 +103,11 @@ def test_public_article_recognizes_each_platform(
 @pytest.mark.parametrize(
     ("platform", "mention"),
     [
-        (Platform.AMAZON, "浜氶┈閫婂崠瀹舵斂绛?"),
-        (Platform.SHEIN, "甯岄煶骞冲彴瑙勫垯"),
-        (Platform.ALIEXPRESS, "閫熷崠閫氬悎瑙勬洿鏂?"),
-        (Platform.COUPANG, "閰锋編璺ㄥ鍗栧"),
-        (Platform.TIKTOK_SHOP, "TTS 搴楅摵娌荤悊"),
+        (Platform.AMAZON, "亚马逊卖家政策"),
+        (Platform.SHEIN, "希音平台规则"),
+        (Platform.ALIEXPRESS, "速卖通合规更新"),
+        (Platform.COUPANG, "酷澎跨境卖家"),
+        (Platform.TIKTOK_SHOP, "TTS 店铺治理"),
     ],
 )
 def test_article_gate_recognizes_controlled_chinese_platform_aliases(
@@ -115,7 +115,7 @@ def test_article_gate_recognizes_controlled_chinese_platform_aliases(
     mention: str,
 ) -> None:
     validate_public_article(
-        body=article_html(f"{mention}鍙戠敓鍙樺寲锛屽晢瀹堕渶瑕佹牳鏌ュ晢鍝佸拰璐︽埛銆?"),
+        body=article_html(f"{mention}发生变化，商家需要核查商品和账户。"),
         content_type="text/html",
         platforms=(platform,),
     )
@@ -123,11 +123,11 @@ def test_article_gate_recognizes_controlled_chinese_platform_aliases(
 
 def test_title_prefilter_uses_the_same_platform_aliases_as_body_gate() -> None:
     assert mentions_target_platform(
-        "浜氶┈閫婃柊瑙勫奖鍝嶈法澧冨崠瀹?",
+        "亚马逊新规影响跨境卖家",
         (Platform.AMAZON,),
     )
     assert not mentions_target_platform(
-        "鏈湴浣撹偛璧涗簨涓捐",
+        "本地体育赛事举行",
         (Platform.AMAZON, Platform.TEMU),
     )
 
@@ -135,17 +135,17 @@ def test_title_prefilter_uses_the_same_platform_aliases_as_body_gate() -> None:
 @pytest.mark.parametrize(
     "marker",
     [
-        "姝ｅ湪杩涜瀹夊叏妫€鏌ワ紝璇风◢鍊?",
-        "璇疯緭鍏ラ獙璇佺爜鍚庣户缁?",
-        "璇风櫥褰曞悗缁х画闃呰",
-        "浼氬憳涓撲韩鍐呭",
-        "浠樿垂闃呰鍚庢煡鐪嬪叏鏂?",
+        "正在进行安全检查，请稍候",
+        "请输入验证码后继续",
+        "请登录后继续阅读",
+        "会员专享内容",
+        "付费阅读后查看全文",
     ],
 )
 def test_public_article_rejects_chinese_access_walls(marker: str) -> None:
     with pytest.raises(ArticleGateError, match="article_access_wall"):
         validate_public_article(
-            body=article_html(f"浜氶┈閫婂崠瀹舵敞鎰忥細{marker}"),
+            body=article_html(f"亚马逊卖家注意：{marker}"),
             content_type="text/html",
             platforms=(Platform.AMAZON,),
         )
