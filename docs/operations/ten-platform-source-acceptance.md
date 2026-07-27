@@ -108,8 +108,10 @@
 - Full-text storage permission: not granted; metadata only
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
-- Live smoke date and result: 2026-07-22 HTTP 429; not rerun
-- Final status: allowed / enabled=true (metadata discovery only)
+- Live smoke date and result: 2026-07-22 and 2026-07-27 both returned HTTP 429; the
+  2026-07-27 check used one request, zero retries, and stopped the GDELT pass immediately.
+- Final status: allowed / enabled=true (metadata discovery only); current availability is
+  degraded by upstream rate limiting and the source circuit may suspend scheduled attempts.
 
 ## media-gdelt-temu
 - Platform: TEMU
@@ -348,3 +350,14 @@ URL 只计 1 个来源。摘要和元数据线索不计入有效来源。
 - 10 个 GDELT 发现源已启用，但仍是元数据线索；只有受控取得并通过质量门的原文才进入
   LLM 分析。
 - 未配置的授权媒体数据商使用禁用适配器，返回空结果，不产生网络请求。
+
+## 2026-07-27 受控网络 smoke 结论
+
+- Amazon SP-API RSS 和 eBay RSS 在本轮白名单 smoke 中先完成请求。
+- 第一条 GDELT Amazon 查询返回 HTTP 429。
+- GDELT 请求关闭重试、关闭重定向且只执行一次；未更换身份、代理或查询方式。
+- 收到 429 后停止剩余 9 个 GDELT 平台探测，未请求任何媒体原文。
+- `GDELT_ORIGINAL_FETCH_ENABLED` 保持 `false`。在 GDELT 发现查询成功且至少一个
+  `allowed_public` 原文通过质量门之前，不得打开。
+- 10 个 GDELT 来源仍作为配置层的元数据发现入口；运行时必须如实报告 rate-limited，
+  连续失败达到现有阈值后由来源熔断器暂停，不影响官方来源和 09:00 日报。
