@@ -20,7 +20,7 @@ from commerce_agent.ingestion.http import (
 )
 from commerce_agent.ingestion.models import CollectedFailure, CollectedItem, FetchContext, Trigger
 from commerce_agent.ingestion.registry import SourceRegistry
-from commerce_agent.ingestion.security import UrlSafetyError
+from commerce_agent.ingestion.security import UrlSafetyError, UrlSafetyPolicy
 
 _REGISTRY_PATH = (
     Path(__file__).parents[2] / "src" / "commerce_agent" / "sources" / "public_sources.yaml"
@@ -29,6 +29,25 @@ _SMOKE_SOURCES = (
     ("media-cifnews-cross-border", "cifnews.com"),
     ("media-100ec-cross-border", "100ec.cn"),
 )
+
+
+def test_request_summary_redacts_query_values_without_losing_host_and_path() -> None:
+    client = _TwoRequestBudget(_NeverCalledHttpPort())
+    client.requests.append(
+        FetchRequest(
+            url=(
+                "https://news.example.com/path/to/article"
+                "?token=private-marker&safe=value"
+            ),
+            allowed_hosts=("news.example.com",),
+        )
+    )
+
+    summary = _request_summary(client)
+
+    assert "https://news.example.com/path/to/article" in summary
+    assert "private-marker" not in summary
+    assert "safe=value" not in summary
 
 
 @pytest.mark.skipif(
@@ -114,9 +133,16 @@ class _TwoRequestBudget:
         return response
 
 
+class _NeverCalledHttpPort:
+    async def get(self, request: FetchRequest) -> FetchResponse:
+        del request
+        raise AssertionError("redaction regression must not perform a network request")
+
+
 def _request_summary(client: _TwoRequestBudget) -> str:
     statuses = [response.status_code for response in client.responses]
-    urls = [request.url for request in client.requests]
+    redactor = UrlSafetyPolicy()
+    urls = [redactor.redact_for_log(request.url) for request in client.requests]
     return f"requests={client.request_count}; urls={urls!r}; statuses={statuses!r}"
 
 
