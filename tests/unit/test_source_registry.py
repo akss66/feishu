@@ -23,6 +23,9 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "ingestion"
 PUBLIC_SOURCES = (
     Path(__file__).parents[2] / "src" / "commerce_agent" / "sources" / "public_sources.yaml"
 )
+SOURCE_ACCEPTANCE = (
+    Path(__file__).parents[2] / "docs" / "operations" / "ten-platform-source-acceptance.md"
+)
 
 BALANCED_REVIEW_SOURCE_IDS = {
     "amazon-seller-blog",
@@ -84,7 +87,16 @@ OUT_OF_SCOPE_STATUS = {
         False,
     ),
     "media-ecommercebytes-feed": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
-    "media-gdelt-cross-border": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-amazon": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-temu": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-shein": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-shopee": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-ebay": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-coupang": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-ozon": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-joybuy": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-tiktok-shop": (ComplianceStatus.ALLOWED, False),
     "media-marketplace-pulse": (ComplianceStatus.DENIED, False),
     "media-reuters-retail": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
 }
@@ -448,6 +460,89 @@ def test_public_registry_has_required_platform_coverage_and_seed_mix() -> None:
         ), platform
 
 
+def test_each_platform_has_two_registered_candidate_publishers() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+
+    for platform in Platform:
+        candidates = {
+            source.publisher_key
+            for source in registry.sources
+            if platform in source.platforms and source.publisher_key
+        }
+        assert len(candidates) >= 2, platform
+
+
+def test_public_registry_has_one_bounded_gdelt_query_per_platform() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    gdelt = tuple(
+        source
+        for source in registry.sources
+        if source.adapter is SourceAdapter.GDELT
+    )
+
+    assert len(gdelt) == len(Platform)
+    assert {source.platforms[0] for source in gdelt} == set(Platform)
+    for source in gdelt:
+        assert len(source.platforms) == 1
+        assert source.content_scope is ContentScope.METADATA_ONLY
+        assert source.enabled is False
+        assert source.collector_config["item_limit"] == 25
+        query = parse_qs(urlsplit(source.entry_url).query)
+        assert query["mode"] == ["artlist"]
+        assert query["format"] == ["json"]
+        assert query["maxrecords"] == ["25"]
+        assert query["timespan"] == ["1d"]
+        assert query["sort"] == ["datedesc"]
+
+
+def test_public_registry_includes_reviewed_ten_platform_official_candidates() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    expected = {
+        "amazon-about-small-business": Platform.AMAZON,
+        "temu-press-corner": Platform.TEMU,
+        "shein-group-newsroom": Platform.SHEIN,
+        "alibaba-group-news": Platform.ALIEXPRESS,
+        "sea-group-news": Platform.SHOPEE,
+        "ebay-press-room": Platform.EBAY,
+        "coupang-korean-newsroom": Platform.COUPANG,
+        "ozon-investor-news": Platform.OZON,
+        "jd-corporate-blog": Platform.JOYBUY,
+        "tiktok-newsroom": Platform.TIKTOK_SHOP,
+    }
+
+    for source_id, platform in expected.items():
+        source = registry.require(source_id)
+        assert source.platforms == (platform,)
+        assert source.trust_tier is TrustTier.OFFICIAL
+        assert source.publisher_key
+
+
+def test_source_acceptance_register_covers_new_candidate_sources() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    acceptance = SOURCE_ACCEPTANCE.read_text(encoding="utf-8")
+    candidate_ids = {
+        source.source_id
+        for source in registry.sources
+        if source.reviewed_at == date(2026, 7, 27)
+    }
+
+    assert candidate_ids
+    assert all(f"## {source_id}" in acceptance for source_id in candidate_ids)
+    for label in (
+        "Platform:",
+        "Publisher:",
+        "Entry URL:",
+        "Terms evidence:",
+        "Robots evidence:",
+        "Full-text storage permission:",
+        "90-day relevance evidence:",
+        "Offline fixture:",
+        "Live smoke date and result:",
+        "Final status:",
+    ):
+        assert acceptance.count(label) >= len(candidate_ids)
+
+
 def test_public_registry_applies_balanced_review_decisions_without_scope_drift() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     reviewed = tuple(registry.require(source_id) for source_id in BALANCED_REVIEW_SOURCE_IDS)
@@ -508,11 +603,29 @@ def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled(
         assert source.enabled is False
 
 
+def test_requested_chinese_media_candidates_are_registered_but_disabled() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    expected = {
+        "media-cifnews-cross-border": "cifnews.com",
+        "media-ennews-cross-border": "ennews.com",
+        "media-chwang-cross-border": "chwang.com",
+        "media-dsb-cross-border": "dsb.cn",
+        "media-100ec-cross-border": "100ec.cn",
+    }
+
+    for source_id, publisher_key in expected.items():
+        source = registry.require(source_id)
+        assert source.publisher_key == publisher_key
+        assert source.trust_tier is TrustTier.MEDIA
+        assert source.content_scope is ContentScope.METADATA_ONLY
+        assert source.enabled is False
+
+
 def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     amazon = registry.require("amazon-sp-api-changelog-rss")
     ebay = registry.require("ebay-newsroom-rss")
-    gdelt = registry.require("media-gdelt-cross-border")
+    gdelt = registry.require("media-gdelt-amazon")
 
     assert amazon.entry_url == "https://developer-docs.amazon/sp-api/changelog.rss"
     assert amazon.collector is CollectorKind.RSS
@@ -524,7 +637,7 @@ def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() ->
     assert gdelt.collector is CollectorKind.API
     assert gdelt.content_scope is ContentScope.METADATA_ONLY
     assert gdelt.publisher_key is None
-    assert set(gdelt.platforms) == set(Platform)
+    assert gdelt.platforms == (Platform.AMAZON,)
     assert gdelt.enabled is False
     assert gdelt.collector_config == {
         "items_path": "$.articles",
@@ -532,24 +645,12 @@ def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() ->
         "title_field": "$.title",
         "published_at_field": "$.seendate",
         "publisher_field": "$.domain",
-        "item_limit": 50,
+        "item_limit": 25,
     }
     query = parse_qs(urlsplit(gdelt.entry_url).query)
     assert query["mode"] == ["artlist"]
     assert query["format"] == ["json"]
-    assert query["maxrecords"] == ["50"]
+    assert query["maxrecords"] == ["25"]
     assert query["timespan"] == ["1d"]
     assert query["sort"] == ["datedesc"]
-    for platform_name in (
-        "Amazon",
-        "TEMU",
-        "SHEIN",
-        "AliExpress",
-        "Shopee",
-        "eBay",
-        "Coupang",
-        "Ozon",
-        "Joybuy",
-        "TikTok Shop",
-    ):
-        assert platform_name in query["query"][0]
+    assert "Amazon marketplace" in query["query"][0]

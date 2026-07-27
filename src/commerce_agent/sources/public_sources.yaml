@@ -57,6 +57,26 @@ sources:
     robots_url: https://sellercentral.amazon.com/robots.txt
     compliance_notes: Anonymous access provides read-only forum content without a redirect; forum guidance references an Agent Policy that could not be verified, while robots explicitly allows /seller-forums; no login or redirect bypass was used, so review remains pending.
 
+  - source_id: amazon-about-small-business
+    name: About Amazon Small Business
+    entry_url: https://www.aboutamazon.com/news/small-business
+    platforms: [amazon]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: About Amazon
+    publisher_key: aboutamazon.com
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.aboutamazon.com/terms-of-use
+    robots_url: https://www.aboutamazon.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as an official public candidate only. Full-text storage permission, robots behavior, page selectors, and ninety-day platform relevance have not been accepted, so collection remains disabled.
+    collector_config: *html_config
+
   # Temu terms prohibit crawling or scraping; these entries are visible but denied.
   - &temu
     source_id: temu-seller-center
@@ -88,6 +108,26 @@ sources:
     entry_url: https://www.temu.com/support-center.html
     robots_url: https://www.temu.com/robots.txt
 
+  - source_id: temu-press-corner
+    name: Temu Press Corner
+    entry_url: https://www.temu.com/br-en/press.html
+    platforms: [temu]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: Temu
+    publisher_key: temu.com
+    compliance: denied
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.temu.com/terms-of-use.html
+    robots_url: https://www.temu.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered for traceability, but Temu terms prohibit automated crawling and scraping. No collection or full-text storage is permitted unless written authorization changes this decision.
+    collector_config: *html_config
+
   # SHEIN Group terms expressly disallow automated indexing or access.
   - &shein
     source_id: shein-group-newsroom
@@ -96,6 +136,9 @@ sources:
     platforms: [shein]
     trust_tier: official
     collector: html
+    content_scope: metadata_only
+    attribution: SHEIN Group
+    publisher_key: sheingroup.com
     compliance: denied
     enabled: false
     regions: [global]
@@ -149,6 +192,26 @@ sources:
     entry_url: https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html
     robots_url: https://terms.alicdn.com/robots.txt
 
+  - source_id: alibaba-group-news
+    name: Alibaba Group News and Resources
+    entry_url: https://www.alibabagroup.com/en-US/news-and-resource
+    platforms: [aliexpress]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: Alibaba Group
+    publisher_key: alibabagroup.com
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.alibabagroup.com/en-US/terms-of-use
+    robots_url: https://www.alibabagroup.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as an official corporate-news candidate. Automated retrieval and full-text storage permissions have not been established, and AliExpress relevance sampling is incomplete.
+    collector_config: *html_config
+
   # Regional Shopee seller pages require prior written authorization for automated collection.
   - &shopee
     source_id: shopee-sg-seller-education
@@ -185,6 +248,26 @@ sources:
     terms_url: https://shopee.ph/legaldoc/termsOfService/
     robots_url: https://seller.shopee.ph/robots.txt
     compliance_notes: Anonymous access reaches the Philippines education hub without a redirect; Shopee terms require prior written permission for automation; robots permits /edu/home; no login or redirect bypass was used, so authorization is required.
+
+  - source_id: sea-group-news
+    name: Sea Group News
+    entry_url: https://www.sea.com/news
+    platforms: [shopee]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: Sea Limited
+    publisher_key: sea.com
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.sea.com/terms
+    robots_url: https://www.sea.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as Shopee's parent-company news candidate. Collection terms, selectors, full-text storage permission, and recent Shopee relevance have not yet passed acceptance.
+    collector_config: *html_config
 
   # eBay explicitly publishes the newsroom RSS endpoint for RSS-reader subscription.
   - source_id: ebay-newsroom-rss
@@ -281,6 +364,26 @@ sources:
     entry_url: https://globalsellers.coupang.com/en/step-by-step-guide/
     compliance_notes: Anonymous access reaches the Step-by-step Guide without a redirect; no independent terms page is published and the official page/footer show no automation prohibition; robots has an empty Disallow. The 2026-07-22 live smoke returned a public HTTP 200 response but no usable content; structure diagnosis found no article-list selector to correct safely, so no retry or bypass was used and review remains pending.
 
+  - source_id: coupang-korean-newsroom
+    name: Coupang Korean Newsroom
+    entry_url: https://news.coupang.com/
+    platforms: [coupang]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: Coupang
+    publisher_key: coupang.com
+    compliance: pending_review
+    enabled: false
+    regions: [kr]
+    language_hint: ko
+    interval_minutes: 120
+    terms_url: https://news.coupang.com/
+    robots_url: https://news.coupang.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as the Korean corporate-news candidate. Automated collection terms, article selectors, full-text storage permission, and marketplace relevance have not passed acceptance.
+    collector_config: *html_config
+
   # Ozon regional redirects and publisher terms require review before collection.
   - &ozon
     source_id: ozon-seller-news
@@ -311,6 +414,26 @@ sources:
     name: Ozon Seller Documents Topic
     entry_url: https://seller.ozon.ru/media/tags/dokumenty/
     compliance_notes: Anonymous access to the dokumenty topic entry enters a repeating __rr redirect loop; the Ozon terms URL also redirects so automation terms are unverified; robots enters the same loop; no redirect bypass was used, so review remains pending.
+
+  - source_id: ozon-investor-news
+    name: Ozon Investor News
+    entry_url: https://ir.ozon.com/news-and-events/news/
+    platforms: [ozon]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: Ozon
+    publisher_key: ozon.com
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://ir.ozon.com/
+    robots_url: https://ir.ozon.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as Ozon's investor-news candidate. Terms, robots behavior, selectors, full-text permission, and ninety-day seller-policy relevance remain unverified.
+    collector_config: *html_config
 
   # Joybuy public newsrooms passed their 2026-07-22 live smokes at low frequency.
   - &joybuy
@@ -353,6 +476,26 @@ sources:
     language_hint: nl
     compliance_notes: Anonymous access reaches the Dutch newsroom without a redirect; the official site shows no automation terms prohibition and robots permits /nl/news/. The 2026-07-22 live smoke collected nine public items without login, redirect bypass, or other circumvention, so low-frequency collection remains allowed.
 
+  - source_id: jd-corporate-blog
+    name: JD Corporate Blog
+    entry_url: https://jdcorporateblog.com/
+    platforms: [joybuy]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: JD.com
+    publisher_key: jd.com
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://jdcorporateblog.com/
+    robots_url: https://jdcorporateblog.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as Joybuy's parent-company news candidate. Collection terms, full-text storage permission, selectors, and recent Joybuy relevance have not passed acceptance.
+    collector_config: *html_config
+
   # TikTok Shop seller terms require express written permission for automated access.
   - &tiktok
     source_id: tiktok-shop-academy
@@ -386,11 +529,32 @@ sources:
     regions: [sg]
     robots_url: https://seller-sg.tiktok.com/robots.txt
 
-  # GDELT discovers article metadata; per-publisher policy gates any original-page request.
-  - source_id: media-gdelt-cross-border
-    name: GDELT Cross-border Commerce Discovery
-    entry_url: https://api.gdeltproject.org/api/v2/doc/doc?query=%28Amazon%20OR%20TEMU%20OR%20SHEIN%20OR%20AliExpress%20OR%20Shopee%20OR%20eBay%20OR%20Coupang%20OR%20Ozon%20OR%20Joybuy%20OR%20%22TikTok%20Shop%22%29%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=50&timespan=1d&sort=datedesc
-    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+  - source_id: tiktok-newsroom
+    name: TikTok Newsroom
+    entry_url: https://newsroom.tiktok.com/en-us/
+    platforms: [tiktok_shop]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: TikTok
+    publisher_key: tiktok.com
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.tiktok.com/legal/page/row/terms-of-service/en
+    robots_url: https://newsroom.tiktok.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Registered as a public corporate-news candidate. Automated retrieval, full-text storage permission, selectors, and recent TikTok Shop relevance have not passed acceptance.
+    collector_config: *html_config
+
+  # GDELT is a metadata-only discovery layer. One bounded query is kept per platform.
+  - &gdelt
+    source_id: media-gdelt-amazon
+    name: GDELT Amazon Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=%28%22Amazon%20marketplace%22%20OR%20%22Amazon%20seller%22%29%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [amazon]
     trust_tier: media
     adapter: gdelt
     content_scope: metadata_only
@@ -403,15 +567,78 @@ sources:
     interval_minutes: 120
     terms_url: https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
     robots_url: https://api.gdeltproject.org/robots.txt
-    reviewed_at: 2026-07-22
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList JSON request per run. Results must match the reviewed publisher catalog; unknown and denied publishers are discarded. No reviewed publisher currently permits direct article-page collection, so accepted results remain metadata-only and are excluded from LLM analysis. The 2026-07-22 local live smoke reached the GDELT server but received HTTP 429; keep disabled until a later manual smoke succeeds.
+    reviewed_at: 2026-07-27
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Amazon per run. Results must match the reviewed publisher catalog; unknown and denied publishers are discarded. Metadata is excluded from LLM analysis, and the source remains disabled until a controlled smoke no longer returns HTTP 429.
     collector_config:
       items_path: $.articles
       url_field: $.url
       title_field: $.title
       published_at_field: $.seendate
       publisher_field: $.domain
-      item_limit: 50
+      item_limit: 25
+
+  - <<: *gdelt
+    source_id: media-gdelt-temu
+    name: GDELT TEMU Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=TEMU%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [temu]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for TEMU per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-shein
+    name: GDELT SHEIN Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=SHEIN%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [shein]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for SHEIN per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-aliexpress
+    name: GDELT AliExpress Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=AliExpress%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [aliexpress]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for AliExpress per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-shopee
+    name: GDELT Shopee Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Shopee%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [shopee]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Shopee per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-ebay
+    name: GDELT eBay Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=eBay%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [ebay]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for eBay per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-coupang
+    name: GDELT Coupang Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Coupang%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [coupang]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Coupang per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-ozon
+    name: GDELT Ozon Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Ozon%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [ozon]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Ozon per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-joybuy
+    name: GDELT Joybuy Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Joybuy%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [joybuy]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Joybuy per run; metadata-only output remains disabled pending a successful controlled smoke.
+
+  - <<: *gdelt
+    source_id: media-gdelt-tiktok-shop
+    name: GDELT TikTok Shop Discovery
+    entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=%22TikTok%20Shop%22%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
+    platforms: [tiktok_shop]
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for TikTok Shop per run; metadata-only output remains disabled pending a successful controlled smoke.
 
   # Industry publishers are discovery candidates only and remain disabled.
   - source_id: media-marketplace-pulse
@@ -499,3 +726,70 @@ sources:
     reviewed_at: 2026-07-20
     compliance_notes: Reuters terms prohibit automated collection without prior written consent.
     collector_config: *html_config
+
+  # Requested Chinese industry media remain link-discovery candidates only.
+  - &chinese_media
+    source_id: media-cifnews-cross-border
+    name: 雨果跨境
+    entry_url: https://www.cifnews.com/
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    adapter: generic
+    content_scope: metadata_only
+    attribution: 雨果跨境
+    publisher_key: cifnews.com
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
+    terms_url: https://www.cifnews.com/page/privacy-policy
+    robots_url: https://www.cifnews.com/robots.txt
+    reviewed_at: 2026-07-27
+    compliance_notes: Public pages and privacy policy are reachable, but no permission for automated retrieval or full-text storage was found. Keep disabled and metadata-only until an official feed, API, or written authorization is accepted.
+    collector_config: *html_config
+
+  - <<: *chinese_media
+    source_id: media-ennews-cross-border
+    name: 亿恩网
+    entry_url: https://www.ennews.com/
+    attribution: 亿恩网
+    publisher_key: ennews.com
+    compliance: authorization_required
+    terms_url: https://www.ennews.com/aboutus
+    robots_url: https://www.ennews.com/robots.txt
+    compliance_notes: Automated access presents an interactive verification challenge that must not be bypassed. An official subscription, API, or written authorization is required before any automated retrieval.
+
+  - <<: *chinese_media
+    source_id: media-chwang-cross-border
+    name: 出海网
+    entry_url: https://www.chwang.com/
+    attribution: 出海网
+    publisher_key: chwang.com
+    compliance: authorization_required
+    terms_url: https://www.chwang.com/article/201714833196
+    robots_url: https://www.chwang.com/robots.txt
+    compliance_notes: Public copyright notices require permission for republication and some items originate from third parties. Written authorization from all necessary publishers is required before full-text storage.
+
+  - <<: *chinese_media
+    source_id: media-dsb-cross-border
+    name: 电商报
+    entry_url: https://www.dsb.cn/
+    attribution: 电商报
+    publisher_key: dsb.cn
+    compliance: authorization_required
+    terms_url: https://www.dsb.cn/
+    robots_url: https://www.dsb.cn/robots.txt
+    compliance_notes: Automated access currently receives HTTP 403 and must not be bypassed. An official RSS feed, API, or written authorization is required before collection.
+
+  - <<: *chinese_media
+    source_id: media-100ec-cross-border
+    name: 网经社跨境电商台
+    entry_url: https://cbec.100ec.cn/
+    attribution: 网经社跨境电商台
+    publisher_key: 100ec.cn
+    compliance: pending_review
+    terms_url: https://www.100ec.cn/zt/upload_data/2017kjwg/2017kjwg.pdf
+    robots_url: https://www.100ec.cn/robots.txt
+    compliance_notes: Individual reports may permit attributed quotation, but that does not authorize site-wide automated retrieval or full-text storage. Review permission per section or obtain a stable authorized feed.

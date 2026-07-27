@@ -24,6 +24,23 @@ def test_catalog_includes_three_media_categories() -> None:
     assert publisher_profile("cifnews.com").category is MediaCategory.CHINESE_INDUSTRY
 
 
+def test_catalog_includes_requested_chinese_industry_publishers() -> None:
+    expected = {
+        "cifnews.com": "雨果跨境",
+        "ennews.com": "亿恩网",
+        "chwang.com": "出海网",
+        "dsb.cn": "电商报",
+        "100ec.cn": "网经社跨境电商台",
+    }
+
+    for publisher_key, display_name in expected.items():
+        profile = publisher_profile(publisher_key)
+        assert profile is not None
+        assert profile.display_name == display_name
+        assert profile.category is MediaCategory.CHINESE_INDUSTRY
+        assert profile.article_access is ArticleAccess.METADATA_ONLY
+
+
 def test_catalog_matches_subdomains_and_rejects_unknown_hosts() -> None:
     assert publisher_profile("feeds.bbci.co.uk").publisher_key == "bbc.com"
     assert publisher_profile("news.marketplacepulse.com").article_access is ArticleAccess.DENIED
@@ -50,6 +67,10 @@ def test_catalog_access_decisions_match_the_compliance_review() -> None:
         "modernretail.co": ArticleAccess.AUTHORIZATION_REQUIRED,
         "marketplacepulse.com": ArticleAccess.DENIED,
         "cifnews.com": ArticleAccess.METADATA_ONLY,
+        "ennews.com": ArticleAccess.METADATA_ONLY,
+        "chwang.com": ArticleAccess.METADATA_ONLY,
+        "dsb.cn": ArticleAccess.METADATA_ONLY,
+        "100ec.cn": ArticleAccess.METADATA_ONLY,
         "ebrun.com": ArticleAccess.METADATA_ONLY,
         "baijing.cn": ArticleAccess.METADATA_ONLY,
         "36kr.com": ArticleAccess.METADATA_ONLY,

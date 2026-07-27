@@ -28,7 +28,7 @@ _REGISTRY_PATH = (
 _SMOKE_SOURCE_IDS = (
     "amazon-sp-api-changelog-rss",
     "ebay-newsroom-rss",
-    "media-gdelt-cross-border",
+    "media-gdelt-amazon",
 )
 _FEED_CONTENT_TYPES = frozenset(
     {
