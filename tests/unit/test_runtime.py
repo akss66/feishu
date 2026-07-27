@@ -102,6 +102,7 @@ def resources(
     adapter: Adapter | None = None,
     scheduler: object | None = None,
     intelligence_scheduler: object | None = None,
+    email_notice_scheduler: object | None = None,
 ) -> RuntimeResources:
     return RuntimeResources(
         database=DatabaseCloser(events),
@@ -110,6 +111,7 @@ def resources(
         adapter=adapter or Adapter(events),
         scheduler=scheduler or Scheduler(events),
         intelligence_scheduler=intelligence_scheduler,
+        email_notice_scheduler=email_notice_scheduler,
         ingestion_resources=(
             AsyncCloser("http", events),
             AsyncCloser("browser", events),
@@ -214,6 +216,32 @@ async def test_intelligence_scheduler_starts_first_and_stops_before_ingestion() 
         "scheduler_start",
         "connect",
         "intelligence_stop",
+        "scheduler_stop",
+        "adapter",
+        "channel",
+        "http",
+        "browser",
+        "deepseek",
+        "database",
+    ]
+
+
+async def test_optional_email_notice_scheduler_has_independent_lifecycle() -> None:
+    events: list[str] = []
+
+    await _serve(
+        resources(
+            events,
+            email_notice_scheduler=Scheduler(events, "email"),
+        ),
+        scheduler_enabled=True,
+    )
+
+    assert events == [
+        "email_start",
+        "scheduler_start",
+        "connect",
+        "email_stop",
         "scheduler_stop",
         "adapter",
         "channel",

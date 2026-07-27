@@ -32,6 +32,7 @@ class RuntimeResources:
     adapter: Any | None = None
     scheduler: Any | None = None
     intelligence_scheduler: Any | None = None
+    email_notice_scheduler: Any | None = None
     ingestion_resources: tuple[_AsyncCloser, ...] = field(default_factory=tuple)
 
 
@@ -78,6 +79,11 @@ async def _run_configured(settings: Settings) -> None:
 
         bindings = SqlAlchemyGroupBindingStore(resources.database.session)
         manual_submissions = _build_manual_submissions(resources.database)
+        if bool(getattr(settings, "official_notice_email_enabled", False)):
+            resources.email_notice_scheduler = _build_email_notice_scheduler(
+                settings,
+                manual_submissions,
+            )
         resources.openai_client = AsyncOpenAI(
             api_key=settings.deepseek_api_key.get_secret_value(),
             base_url=str(settings.deepseek_base_url).rstrip("/"),
@@ -150,6 +156,42 @@ def _build_manual_submissions(database: Any) -> Any:
     return ManualSubmissionService(
         accounts,
         SqlAlchemyIngestionRepository(database.session),
+    )
+
+
+def _build_email_notice_scheduler(settings: Any, sink: Any) -> Any:
+    from commerce_agent.ingestion.email_notices import (
+        EmailNoticeIngestionService,
+        ImapOfficialNoticeProvider,
+        StdlibImapClient,
+        parse_allowed_senders,
+    )
+    from commerce_agent.ingestion.official_notices import OfficialAccountRegistry
+    from commerce_agent.ingestion.scheduler import IngestionScheduler
+
+    accounts = OfficialAccountRegistry.from_yaml(
+        Path(__file__).parent / "sources" / "official_accounts.yaml"
+    )
+    client = StdlibImapClient(
+        host=settings.official_notice_email_host,
+        port=settings.official_notice_email_port,
+        username=settings.official_notice_email_username,
+        password=settings.official_notice_email_password.get_secret_value(),
+        folder=settings.official_notice_email_folder,
+    )
+    provider = ImapOfficialNoticeProvider(
+        client,
+        accounts=accounts,
+        allowed_senders=parse_allowed_senders(
+            settings.official_notice_email_allowed_senders
+        ),
+        max_message_bytes=settings.official_notice_email_max_message_bytes,
+        max_attachment_bytes=settings.official_notice_email_max_attachment_bytes,
+    )
+    return IngestionScheduler(
+        EmailNoticeIngestionService(provider, sink),
+        interval_minutes=settings.ingestion_interval_minutes,
+        timezone="UTC",
     )
 
 
@@ -349,6 +391,8 @@ async def _serve(resources: RuntimeResources, *, scheduler_enabled: bool) -> Non
     try:
         if resources.intelligence_scheduler is not None:
             resources.intelligence_scheduler.start()
+        if resources.email_notice_scheduler is not None:
+            resources.email_notice_scheduler.start()
         if scheduler_enabled and resources.scheduler is not None:
             resources.scheduler.start()
         if resources.adapter is not None:
@@ -374,6 +418,8 @@ async def _close_resources(
 
     if resources.intelligence_scheduler is not None:
         await close(resources.intelligence_scheduler.aclose)
+    if resources.email_notice_scheduler is not None:
+        await close(resources.email_notice_scheduler.aclose)
     if scheduler_enabled and resources.scheduler is not None:
         await close(resources.scheduler.aclose)
     if resources.adapter is not None:

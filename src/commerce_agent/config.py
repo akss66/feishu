@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -53,6 +55,15 @@ class Settings(BaseSettings):
     intelligence_risk_profile: Literal["conservative", "default", "aggressive"] = "default"
     intelligence_context_ttl_minutes: int = Field(default=30, ge=1, le=1440)
     intelligence_qa_max_turns: int = Field(default=6, ge=1, le=20)
+    official_notice_email_enabled: bool = False
+    official_notice_email_host: str | None = None
+    official_notice_email_port: int = Field(default=993, ge=1, le=65535)
+    official_notice_email_username: str | None = None
+    official_notice_email_password: SecretStr | None = None
+    official_notice_email_folder: str = "INBOX"
+    official_notice_email_allowed_senders: str = ""
+    official_notice_email_max_message_bytes: int = Field(default=1_000_000, ge=1)
+    official_notice_email_max_attachment_bytes: int = Field(default=2_000_000, ge=1)
 
     @field_validator("lark_app_secret", "deepseek_api_key", "bot_bind_code")
     @classmethod
@@ -75,3 +86,20 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("ingestion user agent must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def validate_official_notice_email(self) -> Settings:
+        if not self.official_notice_email_enabled:
+            return self
+        password = self.official_notice_email_password
+        if (
+            not (self.official_notice_email_host or "").strip()
+            or not (self.official_notice_email_username or "").strip()
+            or password is None
+            or not password.get_secret_value().strip()
+            or not self.official_notice_email_allowed_senders.strip()
+        ):
+            raise ValueError(
+                "official notice email requires host, username, password, and allowed senders"
+            )
+        return self

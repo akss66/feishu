@@ -122,6 +122,12 @@ class OfficialAccountRegistry:
         except KeyError:
             raise NoticeValidationError("unknown_official_account") from None
 
+    def require_id(self, account_id: str) -> OfficialAccount:
+        for account in self._accounts:
+            if account.account_id == account_id:
+                return account
+        raise NoticeValidationError("unknown_official_account")
+
 
 def validate_notice(
     notice: OfficialNotice,

@@ -106,6 +106,9 @@ class ManualSubmissionService:
             submitted_by=submitted_by,
             transport="feishu",
         )
+        return await self.submit_notice(notice)
+
+    async def submit_notice(self, notice: OfficialNotice) -> ManualSubmissionResult:
         account = validate_notice(notice, self._accounts)
         await self._repository.sync_sources((account.as_source_definition(),))
 
@@ -124,7 +127,7 @@ class ManualSubmissionService:
                 language_confidence=1.0,
                 content_hash=content_hash,
                 content_group_hash=content_group_hash,
-                fetched_at=received_at,
+                fetched_at=notice.received_at,
                 author=account.display_name,
                 published_at=notice.published_at,
                 publisher_key=account.publisher_key,

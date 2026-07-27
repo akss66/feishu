@@ -63,6 +63,28 @@ def test_intelligence_flags_are_safe_by_default(monkeypatch: pytest.MonkeyPatch)
     assert settings.intelligence_qa_max_turns == 6
 
 
+def test_official_notice_email_defaults_off_and_password_is_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv("OFFICIAL_NOTICE_EMAIL_PASSWORD", "test-value")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.official_notice_email_enabled is False
+    assert "test-value" not in repr(settings)
+
+
+def test_enabled_official_notice_email_requires_complete_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_required_settings(monkeypatch)
+    monkeypatch.setenv("OFFICIAL_NOTICE_EMAIL_ENABLED", "true")
+
+    with pytest.raises(ValidationError, match="official notice email"):
+        Settings(_env_file=None)
+
+
 def test_settings_reject_unknown_intelligence_risk_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
