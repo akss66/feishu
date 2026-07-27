@@ -290,7 +290,7 @@
   and original link may remain
 - 90-day relevance evidence: not reviewed per platform
 - Offline fixture: captured for scoped candidate filtering, complete-article extraction, and
-  JavaScript security-check rejection
+  public article gate access-wall rejection (`article_access_wall`)
 - Collection boundary: HTTPS `imgs-b2b.100ec.cn` only, `/detail--` paths only, at most 5 detail
   candidates per run, and no more often than every 120 minutes
 - Live smoke date and result: 2026-07-27 PASS; see the dated evidence table below
