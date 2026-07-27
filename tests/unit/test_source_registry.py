@@ -87,16 +87,16 @@ OUT_OF_SCOPE_STATUS = {
         False,
     ),
     "media-ecommercebytes-feed": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
-    "media-gdelt-amazon": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-temu": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-shein": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-shopee": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-ebay": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-coupang": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-ozon": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-joybuy": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-tiktok-shop": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-amazon": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-temu": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-shein": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-shopee": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-ebay": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-coupang": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-ozon": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-joybuy": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-tiktok-shop": (ComplianceStatus.ALLOWED, True),
     "media-marketplace-pulse": (ComplianceStatus.DENIED, False),
     "media-reuters-retail": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
 }
@@ -492,7 +492,7 @@ def test_public_registry_has_one_bounded_gdelt_query_per_platform() -> None:
     for source in gdelt:
         assert len(source.platforms) == 1
         assert source.content_scope is ContentScope.METADATA_ONLY
-        assert source.enabled is False
+        assert source.enabled is True
         assert source.collector_config["item_limit"] == 25
         query = parse_qs(urlsplit(source.entry_url).query)
         assert query["mode"] == ["artlist"]
@@ -591,7 +591,7 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
     )
 
 
-def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled() -> None:
+def test_public_registry_media_sources_are_fully_annotated_and_safely_enabled() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     media = tuple(source for source in registry.sources if source.trust_tier is TrustTier.MEDIA)
 
@@ -605,9 +605,10 @@ def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled(
         assert source.attribution
         if source.adapter is SourceAdapter.GENERIC:
             assert source.publisher_key
+            assert source.enabled is False
         else:
             assert source.publisher_key is None
-        assert source.enabled is False
+            assert source.enabled is True
 
 
 def test_requested_chinese_media_candidates_are_registered_but_disabled() -> None:
@@ -645,7 +646,7 @@ def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() ->
     assert gdelt.content_scope is ContentScope.METADATA_ONLY
     assert gdelt.publisher_key is None
     assert gdelt.platforms == (Platform.AMAZON,)
-    assert gdelt.enabled is False
+    assert gdelt.enabled is True
     assert gdelt.collector_config == {
         "items_path": "$.articles",
         "url_field": "$.url",

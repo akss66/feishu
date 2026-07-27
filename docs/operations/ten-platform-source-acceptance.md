@@ -109,7 +109,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: 2026-07-22 HTTP 429; not rerun
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-temu
 - Platform: TEMU
@@ -121,7 +121,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-shein
 - Platform: SHEIN
@@ -133,7 +133,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-aliexpress
 - Platform: AliExpress
@@ -145,7 +145,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-shopee
 - Platform: Shopee
@@ -157,7 +157,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-ebay
 - Platform: eBay
@@ -169,7 +169,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-coupang
 - Platform: Coupang
@@ -181,7 +181,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-ozon
 - Platform: Ozon
@@ -193,7 +193,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-joybuy
 - Platform: Joybuy
@@ -205,7 +205,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-gdelt-tiktok-shop
 - Platform: TikTok Shop
@@ -217,7 +217,7 @@
 - 90-day relevance evidence: not reviewed
 - Offline fixture: existing API fixtures only
 - Live smoke date and result: not run
-- Final status: allowed / enabled=false
+- Final status: allowed / enabled=true (metadata discovery only)
 
 ## media-cifnews-cross-border
 - Platform: original 10 platforms; relevance not yet verified per platform
@@ -304,5 +304,6 @@ URL 只计 1 个来源。摘要和元数据线索不计入有效来源。
 
 - 全量单元、集成和契约测试以及 Ruff 检查必须通过。
 - 公网 smoke 默认跳过，只有明确批准真实网络验证时才启用。
-- GDELT 候选保持禁用且仅作为元数据线索，不进入 LLM 分析。
+- 10 个 GDELT 发现源已启用，但仍是元数据线索；只有受控取得并通过质量门的原文才进入
+  LLM 分析。
 - 未配置的授权媒体数据商使用禁用适配器，返回空结果，不产生网络请求。

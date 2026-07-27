@@ -561,14 +561,14 @@ sources:
     attribution: GDELT index; original publisher shown per item
     collector: api
     compliance: allowed
-    enabled: false
+    enabled: true
     regions: [global]
     language_hint: en
     interval_minutes: 120
     terms_url: https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
     robots_url: https://api.gdeltproject.org/robots.txt
     reviewed_at: 2026-07-27
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Amazon per run. Results must match the reviewed publisher catalog; unknown and denied publishers are discarded. Metadata is excluded from LLM analysis, and the source remains disabled until a controlled smoke no longer returns HTTP 429.
+    compliance_notes: Enabled as a metadata-only discovery source using one bounded GDELT DOC 2.0 ArtList request for Amazon per run. Results must match the reviewed publisher catalog; unknown and denied publishers are discarded. Original article fetching remains independently disabled until controlled smoke passes; HTTP 429 is never bypassed.
     collector_config:
       items_path: $.articles
       url_field: $.url
@@ -582,63 +582,63 @@ sources:
     name: GDELT TEMU Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=TEMU%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [temu]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for TEMU per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for TEMU per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-shein
     name: GDELT SHEIN Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=SHEIN%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [shein]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for SHEIN per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for SHEIN per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-aliexpress
     name: GDELT AliExpress Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=AliExpress%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [aliexpress]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for AliExpress per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for AliExpress per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-shopee
     name: GDELT Shopee Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Shopee%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [shopee]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Shopee per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for Shopee per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-ebay
     name: GDELT eBay Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=eBay%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [ebay]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for eBay per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for eBay per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-coupang
     name: GDELT Coupang Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Coupang%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [coupang]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Coupang per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for Coupang per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-ozon
     name: GDELT Ozon Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Ozon%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [ozon]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Ozon per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for Ozon per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-joybuy
     name: GDELT Joybuy Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=Joybuy%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [joybuy]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for Joybuy per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for Joybuy per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   - <<: *gdelt
     source_id: media-gdelt-tiktok-shop
     name: GDELT TikTok Shop Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=%22TikTok%20Shop%22%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [tiktok_shop]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for TikTok Shop per run; metadata-only output remains disabled pending a successful controlled smoke.
+    compliance_notes: Enabled as metadata-only discovery using one bounded GDELT DOC 2.0 ArtList request for TikTok Shop per run; original article fetching remains independently gated and disabled pending controlled smoke.
 
   # Industry publishers are discovery candidates only and remain disabled.
   - source_id: media-marketplace-pulse
