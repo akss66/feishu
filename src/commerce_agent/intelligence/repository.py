@@ -120,19 +120,13 @@ class SqlAlchemyIntelligenceRepository:
             )
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
-            .outerjoin(
+            .join(
                 DocumentProvenance,
                 DocumentProvenance.document_version_id == DocumentVersion.id,
             )
             .where(due)
             .where(Source.compliance == "allowed")
-            .where(
-                or_(
-                    DocumentProvenance.content_scope.is_(None),
-                    DocumentProvenance.content_scope
-                    != ContentScope.METADATA_ONLY.value,
-                )
-            )
+            .where(DocumentProvenance.content_scope == ContentScope.FULL_TEXT.value)
             .order_by(AnalysisJob.created_at, AnalysisJob.id)
             .limit(1)
             .scalar_subquery()

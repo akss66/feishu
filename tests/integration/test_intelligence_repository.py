@@ -63,6 +63,9 @@ def _source(
         platforms=(Platform.AMAZON, Platform.EBAY),
         trust_tier=TrustTier.OFFICIAL,
         collector=CollectorKind.RSS,
+        content_scope=ContentScope.FULL_TEXT,
+        attribution=f"Seller News {source_id}",
+        publisher_key=f"{source_id}.example.com",
         compliance=compliance,
         enabled=True,
         regions=("global",),
@@ -95,6 +98,9 @@ def _candidate(
         fetched_at=datetime(2026, 7, 20, 1, tzinfo=UTC),
         author="Amazon",
         published_at=datetime(2026, 7, 19, 8, tzinfo=UTC),
+        publisher_key=f"{source_id}.example.com",
+        attribution=f"Seller News {source_id}",
+        content_scope="full_text",
     )
 
 
@@ -450,6 +456,36 @@ async def test_claim_skips_metadata_only_documents(tmp_path) -> None:
         await database.dispose()
 
 
+async def test_claim_skips_feed_summary_documents(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'feed-summary.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    summary_source = replace(
+        _source(source_id="amazon-summary"),
+        content_scope=ContentScope.FEED_SUMMARY,
+        attribution="Amazon",
+        publisher_key="amazon.com",
+    )
+    try:
+        await ingestion.sync_sources([summary_source])
+        await ingestion.persist_version(
+            replace(
+                _candidate(
+                    source_id=summary_source.source_id,
+                    content_hash="s" * 64,
+                ),
+                publisher_key="amazon.com",
+                attribution="Amazon",
+                content_scope="feed_summary",
+            )
+        )
+
+        assert await repository.claim_next(now=NOW) is None
+    finally:
+        await database.dispose()
+
+
 @pytest.mark.parametrize(
     ("publishers", "expected_count"),
     [(("reuters.com", "reuters.com"), 1), (("reuters.com", "apnews.com"), 2)],
@@ -468,7 +504,7 @@ async def test_media_corroboration_counts_publishers_not_collection_channels(
             _source(source_id=f"media-{index}"),
             trust_tier=TrustTier.MEDIA,
             adapter=SourceAdapter.GENERIC,
-            content_scope=ContentScope.FEED_SUMMARY,
+            content_scope=ContentScope.FULL_TEXT,
             attribution=f"Publisher {index}",
             publisher_key=publisher,
         )
@@ -486,7 +522,7 @@ async def test_media_corroboration_counts_publishers_not_collection_channels(
                     ),
                     publisher_key=publisher,
                     attribution=f"Publisher {index}",
-                    content_scope="feed_summary",
+                    content_scope="full_text",
                 )
             )
 

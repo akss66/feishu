@@ -25,6 +25,7 @@ from commerce_agent.persistence.models import (
     Source,
     SourceHealth,
     SourceLease,
+    SourceMaterialPolicy,
     SourcePlatform,
 )
 
@@ -151,6 +152,32 @@ class SqlAlchemyIngestionRepository:
                     SourcePlatform(source_id=definition.source_id, platform=platform.value)
                     for platform in definition.platforms
                 )
+                policy_values = (
+                    definition.publisher_key,
+                    definition.attribution,
+                    definition.content_scope,
+                )
+                if all(value is not None for value in policy_values):
+                    policy = await session.get(SourceMaterialPolicy, definition.source_id)
+                    if policy is None:
+                        session.add(
+                            SourceMaterialPolicy(
+                                source_id=definition.source_id,
+                                publisher_key=definition.publisher_key,
+                                attribution=definition.attribution,
+                                content_scope=definition.content_scope.value,
+                            )
+                        )
+                    else:
+                        policy.publisher_key = definition.publisher_key
+                        policy.attribution = definition.attribution
+                        policy.content_scope = definition.content_scope.value
+                else:
+                    await session.execute(
+                        delete(SourceMaterialPolicy).where(
+                            SourceMaterialPolicy.source_id == definition.source_id
+                        )
+                    )
 
     async def claim_source(
         self,
@@ -270,9 +297,14 @@ class SqlAlchemyIngestionRepository:
             if version_id is None:  # pragma: no cover - guarded by the unique insert above
                 raise RuntimeError("version insert did not produce a stored version")
 
-            if created_version:
-                now = datetime.now(UTC)
-                if candidate.publisher_key is not None:
+            if candidate.publisher_key is not None:
+                provenance = await session.get(DocumentProvenance, version_id)
+                candidate_provenance = (
+                    candidate.publisher_key,
+                    candidate.attribution,
+                    candidate.content_scope,
+                )
+                if provenance is None:
                     session.add(
                         DocumentProvenance(
                             document_version_id=version_id,
@@ -281,6 +313,15 @@ class SqlAlchemyIngestionRepository:
                             content_scope=candidate.content_scope,
                         )
                     )
+                elif (
+                    provenance.publisher_key,
+                    provenance.attribution,
+                    provenance.content_scope,
+                ) != candidate_provenance:
+                    raise ValueError("document_provenance_conflict")
+
+            if created_version:
+                now = datetime.now(UTC)
                 await session.execute(
                     sqlite_insert(AnalysisJob)
                     .values(

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     Platform,
     SourceDefinition,
     TrustTier,
@@ -55,6 +56,9 @@ def _source() -> SourceDefinition:
         platforms=(Platform.EBAY,),
         trust_tier=TrustTier.OFFICIAL,
         collector=CollectorKind.RSS,
+        content_scope=ContentScope.FULL_TEXT,
+        attribution="Seller News",
+        publisher_key="example.com",
         compliance=ComplianceStatus.ALLOWED,
         enabled=True,
         regions=("global",),
@@ -442,6 +446,9 @@ async def test_completed_analysis_is_recovered_when_queueing_was_interrupted(
                 fetched_at=NOW,
                 author=None,
                 published_at=NOW,
+                publisher_key="example.com",
+                attribution="Seller News",
+                content_scope="full_text",
             )
         )
         claim = await repository.claim_next(now=NOW)

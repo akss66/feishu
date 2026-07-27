@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from commerce_agent.ingestion.models import (
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     Platform,
     RunStatus,
     RunSummary,
@@ -31,6 +32,7 @@ from commerce_agent.persistence.models import (
     GroupBinding,
     Source,
     SourceHealth,
+    SourceMaterialPolicy,
     SourcePlatform,
 )
 
@@ -116,6 +118,28 @@ async def test_sync_sources_upserts_definitions_and_replaces_platform_mapping(tm
         assert stored.regions == ["global"]
         assert stored.collector_config == {"item_limit": 50}
         assert platforms == [Platform.TEMU.value]
+    finally:
+        await database.dispose()
+
+
+async def test_sync_sources_persists_complete_material_policy(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    source = replace(
+        _source(),
+        content_scope=ContentScope.FULL_TEXT,
+        attribution="Amazon",
+        publisher_key="amazon.com",
+    )
+    try:
+        await repository.sync_sources([source])
+
+        async with database.session() as session:
+            policy = await session.get(SourceMaterialPolicy, source.source_id)
+
+        assert policy is not None
+        assert policy.publisher_key == "amazon.com"
+        assert policy.attribution == "Amazon"
+        assert policy.content_scope == "full_text"
     finally:
         await database.dispose()
 
@@ -570,6 +594,32 @@ async def test_media_provenance_is_inserted_once_with_its_document_version(tmp_p
         assert rows[0].attribution == "Reuters"
         assert rows[0].content_scope == "metadata_only"
         assert [job.document_version_id for job in jobs] == [first.version_id]
+    finally:
+        await database.dispose()
+
+
+async def test_duplicate_version_backfills_missing_provenance(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    try:
+        await repository.sync_sources([_source()])
+        original = _candidate(content_hash="d" * 64)
+        first = await repository.persist_version(original)
+        duplicate = await repository.persist_version(
+            replace(
+                original,
+                publisher_key="amazon.com",
+                attribution="Amazon",
+                content_scope="full_text",
+            )
+        )
+
+        async with database.session() as session:
+            provenance = await session.get(DocumentProvenance, first.version_id)
+
+        assert duplicate.version_id == first.version_id
+        assert duplicate.created_version is False
+        assert provenance is not None
+        assert provenance.content_scope == "full_text"
     finally:
         await database.dispose()
 

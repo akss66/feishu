@@ -113,7 +113,7 @@ class ContentExtractor:
             title = canonicalize_url(item.url)
         author = normalize_text(item.author or metadata.author or "") or None
         published_at = item.published_at or _parse_timestamp(metadata.published_at)
-        provenance = _media_provenance(source, item)
+        provenance = _material_policy(source, item)
         return ExtractedDocument(
             source_id=source.source_id,
             canonical_url=canonicalize_url(item.url),
@@ -135,22 +135,22 @@ class _HtmlMetadata:
     published_at: str | None = None
 
 
-def _media_provenance(
+def _material_policy(
     source: SourceDefinition,
     item: CollectedItem,
 ) -> dict[str, str]:
-    if source.trust_tier is not TrustTier.MEDIA:
-        return {}
     publisher_key = (
         item.publisher_key
         if source.adapter is SourceAdapter.GDELT
         else source.publisher_key
     )
-    if not publisher_key:
+    if not publisher_key and source.trust_tier is TrustTier.MEDIA:
         raise ExtractionError("missing_publisher_identity")
     content_scope = item.content_scope or source.content_scope
-    if source.attribution is None or content_scope is None:
-        raise ExtractionError("missing_media_provenance")
+    if publisher_key is None and source.attribution is None and content_scope is None:
+        return {}
+    if publisher_key is None or source.attribution is None or content_scope is None:
+        raise ExtractionError("missing_material_policy")
     return {
         "publisher_key": publisher_key,
         "attribution": source.attribution,

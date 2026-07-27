@@ -197,6 +197,32 @@ def test_direct_media_inherits_source_provenance() -> None:
     }
 
 
+def test_official_source_inherits_material_policy() -> None:
+    official_source = replace(
+        source(),
+        content_scope=ContentScope.FULL_TEXT,
+        attribution="Fixture Marketplace",
+        publisher_key="example.com",
+    )
+    item = CollectedItem(
+        url="https://example.com/policy",
+        body=b"Complete official policy body retained for internal analysis.",
+        content_type="text/plain",
+    )
+
+    document = ContentExtractor(FixedLanguageDetector()).extract(
+        official_source,
+        item,
+        fetched_at=FETCHED_AT,
+    )
+
+    assert document.metadata == {
+        "publisher_key": "example.com",
+        "attribution": "Fixture Marketplace",
+        "content_scope": "full_text",
+    }
+
+
 def test_gdelt_media_uses_per_item_publisher_and_source_attribution() -> None:
     media_source = replace(
         source(),

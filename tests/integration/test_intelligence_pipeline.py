@@ -101,7 +101,7 @@ class OfflinePipeline:
             platforms=(Platform.EBAY,),
             trust_tier=TrustTier.MEDIA,
             adapter=SourceAdapter.GENERIC,
-            content_scope=ContentScope.FEED_SUMMARY,
+            content_scope=ContentScope.FULL_TEXT,
             attribution="Fixture Marketplace News",
             publisher_key="news.example.test",
             collector=CollectorKind.HTML,

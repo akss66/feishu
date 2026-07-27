@@ -97,6 +97,17 @@ class SourcePlatform(Base):
     __table_args__ = (Index("ix_source_platforms_platform", "platform"),)
 
 
+class SourceMaterialPolicy(Base):
+    __tablename__ = "source_material_policies"
+
+    source_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    publisher_key: Mapped[str] = mapped_column(String(253), nullable=False)
+    attribution: Mapped[str] = mapped_column(Text, nullable=False)
+    content_scope: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class SourceLease(Base):
     __tablename__ = "source_leases"
 
