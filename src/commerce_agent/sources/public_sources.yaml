@@ -727,39 +727,56 @@ sources:
     compliance_notes: Reuters terms prohibit automated collection without prior written consent.
     collector_config: *html_config
 
-  # Requested Chinese industry media remain link-discovery candidates only.
-  - &chinese_media
+  # Scoped direct collection is limited to the reviewed public entry and article paths.
+  -
     source_id: media-cifnews-cross-border
     name: 雨果跨境
     entry_url: https://www.cifnews.com/
     platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
     trust_tier: media
     adapter: generic
-    content_scope: metadata_only
+    content_scope: full_text
     attribution: 雨果跨境
     publisher_key: cifnews.com
     collector: html
-    compliance: pending_review
-    enabled: false
+    compliance: allowed
+    enabled: true
     regions: [global]
     language_hint: zh
     interval_minutes: 120
     terms_url: https://www.cifnews.com/page/privacy-policy
     robots_url: https://www.cifnews.com/robots.txt
     reviewed_at: 2026-07-27
-    compliance_notes: Public pages and privacy policy are reachable, but no permission for automated retrieval or full-text storage was found. Keep disabled and metadata-only until an official feed, API, or written authorization is accepted.
-    collector_config: *html_config
+    compliance_notes: The exact public entry https://www.cifnews.com/ is collected at most every 120 minutes with a 10-item limit and /article/ links only. No login, verification bypass, paywall bypass, or access-control bypass is permitted; a controlled smoke is required before collection.
+    collector_config:
+      link_selector: a
+      link_path_prefixes: /article/
+      allowed_hosts: www.cifnews.com
+      public_article_gate: true
+      item_limit: 10
 
-  - <<: *chinese_media
+  # Other requested Chinese industry media remain link-discovery candidates only.
+  - &chinese_media
     source_id: media-ennews-cross-border
     name: 亿恩网
     entry_url: https://www.ennews.com/
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    adapter: generic
+    content_scope: metadata_only
     attribution: 亿恩网
     publisher_key: ennews.com
+    collector: html
     compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
     terms_url: https://www.ennews.com/aboutus
     robots_url: https://www.ennews.com/robots.txt
+    reviewed_at: 2026-07-27
     compliance_notes: Automated access presents an interactive verification challenge that must not be bypassed. An official subscription, API, or written authorization is required before any automated retrieval.
+    collector_config: *html_config
 
   - <<: *chinese_media
     source_id: media-chwang-cross-border
@@ -783,13 +800,29 @@ sources:
     robots_url: https://www.dsb.cn/robots.txt
     compliance_notes: Automated access currently receives HTTP 403 and must not be bypassed. An official RSS feed, API, or written authorization is required before collection.
 
-  - <<: *chinese_media
+  -
     source_id: media-100ec-cross-border
     name: 网经社跨境电商台
-    entry_url: https://cbec.100ec.cn/
+    entry_url: https://imgs-b2b.100ec.cn/list--3--1.html
+    platforms: [amazon, temu, shein, aliexpress, shopee, ebay, coupang, ozon, joybuy, tiktok_shop]
+    trust_tier: media
+    adapter: generic
+    content_scope: full_text
     attribution: 网经社跨境电商台
     publisher_key: 100ec.cn
-    compliance: pending_review
+    collector: html
+    compliance: allowed
+    enabled: true
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
     terms_url: https://www.100ec.cn/zt/upload_data/2017kjwg/2017kjwg.pdf
     robots_url: https://www.100ec.cn/robots.txt
-    compliance_notes: Individual reports may permit attributed quotation, but that does not authorize site-wide automated retrieval or full-text storage. Review permission per section or obtain a stable authorized feed.
+    reviewed_at: 2026-07-27
+    compliance_notes: The exact public entry https://imgs-b2b.100ec.cn/list--3--1.html is collected at most every 120 minutes with a 5-item limit and /detail-- links only. No login, verification bypass, paywall bypass, or access-control bypass is permitted; a controlled smoke is required before collection.
+    collector_config:
+      link_selector: a
+      link_path_prefixes: /detail--
+      allowed_hosts: imgs-b2b.100ec.cn
+      public_article_gate: true
+      item_limit: 5
