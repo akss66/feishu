@@ -6,6 +6,9 @@ sources:
     platforms: [amazon]
     trust_tier: official
     collector: html
+    content_scope: full_text
+    attribution: Zeta
+    publisher_key: news.example.com
     compliance: allowed
     enabled: true
     regions: [global]

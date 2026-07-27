@@ -237,6 +237,14 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
         collector_config=collector_config,
         context=context,
     )
+    _validate_material_policy(
+        adapter=adapter,
+        enabled=enabled,
+        content_scope=content_scope,
+        attribution=attribution,
+        publisher_key=publisher_key,
+        context=context,
+    )
     reviewed_at = _parse_date(source["reviewed_at"], "reviewed_at", context)
     language_hint = source.get("language_hint")
     if language_hint is not None and (
@@ -346,12 +354,29 @@ def _validate_media_contract(
         return
     if content_scope is None:
         raise SourceRegistryError(f"{context}: enabled media requires content_scope")
-    if content_scope is ContentScope.FULL_TEXT:
-        raise SourceRegistryError(f"{context}: full_text media cannot be enabled")
     if attribution is None:
         raise SourceRegistryError(f"{context}: enabled media requires attribution")
     if adapter is SourceAdapter.GENERIC and publisher_key is None:
         raise SourceRegistryError(f"{context}: enabled direct media requires publisher_key")
+
+
+def _validate_material_policy(
+    *,
+    adapter: SourceAdapter,
+    enabled: bool,
+    content_scope: ContentScope | None,
+    attribution: str | None,
+    publisher_key: str | None,
+    context: str,
+) -> None:
+    if not enabled:
+        return
+    if content_scope is None:
+        raise SourceRegistryError(f"{context}: enabled source requires content_scope")
+    if attribution is None:
+        raise SourceRegistryError(f"{context}: enabled source requires attribution")
+    if adapter is not SourceAdapter.GDELT and publisher_key is None:
+        raise SourceRegistryError(f"{context}: enabled source requires publisher_key")
 
 
 def _require_nonempty_string(value: object, field: str, context: str) -> str:

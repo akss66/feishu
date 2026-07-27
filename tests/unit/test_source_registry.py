@@ -345,15 +345,15 @@ def test_rejects_unknown_keys_with_source_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("field", ["content_scope", "attribution", "publisher_key"])
-def test_enabled_direct_media_requires_complete_provenance(
+def test_enabled_source_requires_complete_material_policy(
     tmp_path: Path,
     field: str,
 ) -> None:
     document = _valid_document()
-    source = document["sources"][1]  # type: ignore[index]
-    del source[field]
+    source = document["sources"][0]  # type: ignore[index]
+    source.pop(field, None)
 
-    with pytest.raises(SourceRegistryError, match=rf"alpha-api.*{field}"):
+    with pytest.raises(SourceRegistryError, match=rf"zeta-html.*{field}"):
         SourceRegistry.from_yaml(_write_registry(tmp_path, document))
 
 
@@ -404,12 +404,15 @@ def test_rejects_unknown_adapter(tmp_path: Path) -> None:
         SourceRegistry.from_yaml(_write_registry(tmp_path, document))
 
 
-def test_rejects_enabled_full_text_media(tmp_path: Path) -> None:
+def test_enabled_full_text_media_is_allowed_when_material_policy_complete(
+    tmp_path: Path,
+) -> None:
     document = _valid_document()
     document["sources"][1]["content_scope"] = "full_text"  # type: ignore[index]
 
-    with pytest.raises(SourceRegistryError, match=r"alpha-api.*full_text"):
-        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+    loaded = SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+    assert loaded.require("alpha-api").content_scope is ContentScope.FULL_TEXT
 
 
 def test_platform_coverage_is_deterministic_and_includes_pending_official_sources() -> None:
