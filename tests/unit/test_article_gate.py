@@ -2,6 +2,7 @@ import pytest
 
 from commerce_agent.ingestion.article_gate import (
     ArticleGateError,
+    mentions_target_platform,
     validate_public_article,
 )
 from commerce_agent.ingestion.models import Platform
@@ -97,6 +98,57 @@ def test_public_article_recognizes_each_platform(
         content_type="application/xhtml+xml",
         platforms=(platform,),
     )
+
+
+@pytest.mark.parametrize(
+    ("platform", "mention"),
+    [
+        (Platform.AMAZON, "浜氶┈閫婂崠瀹舵斂绛?"),
+        (Platform.SHEIN, "甯岄煶骞冲彴瑙勫垯"),
+        (Platform.ALIEXPRESS, "閫熷崠閫氬悎瑙勬洿鏂?"),
+        (Platform.COUPANG, "閰锋編璺ㄥ鍗栧"),
+        (Platform.TIKTOK_SHOP, "TTS 搴楅摵娌荤悊"),
+    ],
+)
+def test_article_gate_recognizes_controlled_chinese_platform_aliases(
+    platform: Platform,
+    mention: str,
+) -> None:
+    validate_public_article(
+        body=article_html(f"{mention}鍙戠敓鍙樺寲锛屽晢瀹堕渶瑕佹牳鏌ュ晢鍝佸拰璐︽埛銆?"),
+        content_type="text/html",
+        platforms=(platform,),
+    )
+
+
+def test_title_prefilter_uses_the_same_platform_aliases_as_body_gate() -> None:
+    assert mentions_target_platform(
+        "浜氶┈閫婃柊瑙勫奖鍝嶈法澧冨崠瀹?",
+        (Platform.AMAZON,),
+    )
+    assert not mentions_target_platform(
+        "鏈湴浣撹偛璧涗簨涓捐",
+        (Platform.AMAZON, Platform.TEMU),
+    )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "姝ｅ湪杩涜瀹夊叏妫€鏌ワ紝璇风◢鍊?",
+        "璇疯緭鍏ラ獙璇佺爜鍚庣户缁?",
+        "璇风櫥褰曞悗缁х画闃呰",
+        "浼氬憳涓撲韩鍐呭",
+        "浠樿垂闃呰鍚庢煡鐪嬪叏鏂?",
+    ],
+)
+def test_public_article_rejects_chinese_access_walls(marker: str) -> None:
+    with pytest.raises(ArticleGateError, match="article_access_wall"):
+        validate_public_article(
+            body=article_html(f"浜氶┈閫婂崠瀹舵敞鎰忥細{marker}"),
+            content_type="text/html",
+            platforms=(Platform.AMAZON,),
+        )
 
 
 def test_article_gate_error_never_contains_page_content() -> None:

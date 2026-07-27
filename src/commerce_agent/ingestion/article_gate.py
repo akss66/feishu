@@ -18,22 +18,27 @@ _ACCESS_WALL_MARKERS = (
     "enable javascript and cookies",
     "checking your browser",
     "challenge-platform",
+    "姝ｅ湪杩涜瀹夊叏妫€鏌ワ紝璇风◢鍊?",
+    "璇疯緭鍏ラ獙璇佺爜鍚庣户缁?",
+    "璇风櫥褰曞悗缁х画闃呰",
+    "浼氬憳涓撲韩鍐呭",
+    "浠樿垂闃呰鍚庢煡鐪嬪叏鏂?",
 )
 _RIGHTS_RESTRICTION_MARKERS = (
     "third-party copyright",
     "all rights reserved",
 )
 _PLATFORM_ALIASES: dict[Platform, tuple[str, ...]] = {
-    Platform.AMAZON: ("amazon",),
+    Platform.AMAZON: ("amazon", "浜氶┈閫?", "浜氶┈閫"),
     Platform.TEMU: ("temu",),
-    Platform.SHEIN: ("shein",),
-    Platform.ALIEXPRESS: ("aliexpress", "ali express"),
+    Platform.SHEIN: ("shein", "甯岄煶"),
+    Platform.ALIEXPRESS: ("aliexpress", "ali express", "閫熷崠閫?", "閫熷崠閫"),
     Platform.SHOPEE: ("shopee",),
     Platform.EBAY: ("ebay",),
-    Platform.COUPANG: ("coupang",),
+    Platform.COUPANG: ("coupang", "閰锋編"),
     Platform.OZON: ("ozon",),
     Platform.JOYBUY: ("joybuy", "joy buy"),
-    Platform.TIKTOK_SHOP: ("tiktok shop", "tik tok shop"),
+    Platform.TIKTOK_SHOP: ("tiktok shop", "tik tok shop", "tts"),
 }
 _MIN_VISIBLE_CHARACTERS = 300
 
@@ -44,6 +49,18 @@ class ArticleGateError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(f"article gate rejected content: {code}")
+
+
+def mentions_target_platform(
+    text: str,
+    platforms: tuple[Platform, ...],
+) -> bool:
+    folded = text.casefold()
+    return any(
+        alias in folded
+        for platform in platforms
+        for alias in _PLATFORM_ALIASES[platform]
+    )
 
 
 def validate_public_article(
@@ -64,17 +81,17 @@ def validate_public_article(
         raise ArticleGateError("article_rights_restricted")
     if len(visible_text) < _MIN_VISIBLE_CHARACTERS:
         raise ArticleGateError("article_body_incomplete")
-    if not any(
-        alias in folded
-        for platform in platforms
-        for alias in _PLATFORM_ALIASES[platform]
-    ):
+    if not mentions_target_platform(visible_text, platforms):
         raise ArticleGateError("article_platform_irrelevant")
 
 
 def _visible_text(body: bytes) -> str:
     try:
-        root = lxml_html.fromstring(body)
+        document = body.decode("utf-8")
+    except UnicodeDecodeError:
+        document = body
+    try:
+        root = lxml_html.fromstring(document)
     except (ValueError, TypeError, lxml_html.etree.ParserError):
         return ""
     for element in root.xpath("//script | //style | //nav | //header | //footer | //aside"):
