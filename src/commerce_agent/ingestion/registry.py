@@ -63,6 +63,7 @@ _SOURCE_FIELDS = frozenset(
         "attribution",
         "publisher_key",
         "collector_config",
+        "strict_coverage_platforms",
     }
 )
 _REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {
@@ -72,6 +73,7 @@ _REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {
     "content_scope",
     "language_hint",
     "publisher_key",
+    "strict_coverage_platforms",
 }
 _CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
     CollectorKind.RSS: frozenset({"item_limit"}),
@@ -268,11 +270,30 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
     ):
         raise SourceRegistryError(f"{context}: language_hint must be a non-empty string or null")
 
+    platforms = _parse_platforms(source["platforms"], context)
+    strict_coverage_platforms = _parse_optional_platforms(
+        source.get("strict_coverage_platforms"),
+        context,
+    )
+    if any(platform not in platforms for platform in strict_coverage_platforms):
+        raise SourceRegistryError(
+            f"{context}: strict_coverage_platforms must be a subset of platforms"
+        )
+    if strict_coverage_platforms and (
+        not enabled
+        or compliance is not ComplianceStatus.ALLOWED
+        or content_scope is not ContentScope.FULL_TEXT
+        or publisher_key is None
+    ):
+        raise SourceRegistryError(
+            f"{context}: strict coverage requires an enabled allowed full-text publisher"
+        )
+
     return SourceDefinition(
         source_id=raw_id,
         name=_require_nonempty_string(source["name"], "name", context),
         entry_url=entry_url,
-        platforms=_parse_platforms(source["platforms"], context),
+        platforms=platforms,
         trust_tier=trust_tier,
         collector=collector,
         compliance=compliance,
@@ -293,6 +314,7 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
         attribution=attribution,
         publisher_key=publisher_key,
         collector_config=collector_config,
+        strict_coverage_platforms=strict_coverage_platforms,
     )
 
 
@@ -338,9 +360,7 @@ def _parse_optional_string(value: object, field: str, context: str) -> str | Non
 def _parse_publisher_key(value: object, context: str) -> str | None:
     key = _parse_optional_string(value, "publisher_key", context)
     if key is not None and _PUBLISHER_KEY.fullmatch(key) is None:
-        raise SourceRegistryError(
-            f"{context}: publisher_key must be a lowercase stable identifier"
-        )
+        raise SourceRegistryError(f"{context}: publisher_key must be a lowercase stable identifier")
     return key
 
 
@@ -461,6 +481,17 @@ def _parse_platforms(value: object, context: str) -> tuple[Platform, ...]:
     if len(set(platforms)) != len(platforms):
         raise SourceRegistryError(f"{context}: platforms contains duplicates")
     return tuple(sorted(platforms, key=lambda platform: list(Platform).index(platform)))
+
+
+def _parse_optional_platforms(
+    value: object,
+    context: str,
+) -> tuple[Platform, ...]:
+    if value is None:
+        return ()
+    if value == []:
+        return ()
+    return _parse_platforms(value, f"{context}: strict_coverage_platforms")
 
 
 def _parse_string_list(value: object, field: str, context: str) -> tuple[str, ...]:

@@ -97,6 +97,17 @@ class SourcePlatform(Base):
     __table_args__ = (Index("ix_source_platforms_platform", "platform"),)
 
 
+class SourceAuditedPlatform(Base):
+    __tablename__ = "source_audited_platforms"
+
+    source_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("sources.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+    __table_args__ = (Index("ix_source_audited_platforms_platform", "platform"),)
+
+
 class SourceMaterialPolicy(Base):
     __tablename__ = "source_material_policies"
 
@@ -198,9 +209,7 @@ class DocumentVersion(Base):
     fetched_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
-            "document_id", "content_hash", name="uq_document_versions_document_hash"
-        ),
+        UniqueConstraint("document_id", "content_hash", name="uq_document_versions_document_hash"),
         Index("ix_document_versions_content_hash", "content_hash"),
     )
 
@@ -216,6 +225,19 @@ class DocumentProvenance(Base):
     publisher_key: Mapped[str] = mapped_column(String(253), nullable=False)
     attribution: Mapped[str] = mapped_column(Text, nullable=False)
     content_scope: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
+class DocumentVersionPlatform(Base):
+    __tablename__ = "document_version_platforms"
+
+    document_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    platform: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+    __table_args__ = (Index("ix_document_version_platforms_platform", "platform"),)
 
 
 class AnalysisJob(Base):
@@ -297,9 +319,7 @@ class DailyReport(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
-    __table_args__ = (
-        UniqueConstraint("group_id", "report_date", name="uq_daily_group_date"),
-    )
+    __table_args__ = (UniqueConstraint("group_id", "report_date", name="uq_daily_group_date"),)
 
 
 class DeliveryOutbox(Base):

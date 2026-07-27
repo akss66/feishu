@@ -27,7 +27,7 @@ from commerce_agent.ingestion.collectors import (
     SitemapCollector,
 )
 from commerce_agent.ingestion.collectors.base import candidate_url
-from commerce_agent.ingestion.http import FetchRequest, FetchResponse
+from commerce_agent.ingestion.http import FetchError, FetchRequest, FetchResponse
 from commerce_agent.ingestion.models import (
     CollectedFailure,
     CollectedItem,
@@ -143,10 +143,7 @@ async def collected(
     definition: SourceDefinition,
     fetch_context: FetchContext | None = None,
 ):
-    return [
-        item
-        async for item in collector.collect(definition, fetch_context or context())
-    ]
+    return [item async for item in collector.collect(definition, fetch_context or context())]
 
 
 def bundled_xml(name: str) -> dict[str, bytes]:
@@ -268,9 +265,7 @@ async def test_feed_collector_parses_rss_and_atom_from_injected_http_port() -> N
         assert items[0].published_at.tzinfo is not None
         assert all(item.artifact is not None for item in items)
         assert all(
-            item.artifact.body == documents[document_name]
-            for item in items
-            if item.artifact
+            item.artifact.body == documents[document_name] for item in items if item.artifact
         )
         assert all(item.artifact.status_code == 200 for item in items if item.artifact)
         assert len(http.requests) == 1
@@ -448,10 +443,7 @@ async def test_sitemap_collector_stops_a_cycle_without_refetching() -> None:
 @pytest.mark.asyncio
 async def test_sitemap_collector_rejects_more_than_256_sitemap_documents() -> None:
     urls = [f"https://docs.example.com/sitemap-{index}.xml" for index in range(257)]
-    responses = {
-        url: _sitemap_index(urls[index + 1])
-        for index, url in enumerate(urls[:-1])
-    }
+    responses = {url: _sitemap_index(urls[index + 1]) for index, url in enumerate(urls[:-1])}
     http = FakeHttpPort(responses)
     definition = source(
         CollectorKind.SITEMAP,
@@ -528,6 +520,50 @@ async def test_html_collector_uses_selector_resolves_links_and_deduplicates() ->
         http_requests=3,
         bytes_received=len(response.body) + len(detail_body) * 2,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    ["compliance_review_required", "rate_limited"],
+)
+async def test_html_collector_stops_after_terminal_detail_failure(
+    error_code: str,
+) -> None:
+    entry_url = "https://news.example.com/list"
+    first_url = "https://news.example.com/first"
+    second_url = "https://news.example.com/second"
+
+    class TerminalHttpPort:
+        def __init__(self) -> None:
+            self.requests: list[FetchRequest] = []
+
+        async def get(self, request: FetchRequest) -> FetchResponse:
+            self.requests.append(request)
+            if request.url == entry_url:
+                return FetchResponse(
+                    entry_url,
+                    200,
+                    body=(
+                        f'<a class="item" href="{first_url}">First</a>'
+                        f'<a class="item" href="{second_url}">Second</a>'
+                    ).encode(),
+                )
+            if request.url == first_url:
+                raise FetchError(error_code)
+            raise AssertionError("terminal detail failure must stop later requests")
+
+    http = TerminalHttpPort()
+    definition = source(
+        CollectorKind.HTML,
+        entry_url=entry_url,
+        config={"link_selector": "a.item", "item_limit": 2},
+    )
+
+    results = await collected(HtmlCollector(http), definition)
+
+    assert results == [CollectedFailure(error_code)]
+    assert [request.url for request in http.requests] == [entry_url, first_url]
 
 
 @pytest.mark.asyncio
@@ -695,10 +731,7 @@ async def test_gdelt_original_article_is_fetched_only_for_allowed_public() -> No
     ).encode()
     article_body = (
         b"<html><article>"
-        + (
-            b"<p>Amazon marketplace sellers must review this policy update carefully.</p>"
-            * 20
-        )
+        + (b"<p>Amazon marketplace sellers must review this policy update carefully.</p>" * 20)
         + b"</article></html>"
     )
     http = FakeHttpPort(
@@ -740,6 +773,50 @@ async def test_gdelt_original_article_is_fetched_only_for_allowed_public() -> No
     assert items[0].content_scope is ContentScope.FULL_TEXT
     assert items[0].artifact is not None
     assert items[0].artifact.body == article_body
+
+
+@pytest.mark.asyncio
+async def test_gdelt_public_authority_fetches_reviewed_www_host_exactly() -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=amazon"
+    article_url = "https://www.ftc.gov/news-events/news/amazon-marketplace"
+    discovery_body = json.dumps(
+        {
+            "articles": [
+                {
+                    "url": article_url,
+                    "title": "Amazon marketplace enforcement update",
+                    "seendate": "20260722T081500Z",
+                    "domain": "ftc.gov",
+                }
+            ]
+        }
+    ).encode()
+    article_body = (
+        b"<html><article>"
+        + b"<p>Amazon marketplace sellers received a public enforcement update.</p>" * 20
+        + b"</article></html>"
+    )
+    http = FakeHttpPort(
+        {
+            discovery_url: discovery_body,
+            article_url: FetchResponse(
+                article_url,
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=article_body,
+            ),
+        }
+    )
+
+    items = await collected(
+        ApiCollector(http, fetch_gdelt_originals=True),
+        _fixture_gdelt_source(discovery_url),
+    )
+
+    assert len(items) == 1
+    assert items[0].content_scope is ContentScope.FULL_TEXT
+    assert http.requests[1].allowed_hosts == ("ftc.gov", "www.ftc.gov")
+    assert "news.ftc.gov" not in http.requests[1].allowed_hosts
 
 
 @pytest.mark.asyncio
@@ -829,6 +906,47 @@ async def test_gdelt_original_fetch_is_disabled_by_default() -> None:
     assert [request.url for request in http.requests] == [discovery_url]
     assert len(items) == 1
     assert items[0].content_scope is ContentScope.METADATA_ONLY
+
+
+@pytest.mark.asyncio
+async def test_gdelt_original_fetch_is_suppressed_during_probe() -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    article_url = "https://publisher.example/article"
+    discovery_body = json.dumps(
+        {
+            "articles": [
+                {
+                    "url": article_url,
+                    "title": "Amazon policy article",
+                    "seendate": "20260722T081500Z",
+                    "domain": "publisher.example",
+                }
+            ]
+        }
+    ).encode()
+    http = FakeHttpPort({discovery_url: discovery_body})
+    profile = PublisherProfile(
+        publisher_key="publisher.example",
+        display_name="Fixture Publisher",
+        category=MediaCategory.SPECIALIST,
+        article_access=ArticleAccess.ALLOWED_PUBLIC,
+        allowed_hosts=("publisher.example",),
+    )
+    probe_context = replace(context(), allow_original_fetch=False)
+
+    items = await collected(
+        ApiCollector(
+            http,
+            publisher_lookup=lambda _: profile,
+            fetch_gdelt_originals=True,
+        ),
+        _fixture_gdelt_source(discovery_url),
+        probe_context,
+    )
+
+    assert len(items) == 1
+    assert items[0].content_scope is ContentScope.METADATA_ONLY
+    assert [request.url for request in http.requests] == [discovery_url]
 
 
 @pytest.mark.asyncio
@@ -961,6 +1079,74 @@ async def test_gdelt_original_fetch_failure_keeps_metadata_lead(
     assert len(items) == 1
     assert items[0].content_scope is ContentScope.METADATA_ONLY
     assert json.loads(items[0].body)["url"] == article_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_code",
+    ["compliance_review_required", "rate_limited"],
+)
+async def test_gdelt_terminal_original_failure_stops_later_original_requests(
+    error_code: str,
+) -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    first_url = "https://publisher.example/first"
+    second_url = "https://publisher.example/second"
+    discovery_body = json.dumps(
+        {
+            "articles": [
+                {
+                    "url": first_url,
+                    "title": "First Amazon article",
+                    "seendate": "20260722T081500Z",
+                    "domain": "publisher.example",
+                },
+                {
+                    "url": second_url,
+                    "title": "Second Amazon article",
+                    "seendate": "20260722T081600Z",
+                    "domain": "publisher.example",
+                },
+            ]
+        }
+    ).encode()
+
+    class TerminalHttpPort:
+        def __init__(self) -> None:
+            self.requests: list[FetchRequest] = []
+
+        async def get(self, request: FetchRequest) -> FetchResponse:
+            self.requests.append(request)
+            if request.url == discovery_url:
+                return FetchResponse(discovery_url, 200, body=discovery_body)
+            if request.url == first_url:
+                raise FetchError(error_code)
+            raise AssertionError("terminal publisher failure must stop later originals")
+
+    http = TerminalHttpPort()
+    profile = PublisherProfile(
+        publisher_key="publisher.example",
+        display_name="Fixture Publisher",
+        category=MediaCategory.SPECIALIST,
+        article_access=ArticleAccess.ALLOWED_PUBLIC,
+        allowed_hosts=("publisher.example",),
+    )
+
+    results = await collected(
+        ApiCollector(
+            http,
+            publisher_lookup=lambda _: profile,
+            fetch_gdelt_originals=True,
+        ),
+        _fixture_gdelt_source(discovery_url),
+    )
+
+    failures = [result.error_code for result in results if isinstance(result, CollectedFailure)]
+    metadata = [result for result in results if isinstance(result, CollectedItem)]
+    assert failures == [error_code]
+    assert len(metadata) == 2
+    assert all(item.content_scope is ContentScope.METADATA_ONLY for item in metadata)
+    assert [request.url for request in http.requests] == [discovery_url, first_url]
 
 
 @pytest.mark.parametrize(
@@ -1300,9 +1486,7 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
 ) -> None:
     browsers: list[FakeBrowser] = []
     final_url = "https://xn--bcher-kva.example/final/"
-    module = SimpleNamespace(
-        async_playwright=lambda: FakePlaywrightManager(browsers, final_url)
-    )
+    module = SimpleNamespace(async_playwright=lambda: FakePlaywrightManager(browsers, final_url))
     monkeypatch.setattr(importlib, "import_module", lambda name: module)
     resolver = FakeResolver({"xn--bcher-kva.example": ("1.1.1.1",)})
     port = PlaywrightBrowserPort(safety_policy=UrlSafetyPolicy(resolver))
@@ -1330,13 +1514,10 @@ async def test_playwright_port_uses_fresh_hardened_nonpersistent_contexts(
             "headless": True,
             "args": [
                 "--disable-quic",
-                "--host-resolver-rules="
-                "MAP xn--bcher-kva.example 1.1.1.1, MAP * ^NOTFOUND",
+                "--host-resolver-rules=MAP xn--bcher-kva.example 1.1.1.1, MAP * ^NOTFOUND",
             ],
         }
-        assert browser.context_options == [
-            {"accept_downloads": False, "service_workers": "block"}
-        ]
+        assert browser.context_options == [{"accept_downloads": False, "service_workers": "block"}]
         assert browser.contexts[0].closed is True
         assert browser.closed is True
         page = browser.contexts[0].page

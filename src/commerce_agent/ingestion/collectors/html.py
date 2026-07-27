@@ -141,10 +141,15 @@ class HtmlCollector:
                 raise
             except (FetchError, CollectorError, UrlSafetyError) as error:
                 yield detail_failure(error)
+                if getattr(error, "code", None) in {
+                    "compliance_review_required",
+                    "rate_limited",
+                }:
+                    return
                 continue
             if use_public_article_gate:
                 try:
-                    validate_public_article(
+                    matched_platforms = validate_public_article(
                         body=detail.body,
                         content_type=detail.headers.get("content-type"),
                         platforms=source.platforms,
@@ -161,6 +166,7 @@ class HtmlCollector:
                 etag=detail.etag,
                 last_modified=detail.last_modified,
                 artifact=artifact,
+                platforms=matched_platforms if use_public_article_gate else None,
             )
 
 

@@ -224,11 +224,7 @@ async def test_sources_coverage_lists_all_ten_platforms_with_compliance_counts()
 
     assert exit_code == 0
     assert stderr == ""
-    rows = {
-        line.split()[0]: line.split()[1:]
-        for line in stdout.splitlines()[2:]
-        if line.strip()
-    }
+    rows = {line.split()[0]: line.split()[1:] for line in stdout.splitlines()[2:] if line.strip()}
     assert set(rows) == {platform.value for platform in Platform}
     assert rows["amazon"] == [
         "1",
@@ -343,9 +339,7 @@ async def test_run_source_success_reports_counts_and_exits_zero() -> None:
 
 
 async def test_probe_source_runs_the_explicit_probe_path() -> None:
-    registry = SourceRegistry(
-        [source("media-gdelt", platform="temu", enabled=False)]
-    )
+    registry = SourceRegistry([source("media-gdelt", platform="temu", enabled=False)])
     app = FakeApplication(
         registry,
         source_summaries={"media-gdelt": summary("media-gdelt", RunStatus.SUCCESS)},
@@ -581,6 +575,101 @@ def test_ingestion_cli_settings_accept_cloudflare_doh(
     monkeypatch.setenv("INGESTION_DNS_MODE", "cloudflare_doh")
 
     assert _IngestionSettings(_env_file=None).ingestion_dns_mode == "cloudflare_doh"
+
+
+def test_ingestion_cli_uses_safe_gdelt_defaults() -> None:
+    settings = _IngestionSettings(_env_file=None)
+
+    assert settings.gdelt_original_fetch_enabled is False
+    assert settings.gdelt_original_fetch_max_per_source == 5
+    assert settings.gdelt_media_body_retention_days == 7
+
+
+async def test_ingestion_cli_wires_overridden_gdelt_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import ingestion_cli
+
+    captured: dict[str, object] = {}
+
+    class Settings:
+        database_url = "sqlite+aiosqlite:///:memory:"
+        ingestion_browser_enabled = False
+        ingestion_dns_mode = "system"
+        ingestion_global_concurrency = 2
+        ingestion_domain_rps = 1.0
+        ingestion_http_timeout_seconds = 3.0
+        ingestion_max_response_bytes = 4096
+        ingestion_user_agent = "test-agent"
+        snapshot_dir = "."
+        gdelt_original_fetch_enabled = True
+        gdelt_original_fetch_max_per_source = 7
+        gdelt_media_body_retention_days = 7
+
+    class Database:
+        session = object()
+
+        def __init__(self, url: str) -> None:
+            del url
+
+        async def create_schema(self) -> None:
+            pass
+
+        async def dispose(self) -> None:
+            pass
+
+    class Repository:
+        def __init__(self, session: object) -> None:
+            del session
+
+    class HttpClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured["http_kwargs"] = kwargs
+
+        async def aclose(self) -> None:
+            pass
+
+    class Collector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    class ApiCollector:
+        def __init__(self, client: object, **kwargs: object) -> None:
+            del client
+            captured["api_kwargs"] = kwargs
+
+    class Service:
+        def __init__(self, **kwargs: object) -> None:
+            captured["service_kwargs"] = kwargs
+
+        async def initialize(self) -> None:
+            captured["initialized"] = True
+
+    monkeypatch.setattr(ingestion_cli, "_IngestionSettings", Settings)
+    monkeypatch.setattr(ingestion_cli, "Database", Database)
+    monkeypatch.setattr(ingestion_cli, "SqlAlchemyIngestionRepository", Repository)
+    monkeypatch.setattr(ingestion_cli, "build_registry", lambda: SourceRegistry([]))
+    monkeypatch.setattr(
+        ingestion_cli,
+        "build_resolver_bundle",
+        lambda mode: SimpleNamespace(safety_policy=mode, resources=()),
+    )
+    monkeypatch.setattr(ingestion_cli, "IngestionHttpClient", HttpClient)
+    for name in ("FeedCollector", "SitemapCollector", "HtmlCollector", "BrowserCollector"):
+        monkeypatch.setattr(ingestion_cli, name, Collector)
+    monkeypatch.setattr(ingestion_cli, "ApiCollector", ApiCollector)
+    monkeypatch.setattr(ingestion_cli, "IngestionService", Service)
+
+    application = await build_application()
+    await application.aclose()
+
+    assert captured["api_kwargs"] == {
+        "fetch_gdelt_originals": True,
+        "gdelt_original_fetch_limit": 7,
+    }
+    assert captured["http_kwargs"]["max_redirects"] == 3  # type: ignore[index]
+    assert captured["service_kwargs"]["gdelt_media_body_retention_days"] == 7  # type: ignore[index]
+    assert captured["initialized"] is True
 
 
 async def test_production_application_closes_http_resolver_then_database() -> None:

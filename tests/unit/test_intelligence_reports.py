@@ -128,9 +128,7 @@ def test_report_prefers_official_source_for_same_event() -> None:
         trust_tier=TrustTier.OFFICIAL,
     )
 
-    draft = DailyReportComposer().compose(
-        report_date=date(2026, 7, 21), analyses=(media, official)
-    )
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=(media, official))
 
     assert draft.selected_analysis_ids == (official.analysis_id,)
 
@@ -178,9 +176,7 @@ def test_report_ranks_by_risk_then_confidence_then_recency() -> None:
         _analysis(4, risk=RiskLevel.MEDIUM, confidence=80, fetched_at=newer),
     )
 
-    draft = DailyReportComposer().compose(
-        report_date=date(2026, 7, 21), analyses=analyses
-    )
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=analyses)
 
     assert draft.selected_analysis_ids == (2, 4, 3, 1)
 
@@ -191,9 +187,7 @@ def test_report_uses_official_source_before_recency_for_tied_events() -> None:
     official = _analysis(1, trust_tier=TrustTier.OFFICIAL, fetched_at=older)
     media = _analysis(2, trust_tier=TrustTier.MEDIA, fetched_at=newer)
 
-    draft = DailyReportComposer().compose(
-        report_date=date(2026, 7, 21), analyses=(media, official)
-    )
+    draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=(media, official))
 
     assert draft.selected_analysis_ids == (official.analysis_id, media.analysis_id)
 
@@ -224,11 +218,7 @@ def test_daily_card_shows_platform_source_coverage_leads_and_safe_anomaly() -> N
             full_text_update_count=3 if platform is Platform.AMAZON else 0,
             feed_summary_count=1 if platform is Platform.AMAZON else 0,
             metadata_only_count=0,
-            source_anomalies=(
-                ("source-a:suspended:timeout",)
-                if platform is Platform.OZON
-                else ()
-            ),
+            source_anomalies=(("source-a:suspended:timeout",) if platform is Platform.OZON else ()),
         )
         for platform in Platform
     )
@@ -244,15 +234,9 @@ def test_daily_card_shows_platform_source_coverage_leads_and_safe_anomaly() -> N
     )
     assert coverage_section["items"][0] == "平台 1/10｜有效来源 2/20"
     assert "Amazon 2/2｜正文 3｜摘要线索 1｜元数据线索 0" in coverage_section["items"]
-    leads = next(
-        section for section in payload["sections"] if section["title"] == "待核实线索"
-    )
-    assert leads["items"] == [
-        "Amazon：仅摘要 1 条、元数据 0 条；未进入 AI 风险判断"
-    ]
-    anomalies = next(
-        section for section in payload["sections"] if section["title"] == "来源异常"
-    )
+    leads = next(section for section in payload["sections"] if section["title"] == "待核实线索")
+    assert leads["items"] == ["Amazon：仅摘要 1 条、元数据 0 条；未进入 AI 风险判断"]
+    anomalies = next(section for section in payload["sections"] if section["title"] == "来源异常")
     assert anomalies["items"] == ["Ozon：今日超时，本次为部分覆盖"]
 
 
@@ -285,9 +269,7 @@ def test_b_and_health_reports_share_three_state_coverage_wording(
     b_report = composer.compose(
         report_date=date(2026, 7, 21), analyses=(_analysis(1),), coverage=coverage
     )
-    health_report = composer.compose(
-        report_date=date(2026, 7, 21), analyses=(), coverage=coverage
-    )
+    health_report = composer.compose(report_date=date(2026, 7, 21), analyses=(), coverage=coverage)
 
     assert b_report.payload["sections"][-1]["items"][1] == expected
     assert health_report.payload["sections"][-1]["items"][1] == expected
@@ -310,9 +292,7 @@ def test_conservative_daily_hides_unreviewed_model_actions() -> None:
 def test_aggressive_pending_item_is_labeled_and_uses_only_reversible_action() -> None:
     draft = DailyReportComposer().compose(
         report_date=date(2026, 7, 21),
-        analyses=(
-            _analysis(1, confidence=70, model_action="立即删除全部列表"),
-        ),
+        analyses=(_analysis(1, confidence=70, model_action="立即删除全部列表"),),
         profile=RiskProfile.AGGRESSIVE,
     )
     encoded = json.dumps(draft.payload, ensure_ascii=False)
@@ -377,14 +357,38 @@ def test_media_report_item_uses_catalog_label_and_content_basis() -> None:
     assert item["content_basis"] == "full_text"
 
 
+def test_public_authority_report_item_preserves_distinct_category() -> None:
+    authority = _analysis(1)
+    authority = replace(
+        authority,
+        candidate=replace(
+            authority.candidate,
+            publisher_key="ftc.gov",
+            attribution="U.S. Federal Trade Commission",
+            content_scope="full_text",
+        ),
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(authority,),
+    )
+
+    item = draft.payload["items"][0]
+    assert item["media_category"] == "public_authority"
+    assert item["source_name"] == "Federal Trade Commission"
+
+
 def test_profiles_change_actions_but_not_evidence_or_verification_status() -> None:
     analysis = _analysis(1, confidence=70, model_action="irreversible model action")
     payloads = {
-        profile: DailyReportComposer().compose(
+        profile: DailyReportComposer()
+        .compose(
             report_date=date(2026, 7, 21),
             analyses=(analysis,),
             profile=profile,
-        ).payload
+        )
+        .payload
         for profile in RiskProfile
     }
 

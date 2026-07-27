@@ -113,9 +113,7 @@ async def _run_configured(settings: Settings) -> None:
                 resources.channel,
                 bindings,
                 ingestion=(
-                    resources.scheduler.service
-                    if resources.scheduler is not None
-                    else None
+                    resources.scheduler.service if resources.scheduler is not None else None
                 ),
             )
             resources.intelligence_scheduler = intelligence.scheduler
@@ -154,9 +152,7 @@ def _build_manual_submissions(database: Any) -> Any:
     from commerce_agent.ingestion.official_notices import OfficialAccountRegistry
     from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
 
-    accounts_path = (
-        Path(__file__).parent / "sources" / "official_accounts.yaml"
-    )
+    accounts_path = Path(__file__).parent / "sources" / "official_accounts.yaml"
     accounts = OfficialAccountRegistry.from_yaml(accounts_path)
     return ManualSubmissionService(
         accounts,
@@ -187,15 +183,14 @@ def _build_email_notice_scheduler(settings: Any, sink: Any) -> Any:
     provider = ImapOfficialNoticeProvider(
         client,
         accounts=accounts,
-        allowed_senders=parse_allowed_senders(
-            settings.official_notice_email_allowed_senders
-        ),
+        allowed_senders=parse_allowed_senders(settings.official_notice_email_allowed_senders),
         max_message_bytes=settings.official_notice_email_max_message_bytes,
         max_attachment_bytes=settings.official_notice_email_max_attachment_bytes,
     )
     return IngestionScheduler(
         EmailNoticeIngestionService(provider, sink),
         interval_minutes=settings.ingestion_interval_minutes,
+        retention_enabled=False,
         timezone="UTC",
     )
 
@@ -360,6 +355,7 @@ async def _build_ingestion(
             timeout_seconds=settings.ingestion_http_timeout_seconds,
             max_response_bytes=settings.ingestion_max_response_bytes,
             user_agent=settings.ingestion_user_agent,
+            max_redirects=3,
         )
         collectors = {
             CollectorKind.RSS: FeedCollector(http_client),

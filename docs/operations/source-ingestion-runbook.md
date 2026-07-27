@@ -54,9 +54,11 @@ GDELT 只负责发现，不能替代原出版商授权。只有代码目录中�
 出版商才能请求原文页；`licensed_api` 必须走单独的授权连接器。其他状态不得请求原文，
 元数据也不会进入 LLM。新增媒体必须先更新该审计表和目录测试，再执行一次受控冒烟。
 
-GDELT 首次冒烟若返回 429、`rate_limited` 或其他网络错误，必须继续保持禁用；不要增加
-重试次数或改用代理。等待出口限流解除后，手动重跑 `probe --source media-gdelt-cross-border`。
-仅在单次逻辑请求成功后才修改 `enabled`，并同时更新审计记录和登记表测试。
+10 个 `media-gdelt-*` 元数据发现源保持启用；原文二次抓取由
+`GDELT_ORIGINAL_FETCH_ENABLED` 独立控制并默认关闭。发现请求若返回 429 或
+`rate_limited`，不要增加重试次数或改用代理；本轮共享 host 熔断会停止其余同域请求。
+等待出口限流解除后，可逐一执行 `probe --source media-gdelt-amazon` 等发现探测。
+`probe` 明确禁止原文二次抓取；只有经批准的受控 `run --source` 才能验证开启后的原文路径。
 
 ## 手动命令与退出码
 
@@ -108,7 +110,8 @@ python -m commerce_agent.ingestion_cli health
 
 - `DATABASE_URL` 默认指向工作目录下的 `commerce_agent.db`；生产环境应使用权限受控的路径。
 - `SNAPSHOT_DIR` 默认是 `./data/snapshots`，按日期、来源 ID 和 SHA-256 压缩保存原始响应。
-- GDELT 媒体原始快照默认只保留 30 天；清理严格限制在该来源的日期子目录内。
+- 所有临时媒体 `full_text` 正文和原始快照最多保留 7 天。进程启动时及独立的每小时保留任务
+  都会全局清理，不依赖来源是否启用、合规、健康、仍在登记表或再次运行。
 - `.db`、`data/`、日志和 `.env` 已被 Git 忽略；备份同样必须限制访问。
 - 快照不得保存 Cookie、Authorization、令牌或请求查询串。不要手动编辑已入库版本。
 
@@ -187,6 +190,7 @@ Remove-Item Env:RUN_PUBLIC_SOURCE_SMOKE
 类型、至少 300 个可见字符、明确的平台名称且不存在访问墙或版权限制标记。未知发布者及
 `authorization_required`、`licensed_api`、`metadata_only`、`denied` 状态均不发起原文请求。
 
-已完成分析的 GDELT 全文和原始快照在 7 天后清理，待分析正文不会提前清理。回退只需设置
-`GDELT_ORIGINAL_FETCH_ENABLED=false` 并重启；10 个新闻发现源仍继续提供待核实线索。如需
-完全关闭某个平台，再将对应 `media-gdelt-*` 来源设为 `enabled: false`。
+所有 GDELT 和直连媒体临时全文及原始快照在 7 天边界统一清理，不区分分析完成、待分析、
+失败或来源状态；到期但仍待处理的分析任务会以 `media_body_expired` 安全终止。分析结果、
+短证据、哈希、归属和原文链接继续保留。回退只需设置
+`GDELT_ORIGINAL_FETCH_ENABLED=false` 并重启；10 个新闻发现源仍继续提供待核实线索。

@@ -160,7 +160,7 @@ class FakeSnapshotStore:
         )
 
 
-async def test_gdelt_run_expires_media_bodies_and_snapshots_after_seven_days() -> None:
+async def test_startup_expires_gdelt_media_bodies_and_snapshots_after_seven_days() -> None:
     gdelt = replace(
         source("media-gdelt-cross-border", collector=CollectorKind.API),
         trust_tier=TrustTier.MEDIA,
@@ -171,14 +171,15 @@ async def test_gdelt_run_expires_media_bodies_and_snapshots_after_seven_days() -
         {CollectorKind.API: FakeCollector()},
     )
 
-    await ingestion.run_source(gdelt.source_id)
+    repository.temporary_media_source_ids = (gdelt.source_id,)
+    await ingestion.initialize()
 
     cutoff = NOW - timedelta(days=7)
     assert snapshots.pruned == [(gdelt.source_id, cutoff)]
-    assert repository.media_redactions == [((gdelt.source_id,), cutoff)]
+    assert repository.media_redactions == [cutoff]
 
 
-async def test_direct_full_text_media_expires_bodies_after_seven_days() -> None:
+async def test_retention_job_expires_direct_full_text_media_after_seven_days() -> None:
     direct_media = replace(
         source("media-cifnews-cross-border", collector=CollectorKind.HTML),
         trust_tier=TrustTier.MEDIA,
@@ -191,11 +192,26 @@ async def test_direct_full_text_media_expires_bodies_after_seven_days() -> None:
         {CollectorKind.HTML: FakeCollector()},
     )
 
-    await ingestion.run_source(direct_media.source_id)
+    repository.temporary_media_source_ids = (direct_media.source_id,)
+    await ingestion.run_retention()
 
     cutoff = NOW - timedelta(days=7)
     assert snapshots.pruned == [(direct_media.source_id, cutoff)]
-    assert repository.media_redactions == [((direct_media.source_id,), cutoff)]
+    assert repository.media_redactions == [cutoff]
+
+
+async def test_retention_prunes_removed_and_disabled_media_without_source_run() -> None:
+    ingestion, repository, snapshots = service([], {})
+    repository.temporary_media_source_ids = ("removed-media", "disabled-media")
+
+    await ingestion.run_retention()
+
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [
+        ("disabled-media", cutoff),
+        ("removed-media", cutoff),
+    ]
+    assert repository.media_redactions == [cutoff]
 
 
 @pytest.mark.parametrize(
@@ -230,10 +246,10 @@ async def test_non_temporary_media_bodies_are_not_expired(
         {collector: FakeCollector()},
     )
 
-    await ingestion.run_source(source_definition.source_id)
+    await ingestion.initialize()
 
     assert snapshots.pruned == []
-    assert repository.media_redactions == []
+    assert repository.media_redactions == [NOW - timedelta(days=7)]
 
 
 class FakeRepository:
@@ -251,7 +267,8 @@ class FakeRepository:
         self.started: list[tuple[int, str, Trigger, datetime | None]] = []
         self.persisted: list[PersistableDocument] = []
         self.finished: list[tuple[int, RunSummary]] = []
-        self.media_redactions: list[tuple[tuple[str, ...], datetime]] = []
+        self.media_redactions: list[datetime] = []
+        self.temporary_media_source_ids: tuple[str, ...] = ()
         self.lease_tokens: dict[str, str] = {}
         self.suspended_source_ids: set[str] = set()
 
@@ -315,11 +332,13 @@ class FakeRepository:
     async def redact_expired_media_bodies(
         self,
         *,
-        source_ids: Sequence[str],
         before: datetime,
     ) -> int:
-        self.media_redactions.append((tuple(source_ids), before))
+        self.media_redactions.append(before)
         return 0
+
+    async def list_temporary_media_source_ids(self) -> tuple[str, ...]:
+        return self.temporary_media_source_ids
 
 
 class RecordingCompliance:
@@ -427,6 +446,7 @@ async def test_explicit_probe_collects_a_disabled_but_allowed_source_once() -> N
 
     assert summary.status is RunStatus.SUCCESS
     assert len(collector.calls) == 1
+    assert collector.calls[0][1].allow_original_fetch is False
     assert repository.persisted
     assert repository.synced[0][0].enabled is False
 
@@ -714,9 +734,7 @@ async def test_item_extraction_failure_is_counted_while_other_items_continue() -
 
 
 async def test_detail_failure_event_is_counted_without_snapshot_and_later_item_continues() -> None:
-    collector = FakeCollector(
-        [CollectedFailure("fetch_failed"), item(b"good", suffix="good")]
-    )
+    collector = FakeCollector([CollectedFailure("fetch_failed"), item(b"good", suffix="good")])
     ingestion, repository, snapshots = service(
         [source()],
         {CollectorKind.RSS: collector},
@@ -755,9 +773,7 @@ async def test_run_summary_stably_classifies_create_update_and_duplicate() -> No
             PersistOutcome(1, 2, created_document=False, created_version=False),
         ]
     )
-    collector = FakeCollector(
-        [item(suffix="new"), item(suffix="changed"), item(suffix="same")]
-    )
+    collector = FakeCollector([item(suffix="new"), item(suffix="changed"), item(suffix="same")])
     ingestion, _, _ = service(
         [source()],
         {CollectorKind.RSS: collector},

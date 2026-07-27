@@ -41,6 +41,7 @@ _CONTROLLED_DETAIL_ERROR_CODES = frozenset(
         "invalid_url",
         "network_retry_exhausted",
         "port_not_allowed",
+        "rate_limited",
         "redirect_missing_location",
         "redirect_status_not_supported",
         "renderer_failed",
@@ -183,6 +184,8 @@ def fetch_request(
         etag=context.etag if conditional else None,
         last_modified=context.last_modified if conditional else None,
         metrics=context.metrics,
+        source_id=source.source_id,
+        circuit=context.circuit,
     )
 
 

@@ -507,11 +507,7 @@ def test_each_platform_has_two_registered_candidate_publishers() -> None:
 
 def test_public_registry_has_one_bounded_gdelt_query_per_platform() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
-    gdelt = tuple(
-        source
-        for source in registry.sources
-        if source.adapter is SourceAdapter.GDELT
-    )
+    gdelt = tuple(source for source in registry.sources if source.adapter is SourceAdapter.GDELT)
 
     assert len(gdelt) == len(Platform)
     assert {source.platforms[0] for source in gdelt} == set(Platform)
@@ -554,9 +550,7 @@ def test_source_acceptance_register_covers_new_candidate_sources() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     acceptance = SOURCE_ACCEPTANCE.read_text(encoding="utf-8")
     candidate_ids = {
-        source.source_id
-        for source in registry.sources
-        if source.reviewed_at == date(2026, 7, 27)
+        source.source_id for source in registry.sources if source.reviewed_at == date(2026, 7, 27)
     }
 
     assert candidate_ids
@@ -581,15 +575,11 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
     reviewed = tuple(registry.require(source_id) for source_id in BALANCED_REVIEW_SOURCE_IDS)
 
     assert set(BALANCED_REVIEW_STATUS) == BALANCED_REVIEW_SOURCE_IDS
-    assert {
-        source.source_id: source.compliance
-        for source in reviewed
-    } == BALANCED_REVIEW_STATUS
+    assert {source.source_id: source.compliance for source in reviewed} == BALANCED_REVIEW_STATUS
     assert all(source.reviewed_at == date(2026, 7, 22) for source in reviewed)
     assert all(len(source.compliance_notes) >= 80 for source in reviewed)
     assert all(
-        source.enabled == (source.compliance is ComplianceStatus.ALLOWED)
-        for source in reviewed
+        source.enabled == (source.compliance is ComplianceStatus.ALLOWED) for source in reviewed
     )
     assert all(
         source.collector_config.get("item_limit", 20) <= 20
@@ -604,10 +594,7 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
         for source_id in OUT_OF_SCOPE_STATUS
     } == OUT_OF_SCOPE_STATUS
     assert {
-        source_id: {
-            field: getattr(registry.require(source_id), field)
-            for field in evidence
-        }
+        source_id: {field: getattr(registry.require(source_id), field) for field in evidence}
         for source_id, evidence in BALANCED_REVIEW_SOURCE_EVIDENCE.items()
     } == BALANCED_REVIEW_SOURCE_EVIDENCE
     assert set(BALANCED_REVIEW_NOTE_MARKERS) == BALANCED_REVIEW_SOURCE_IDS
@@ -709,6 +696,23 @@ def test_public_registry_enables_scoped_chinese_media_sources() -> None:
         "allowed_hosts": "imgs-b2b.100ec.cn",
         "public_article_gate": True,
         "item_limit": 5,
+    }
+    assert cifnews.strict_coverage_platforms == ()
+    assert ec100.strict_coverage_platforms == ()
+
+
+def test_public_registry_records_only_three_audited_strict_coverage_pairs() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    pairs = {
+        (source.publisher_key, platform)
+        for source in registry.sources
+        for platform in source.strict_coverage_platforms
+    }
+
+    assert pairs == {
+        ("ebayinc.com", Platform.EBAY),
+        ("coupang.com", Platform.COUPANG),
+        ("joybuy.com", Platform.JOYBUY),
     }
 
 

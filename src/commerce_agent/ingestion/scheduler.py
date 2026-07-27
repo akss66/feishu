@@ -12,11 +12,14 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from commerce_agent.ingestion.models import Trigger
 
 INGESTION_JOB_ID = "public-source-ingestion"
+RETENTION_JOB_ID = "temporary-media-retention"
 _LOGGER = logging.getLogger(__name__)
 
 
 class _IngestionService(Protocol):
     async def run_all(self, trigger: Trigger) -> tuple[Any, ...]: ...
+
+    async def run_retention(self) -> int: ...
 
 
 class IngestionScheduler:
@@ -27,11 +30,13 @@ class IngestionScheduler:
         service: _IngestionService,
         *,
         interval_minutes: int = 120,
+        retention_enabled: bool = True,
         timezone: str = "UTC",
         scheduler: AsyncIOScheduler | Any | None = None,
     ) -> None:
         self._service = service
         self._interval_minutes = interval_minutes
+        self._retention_enabled = retention_enabled
         self._scheduler = scheduler or AsyncIOScheduler(timezone=timezone)
         self._started = False
         self._running_tasks: set[asyncio.Task[None]] = set()
@@ -46,6 +51,16 @@ class IngestionScheduler:
         if self._started:
             return
         self._shutdown_complete.clear()
+        if self._retention_enabled:
+            self._scheduler.add_job(
+                self._run_retention,
+                trigger="interval",
+                minutes=60,
+                id=RETENTION_JOB_ID,
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
         self._scheduler.add_job(
             self._run,
             trigger="interval",
@@ -71,6 +86,21 @@ class IngestionScheduler:
         except Exception as error:
             _LOGGER.error(
                 "scheduled ingestion failed (exception_type=%s)",
+                type(error).__name__,
+            )
+        finally:
+            if task is not None:
+                self._running_tasks.discard(task)
+
+    async def _run_retention(self) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._running_tasks.add(task)
+        try:
+            await self._service.run_retention()
+        except Exception as error:
+            _LOGGER.error(
+                "scheduled temporary-media retention failed (exception_type=%s)",
                 type(error).__name__,
             )
         finally:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,7 +20,13 @@ from commerce_agent.ingestion.http import (
     FetchResponse,
     IngestionHttpClient,
 )
-from commerce_agent.ingestion.models import CollectedFailure, CollectedItem, FetchContext, Trigger
+from commerce_agent.ingestion.models import (
+    CollectedFailure,
+    CollectedItem,
+    FetchContext,
+    Platform,
+    Trigger,
+)
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.security import UrlSafetyError, UrlSafetyPolicy
 
@@ -30,16 +37,32 @@ _SMOKE_SOURCES = (
     ("media-cifnews-cross-border", "cifnews.com"),
     ("media-100ec-cross-border", "100ec.cn"),
 )
+_EVIDENCE_DIR = (
+    Path(__file__).parents[2]
+    / ".superpowers"
+    / "sdd"
+    / "2026-07-27-chinese-industry-media-direct-ingestion"
+    / "live-smoke-evidence"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SmokeEvidence:
+    source_id: str
+    executed_at: str
+    response_statuses: tuple[int, ...]
+    request_count: int
+    accepted_candidate_count: int
+    extracted_count: int
+    gate_result: str
+    matched_platforms: tuple[str, ...]
 
 
 def test_request_summary_redacts_query_values_without_losing_host_and_path() -> None:
     client = _TwoRequestBudget(_NeverCalledHttpPort())
     client.requests.append(
         FetchRequest(
-            url=(
-                "https://news.example.com/path/to/article"
-                "?token=private-marker&safe=value"
-            ),
+            url=("https://news.example.com/path/to/article?token=private-marker&safe=value"),
             allowed_hosts=("news.example.com",),
         )
     )
@@ -73,6 +96,53 @@ def test_result_diagnostic_redacts_item_url_and_preserves_failure_codes() -> Non
     assert "article_access_wall" in diagnostic
 
 
+def test_structured_smoke_evidence_is_exact_and_secret_free() -> None:
+    client = _TwoRequestBudget(_NeverCalledHttpPort())
+    client.requests.extend(
+        (
+            FetchRequest(
+                "https://news.example.com/list?token=secret",
+                ("news.example.com",),
+            ),
+            FetchRequest(
+                "https://news.example.com/article#secret",
+                ("news.example.com",),
+            ),
+        )
+    )
+    client.responses.extend(
+        (
+            FetchResponse("https://news.example.com/list", 200),
+            FetchResponse("https://news.example.com/article", 206),
+        )
+    )
+    results: list[CollectedItem | CollectedFailure] = [
+        CollectedItem(
+            "https://news.example.com/article?token=secret",
+            b"article",
+            platforms=(Platform.AMAZON,),
+        )
+    ]
+
+    evidence = _structured_evidence(
+        "fixture-source",
+        datetime(2026, 7, 27, 12, 34, 56, tzinfo=UTC),
+        client,
+        results,
+        extracted_count=1,
+        matched_platforms=(Platform.AMAZON,),
+    )
+    encoded = json.dumps(asdict(evidence), ensure_ascii=False)
+
+    assert evidence.response_statuses == (200, 206)
+    assert evidence.request_count == 2
+    assert evidence.accepted_candidate_count == 1
+    assert evidence.extracted_count == 1
+    assert evidence.gate_result == "accepted"
+    assert evidence.matched_platforms == ("amazon",)
+    assert "secret" not in encoded
+
+
 @pytest.mark.skipif(
     os.getenv("RUN_CHINESE_MEDIA_SMOKE") != "1",
     reason="set RUN_CHINESE_MEDIA_SMOKE=1 to run controlled Chinese-media checks",
@@ -104,8 +174,7 @@ async def test_direct_chinese_media_yields_one_bounded_full_text_document(
     try:
         try:
             results = [
-                result
-                async for result in HtmlCollector(budgeted_client).collect(source, context)
+                result async for result in HtmlCollector(budgeted_client).collect(source, context)
             ]
         except (FetchError, UrlSafetyError) as error:
             pytest.fail(
@@ -135,6 +204,15 @@ async def test_direct_chinese_media_yields_one_bounded_full_text_document(
     assert document.body
     assert document.metadata["content_scope"] == "full_text"
     assert document.metadata["publisher_key"] == expected_publisher
+    evidence = _structured_evidence(
+        source_id,
+        context.started_at,
+        budgeted_client,
+        results,
+        extracted_count=1,
+        matched_platforms=document.platforms,
+    )
+    _write_structured_evidence(evidence)
 
 
 class _TwoRequestBudget:
@@ -200,4 +278,35 @@ def _result_diagnostic(
     return (
         f"{source_id}: {_request_summary(client)}; "
         f"candidate_documents={item_urls!r}; failure_codes={failure_codes!r}"
+    )
+
+
+def _structured_evidence(
+    source_id: str,
+    executed_at: datetime,
+    client: _TwoRequestBudget,
+    results: list[CollectedItem | CollectedFailure],
+    *,
+    extracted_count: int,
+    matched_platforms: tuple[Platform, ...],
+) -> SmokeEvidence:
+    accepted = sum(isinstance(result, CollectedItem) for result in results)
+    return SmokeEvidence(
+        source_id=source_id,
+        executed_at=executed_at.isoformat(),
+        response_statuses=tuple(response.status_code for response in client.responses),
+        request_count=client.request_count,
+        accepted_candidate_count=accepted,
+        extracted_count=extracted_count,
+        gate_result="accepted" if accepted and extracted_count else "rejected",
+        matched_platforms=tuple(platform.value for platform in matched_platforms),
+    )
+
+
+def _write_structured_evidence(evidence: SmokeEvidence) -> None:
+    _EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    target = _EVIDENCE_DIR / f"{evidence.source_id}.json"
+    target.write_text(
+        json.dumps(asdict(evidence), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )

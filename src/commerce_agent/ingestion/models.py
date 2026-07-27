@@ -7,6 +7,10 @@ from datetime import date, datetime
 from enum import StrEnum
 from threading import Lock
 from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from commerce_agent.ingestion.http import RunDomainCircuit
 
 Scalar = str | int | float | bool | None
 _SAFE_ARTIFACT_HEADERS = frozenset({"content-type", "etag", "last-modified"})
@@ -101,10 +105,16 @@ class SourceDefinition:
     attribution: str | None = None
     publisher_key: str | None = None
     collector_config: Mapping[str, Scalar] = field(default_factory=dict)
+    strict_coverage_platforms: tuple[Platform, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "platforms", tuple(self.platforms))
         object.__setattr__(self, "regions", tuple(self.regions))
+        object.__setattr__(
+            self,
+            "strict_coverage_platforms",
+            tuple(self.strict_coverage_platforms),
+        )
         object.__setattr__(
             self,
             "collector_config",
@@ -170,6 +180,8 @@ class FetchContext:
     etag: str | None = None
     last_modified: str | None = None
     metrics: FetchMetrics = field(default_factory=FetchMetrics)
+    circuit: RunDomainCircuit | None = field(default=None, compare=False, repr=False)
+    allow_original_fetch: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +221,7 @@ class CollectedItem:
     last_modified: str | None = None
     artifact: ResponseArtifact | None = None
     content_scope: ContentScope | None = None
+    platforms: tuple[Platform, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,9 +235,11 @@ class ExtractedDocument:
     fetched_at: datetime
     author: str | None = None
     published_at: datetime | None = None
+    platforms: tuple[Platform, ...] = ()
     metadata: Mapping[str, Scalar] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "platforms", tuple(self.platforms))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 

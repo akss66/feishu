@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select
@@ -17,6 +18,7 @@ from commerce_agent.ingestion.models import (
     SourceDefinition,
     TrustTier,
 )
+from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.intelligence.evidence import EvidenceScorer
 from commerce_agent.intelligence.models import (
     ActionItem,
@@ -47,10 +49,14 @@ from commerce_agent.persistence.models import (
     DeliveryOutbox,
     DocumentAnalysis,
     DocumentVersion,
+    DocumentVersionPlatform,
     SourceHealth,
 )
 
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
+PUBLIC_SOURCES = (
+    Path(__file__).parents[2] / "src" / "commerce_agent" / "sources" / "public_sources.yaml"
+)
 
 
 def _source(
@@ -78,6 +84,7 @@ def _source(
         reviewed_at=date(2026, 7, 20),
         compliance_notes="Public feed approved for collection.",
         collector_config={"item_limit": 50},
+        strict_coverage_platforms=(Platform.EBAY,),
     )
 
 
@@ -87,6 +94,7 @@ def _candidate(
     canonical_url: str = "https://example.com/news/fee-update",
     source_id: str = "amazon-news",
     body: str = "Amazon changed a seller fee.",
+    platforms: tuple[Platform, ...] = (Platform.EBAY,),
 ) -> PersistableDocument:
     return PersistableDocument(
         source_id=source_id,
@@ -103,6 +111,7 @@ def _candidate(
         publisher_key=f"{source_id}.example.com",
         attribution=f"Seller News {source_id}",
         content_scope="full_text",
+        platforms=platforms,
     )
 
 
@@ -138,6 +147,25 @@ async def _repositories(tmp_path, filename: str = "intelligence.db"):
     return database, ingestion_repository, intelligence_repository
 
 
+async def test_claim_uses_version_platforms_instead_of_source_platforms(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'version-platform.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    try:
+        await ingestion.sync_sources([_source()])
+        await ingestion.persist_version(
+            _candidate(content_hash="a" * 64, platforms=(Platform.AMAZON,))
+        )
+
+        claim = await repository.claim_next(now=NOW)
+
+        assert claim is not None
+        assert claim.platforms == (Platform.AMAZON,)
+    finally:
+        await database.dispose()
+
+
 async def test_two_workers_cannot_claim_the_same_analysis_job(tmp_path) -> None:
     database, _, repository = await _repositories(tmp_path)
     competing_repository = SqlAlchemyIntelligenceRepository(database.session)
@@ -160,20 +188,14 @@ async def test_claim_skips_jobs_from_denied_sources(tmp_path) -> None:
     ingestion_repository = SqlAlchemyIngestionRepository(database.session)
     repository = SqlAlchemyIntelligenceRepository(database.session)
     try:
-        await ingestion_repository.sync_sources(
-            [_source(compliance=ComplianceStatus.DENIED)]
-        )
-        outcome = await ingestion_repository.persist_version(
-            _candidate(content_hash="d" * 64)
-        )
+        await ingestion_repository.sync_sources([_source(compliance=ComplianceStatus.DENIED)])
+        outcome = await ingestion_repository.persist_version(_candidate(content_hash="d" * 64))
 
         assert await repository.claim_next(now=NOW) is None
 
         async with database.session() as session:
             job = await session.scalar(
-                select(AnalysisJob).where(
-                    AnalysisJob.document_version_id == outcome.version_id
-                )
+                select(AnalysisJob).where(AnalysisJob.document_version_id == outcome.version_id)
             )
 
         assert job is not None
@@ -210,9 +232,7 @@ async def test_expired_second_lease_is_failed_without_a_third_claim(tmp_path) ->
     try:
         first = await repository.claim_next(now=NOW, lease_seconds=1)
         assert first is not None
-        second = await repository.claim_next(
-            now=NOW + timedelta(seconds=2), lease_seconds=1
-        )
+        second = await repository.claim_next(now=NOW + timedelta(seconds=2), lease_seconds=1)
         assert second is not None
 
         third = await repository.claim_next(now=NOW + timedelta(seconds=4))
@@ -236,9 +256,7 @@ async def test_stale_worker_cannot_fail_reclaimed_lease(tmp_path) -> None:
     try:
         old = await repository.claim_next(now=NOW, lease_seconds=1)
         assert old is not None
-        fresh = await repository.claim_next(
-            now=NOW + timedelta(seconds=2), lease_seconds=60
-        )
+        fresh = await repository.claim_next(now=NOW + timedelta(seconds=2), lease_seconds=60)
         assert fresh is not None
 
         with pytest.raises(StaleLeaseError):
@@ -479,6 +497,7 @@ async def test_same_body_from_email_and_feishu_is_analyzed_once(tmp_path) -> Non
                     source_id=email_source.source_id,
                     content_hash="a" * 64,
                     canonical_url="https://example.com/email",
+                    platforms=(Platform.AMAZON,),
                 ),
                 content_group_hash="shared-body",
             )
@@ -489,6 +508,7 @@ async def test_same_body_from_email_and_feishu_is_analyzed_once(tmp_path) -> Non
                     source_id=feishu_source.source_id,
                     content_hash="b" * 64,
                     canonical_url="https://example.com/feishu",
+                    platforms=(Platform.EBAY,),
                 ),
                 content_group_hash="shared-body",
             )
@@ -741,9 +761,7 @@ async def test_fail_analysis_retries_once_then_marks_job_failed(tmp_path) -> Non
         assert await repository.claim_next(now=NOW + timedelta(minutes=4)) is None
         second = await repository.claim_next(now=NOW + timedelta(minutes=5))
         assert second is not None
-        await repository.fail_analysis(
-            second, "invalid_response", now=NOW + timedelta(minutes=5)
-        )
+        await repository.fail_analysis(second, "invalid_response", now=NOW + timedelta(minutes=5))
 
         async with database.session() as session:
             job = await session.get(AnalysisJob, first.job_id)
@@ -830,9 +848,7 @@ async def test_report_query_uses_current_allowed_versions_and_exact_window(tmp_p
                 session.add(analysis)
                 await session.flush()
                 job = await session.scalar(
-                    select(AnalysisJob).where(
-                        AnalysisJob.document_version_id == outcome.version_id
-                    )
+                    select(AnalysisJob).where(AnalysisJob.document_version_id == outcome.version_id)
                 )
                 assert job is not None
                 job.status = "completed"
@@ -931,9 +947,7 @@ async def test_coverage_lists_effective_publishers_material_scopes_and_anomalies
                 )
             )
             job = await session.scalar(
-                select(AnalysisJob).where(
-                    AnalysisJob.document_version_id == outcome.version_id
-                )
+                select(AnalysisJob).where(AnalysisJob.document_version_id == outcome.version_id)
             )
             assert job is not None
             job.status = "completed"
@@ -964,9 +978,7 @@ async def test_coverage_lists_effective_publishers_material_scopes_and_anomalies
         assert by_platform[Platform.EBAY].full_text_update_count == 1
         assert by_platform[Platform.EBAY].feed_summary_count == 1
         assert by_platform[Platform.EBAY].metadata_only_count == 1
-        assert by_platform[Platform.EBAY].source_anomalies == (
-            "suspended-full:suspended:timeout",
-        )
+        assert by_platform[Platform.EBAY].source_anomalies == ("suspended-full:suspended:timeout",)
         assert by_platform[Platform.TEMU].effective_source_count == 0
         assert by_platform[Platform.TEMU].verified_update_count == 0
     finally:
@@ -1063,23 +1075,20 @@ async def test_reports_and_coverage_require_completed_analysis_jobs(tmp_path) ->
             await session.flush()
             analysis_id = analysis.id
 
-        pending_reports = await repository.list_report_analyses(
-            window_start=start, window_end=end
-        )
-        pending_coverage = await repository.list_coverage(
-            window_start=start, window_end=end
-        )
+        pending_reports = await repository.list_report_analyses(window_start=start, window_end=end)
+        pending_coverage = await repository.list_coverage(window_start=start, window_end=end)
 
         assert pending_reports == ()
-        assert next(
-            row for row in pending_coverage if row.platform is Platform.EBAY
-        ).verified_update_count == 0
+        assert (
+            next(
+                row for row in pending_coverage if row.platform is Platform.EBAY
+            ).verified_update_count
+            == 0
+        )
 
         async with database.session.begin() as session:
             job = await session.scalar(
-                select(AnalysisJob).where(
-                    AnalysisJob.document_version_id == outcome.version_id
-                )
+                select(AnalysisJob).where(AnalysisJob.document_version_id == outcome.version_id)
             )
             assert job is not None
             job.status = "completed"
@@ -1087,14 +1096,68 @@ async def test_reports_and_coverage_require_completed_analysis_jobs(tmp_path) ->
         completed_reports = await repository.list_report_analyses(
             window_start=start, window_end=end
         )
-        completed_coverage = await repository.list_coverage(
-            window_start=start, window_end=end
-        )
+        completed_coverage = await repository.list_coverage(window_start=start, window_end=end)
 
         assert [row.analysis_id for row in completed_reports] == [analysis_id]
-        assert next(
-            row for row in completed_coverage if row.platform is Platform.EBAY
-        ).verified_update_count == 1
+        assert (
+            next(
+                row for row in completed_coverage if row.platform is Platform.EBAY
+            ).verified_update_count
+            == 1
+        )
+    finally:
+        await database.dispose()
+
+
+async def test_production_registry_keeps_exact_article_platform_and_strict_baseline(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'production-baseline.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    intelligence = SqlAlchemyIntelligenceRepository(database.session)
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    direct_source = registry.require("media-cifnews-cross-border")
+    try:
+        await ingestion.sync_sources(registry.sources)
+        outcome = await ingestion.persist_version(
+            replace(
+                _candidate(
+                    source_id=direct_source.source_id,
+                    content_hash="9" * 64,
+                    canonical_url="https://www.cifnews.com/article/amazon-only",
+                    platforms=(Platform.AMAZON,),
+                ),
+                publisher_key=direct_source.publisher_key,
+                attribution=direct_source.attribution,
+                content_scope=ContentScope.FULL_TEXT.value,
+            )
+        )
+
+        async with database.session() as session:
+            version_platforms = tuple(
+                await session.scalars(
+                    select(DocumentVersionPlatform.platform).where(
+                        DocumentVersionPlatform.document_version_id == outcome.version_id
+                    )
+                )
+            )
+        coverage = await intelligence.list_coverage(
+            window_start=datetime(2026, 7, 1, tzinfo=UTC),
+            window_end=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+        strict = {
+            row.platform: row.effective_source_count
+            for row in coverage
+            if row.effective_source_count
+        }
+
+        assert version_platforms == (Platform.AMAZON.value,)
+        assert strict == {
+            Platform.EBAY: 1,
+            Platform.COUPANG: 1,
+            Platform.JOYBUY: 1,
+        }
     finally:
         await database.dispose()
 
@@ -1188,9 +1251,7 @@ async def test_correction_report_is_idempotent_and_marks_sent_without_official_r
 
         assert first == second
         assert outbox is not None
-        assert outbox.idempotency_key.startswith(
-            "daily-correction:chat-one:2026-07-23:"
-        )
+        assert outbox.idempotency_key.startswith("daily-correction:chat-one:2026-07-23:")
         assert outbox.status == "sent"
         assert outbox.feishu_message_id == "om_correction"
         assert outbox.payload["title"].startswith("补发 · ")
@@ -1206,9 +1267,7 @@ async def test_report_variant_rejects_unknown_namespace(tmp_path) -> None:
     draft = DailyReportComposer().compose(report_date=date(2026, 7, 23), analyses=())
     try:
         with pytest.raises(ValueError, match="unsupported report delivery variant"):
-            await repository.queue_report_variant(
-                "chat-one", draft, variant="unknown", now=NOW
-            )
+            await repository.queue_report_variant("chat-one", draft, variant="unknown", now=NOW)
     finally:
         await database.dispose()
 

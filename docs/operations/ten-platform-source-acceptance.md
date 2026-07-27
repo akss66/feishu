@@ -304,7 +304,7 @@
 ### ftc.gov
 
 - Publisher: United States Federal Trade Commission
-- Allowed hosts: `ftc.gov`
+- Allowed hosts: exact `ftc.gov`, `www.ftc.gov`
 - Terms evidence: https://www.ftc.gov/policy-notices/website-policy states that most FTC
   material is United States Government work in the public domain and requests attribution.
 - Robots evidence: https://www.ftc.gov/robots.txt permits public news paths and declares a
@@ -316,7 +316,7 @@
 ### gov.uk
 
 - Publisher: UK Government
-- Allowed hosts: `gov.uk`
+- Allowed hosts: exact `gov.uk`, `www.gov.uk`
 - Terms evidence: https://www.gov.uk/help/terms-conditions states that most GOV.UK content is
   published under the Open Government Licence and may be reproduced under its conditions.
 - Robots evidence: https://www.gov.uk/robots.txt permits ordinary public pages while excluding
@@ -384,14 +384,17 @@ URL 只计 1 个来源。摘要和元数据线索不计入有效来源。
 - `article_body_incomplete`
 - `article_platform_irrelevant`
 
-详情 HTTP 或 URL 安全失败会收敛为受控失败码（例如 `detail_fetch_failed`），记录该候选失败后
-继续处理同一来源的其他候选。来源运行本身具有独立 lease、结果和熔断状态；批量运行并发调度
+详情 HTTP 或 URL 安全失败会收敛为受控失败码。普通候选失败后继续处理；403 会保留
+`compliance_review_required` 并停止该来源本轮后续详情请求，耗尽重试后的 429 会保留
+`rate_limited` 并打开本轮共享 host 熔断，因此同域的其他 GDELT 来源也不会继续发请求。
+来源运行本身具有独立 lease 和结果；批量运行并发调度
 各来源，所以一个来源的正常失败摘要不会阻止其他来源完成。验证码、登录、会员、付费墙、
 JavaScript 安全检查、403 或耗尽重试后的 429 均只允许安全失败，不得重试身份、使用代理、
 改变 host/path、借用浏览器状态或降低正文门。
 
 `TrustTier.MEDIA + full_text` 的直连媒体与 GDELT 临时媒体正文使用同一个固定七天清理边界。
-每次来源运行前，系统按 `started_at - 7 days` 清理该来源旧 snapshot，并在仓库中脱敏到期正文。
+系统在进程启动时和独立每小时保留任务中全局清理，不依赖来源启用、合规、健康、登记或再次运行；
+待处理任务在正文到期时以 `media_body_expired` 安全终止。
 飞书只接收分析、短证据和原文链接，不发送或长期保存整篇媒体正文。
 
 GDELT 是独立、可选的 `metadata_only` 发现层，不是两个直连来源的上游依赖。
@@ -410,7 +413,10 @@ GDELT Amazon 在 2026-07-27 的单次请求返回 429，只会使对应 GDELT �
 | `media-cifnews-cross-border` | `https://www.cifnews.com/` | 入口与详情均为 HTTP client 接受的 2xx；精确状态码未持久化 | 2 | 1 | 1 | 接受；提取结果为 `full_text`，publisher 为 `cifnews.com` | 不适用 |
 | `media-100ec-cross-border` | `https://imgs-b2b.100ec.cn/list--3--1.html` | 入口与详情均为 HTTP client 接受的 2xx；精确状态码未持久化 | 2 | 1 | 1 | 接受；提取结果为 `full_text`，publisher 为 `100ec.cn` | 不适用 |
 
-quiet pytest 输出没有留存具体详情文章 URL 或精确执行时刻，因此这里不补写这些字段。该次运行
+以上是历史 smoke 的诚实记录，不补造当时未保存的精确状态码或执行时刻。下一次显式 opt-in
+smoke 会在 `.superpowers/sdd/2026-07-27-chinese-industry-media-direct-ingestion/live-smoke-evidence/`
+为每个来源生成无查询串/片段的 JSON，包含执行时间、逐请求精确状态码、请求数、接受候选数、
+提取数、稳定正文门结果和精确匹配平台；该真实产物经复核后再提交。该次历史运行
 未登录、未处理或破解验证码，未使用 Cookie、Authorization、代理、替代身份、浏览器状态、
 重试、重定向或自定义伪装 header；也未遇到或绕过 403、429、challenge 或其他访问控制。
 GDELT 没有参与这两个直连来源的 smoke，其既有 429 不影响以上 PASS。

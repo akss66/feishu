@@ -58,6 +58,8 @@ class FetchRequest:
     etag: str | None = None
     last_modified: str | None = None
     metrics: FetchMetrics | None = field(default=None, compare=False, repr=False)
+    source_id: str | None = field(default=None, compare=False, repr=False)
+    circuit: RunDomainCircuit | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "allowed_hosts", tuple(self.allowed_hosts))
@@ -120,6 +122,41 @@ class FetchError(RuntimeError):
         super().__init__(f"fetch failed: {code}{suffix}")
 
 
+class RunDomainCircuit:
+    """Run-scoped terminal response circuit shared by all source collectors."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._blocked_sources: dict[str, tuple[str, int]] = {}
+        self._blocked_hosts: dict[str, tuple[str, int]] = {}
+
+    async def require_open(self, host: str, source_id: str | None) -> None:
+        async with self._lock:
+            blocked = self._blocked_sources.get(source_id) if source_id is not None else None
+            if blocked is None:
+                blocked = self._blocked_hosts.get(host)
+        if blocked is not None:
+            code, status_code = blocked
+            raise FetchError(
+                code,
+                status_code=status_code,
+                retryable=code == "rate_limited",
+            )
+
+    async def trip_source(self, source_id: str | None) -> None:
+        if source_id is None:
+            return
+        async with self._lock:
+            self._blocked_sources.setdefault(
+                source_id,
+                ("compliance_review_required", 403),
+            )
+
+    async def trip_host(self, host: str) -> None:
+        async with self._lock:
+            self._blocked_hosts.setdefault(host, ("rate_limited", 429))
+
+
 class _DomainLimiter:
     def __init__(self, requests_per_second: float, clock: Clock, sleeper: Sleeper) -> None:
         if requests_per_second <= 0:
@@ -160,7 +197,7 @@ class IngestionHttpClient:
         max_response_bytes: int = 10_485_760,
         user_agent: str = "CrossBorderCommerceAgent/0.1",
         max_retries: int = 3,
-        max_redirects: int = 5,
+        max_redirects: int = 3,
         clock: Clock = monotonic_clock,
         wall_clock: WallClock = system_wall_clock,
         sleeper: Sleeper = asyncio.sleep,
@@ -215,6 +252,11 @@ class IngestionHttpClient:
                     current_url,
                     request.allowed_hosts,
                 )
+                if request.circuit is not None:
+                    await request.circuit.require_open(
+                        safe_url.host,
+                        request.source_id,
+                    )
                 request_started = True
                 result = await self._fetch_hop(safe_url, request)
                 if result.status_code in _REDIRECT_STATUSES:
@@ -288,6 +330,8 @@ class IngestionHttpClient:
             status_code = result.status_code
             if status_code == 429 or 500 <= status_code < 600:
                 if attempt == self._max_retries:
+                    if status_code == 429 and request.circuit is not None:
+                        await request.circuit.trip_host(safe_url.host)
                     raise FetchError(
                         "rate_limited" if status_code == 429 else "retry_exhausted",
                         status_code=status_code,
@@ -300,6 +344,8 @@ class IngestionHttpClient:
                 await self._sleeper(max(_backoff(attempt), retry_after or 0.0))
                 continue
             if status_code in {401, 403}:
+                if status_code == 403 and request.circuit is not None:
+                    await request.circuit.trip_source(request.source_id)
                 raise FetchError("compliance_review_required", status_code=status_code)
             if 400 <= status_code < 500:
                 raise FetchError("http_client_error", status_code=status_code)
@@ -321,7 +367,17 @@ class IngestionHttpClient:
         httpx_request.extensions[_RESOLVED_ADDRESSES_EXTENSION] = safe_url.resolved_addresses
 
         async with self._semaphore:
+            if request.circuit is not None:
+                await request.circuit.require_open(
+                    safe_url.host,
+                    request.source_id,
+                )
             await self._limiter.wait(safe_url.host)
+            if request.circuit is not None:
+                await request.circuit.require_open(
+                    safe_url.host,
+                    request.source_id,
+                )
             response = await self._client.send(
                 httpx_request,
                 stream=True,

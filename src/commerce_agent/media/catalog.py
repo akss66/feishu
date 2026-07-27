@@ -10,6 +10,7 @@ class MediaCategory(StrEnum):
     GLOBAL_AUTHORITY = "global_authority"
     SPECIALIST = "specialist"
     CHINESE_INDUSTRY = "chinese_industry"
+    PUBLIC_AUTHORITY = "public_authority"
 
 
 class ArticleAccess(StrEnum):
@@ -32,6 +33,7 @@ class PublisherProfile:
 _AUTHORITY = MediaCategory.GLOBAL_AUTHORITY
 _SPECIALIST = MediaCategory.SPECIALIST
 _CHINESE = MediaCategory.CHINESE_INDUSTRY
+_PUBLIC_AUTHORITY = MediaCategory.PUBLIC_AUTHORITY
 _AUTHORIZATION = ArticleAccess.AUTHORIZATION_REQUIRED
 _METADATA_ONLY = ArticleAccess.METADATA_ONLY
 _ALLOWED_PUBLIC = ArticleAccess.ALLOWED_PUBLIC
@@ -101,21 +103,21 @@ _PUBLISHERS = (
     PublisherProfile(
         "ftc.gov",
         "Federal Trade Commission",
-        _AUTHORITY,
+        _PUBLIC_AUTHORITY,
         _ALLOWED_PUBLIC,
-        ("ftc.gov",),
+        ("ftc.gov", "www.ftc.gov"),
     ),
     PublisherProfile(
         "gov.uk",
         "UK Government",
-        _AUTHORITY,
+        _PUBLIC_AUTHORITY,
         _ALLOWED_PUBLIC,
-        ("gov.uk",),
+        ("gov.uk", "www.gov.uk"),
     ),
     PublisherProfile(
         "european-union.europa.eu",
         "European Union",
-        _AUTHORITY,
+        _PUBLIC_AUTHORITY,
         _ALLOWED_PUBLIC,
         ("european-union.europa.eu",),
     ),
@@ -137,8 +139,7 @@ def publisher_profile(hostname: str) -> PublisherProfile | None:
         return None
     for profile in _PUBLISHERS:
         if any(
-            normalized == host or normalized.endswith(f".{host}")
-            for host in profile.allowed_hosts
+            normalized == host or normalized.endswith(f".{host}") for host in profile.allowed_hosts
         ):
             return profile
     return None

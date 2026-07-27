@@ -12,21 +12,18 @@ from commerce_agent.ingestion.collectors import Collector, CollectorError
 from commerce_agent.ingestion.compliance import CompliancePolicy, CompliancePolicyError
 from commerce_agent.ingestion.dedupe import fingerprint_document
 from commerce_agent.ingestion.extract import ContentExtractor, ExtractionError
-from commerce_agent.ingestion.http import FetchError, FetchResponse
+from commerce_agent.ingestion.http import FetchError, FetchResponse, RunDomainCircuit
 from commerce_agent.ingestion.models import (
     CollectedFailure,
     CollectedItem,
     CollectorKind,
-    ContentScope,
     FetchContext,
     FetchMetrics,
     ResponseArtifact,
     RunStatus,
     RunSummary,
-    SourceAdapter,
     SourceDefinition,
     Trigger,
-    TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.snapshots import SnapshotStore, SnapshotStoreError
@@ -156,6 +153,7 @@ class IngestionService:
         self._gdelt_media_body_retention_days = gdelt_media_body_retention_days
         self._clock = clock
         self._sync_lock = asyncio.Lock()
+        self._retention_lock = asyncio.Lock()
         self._sources_synced = False
         self._conditionals: dict[str, tuple[str | None, str | None]] = {}
 
@@ -163,18 +161,40 @@ class IngestionService:
         """Synchronize configured sources once before scheduled or manual work."""
 
         await self._ensure_sources_synced()
+        await self.run_retention()
+
+    async def run_retention(self) -> int:
+        """Apply the global seven-day temporary-media retention policy."""
+
+        await self._ensure_sources_synced()
+        async with self._retention_lock:
+            cutoff = self._clock() - timedelta(days=self._gdelt_media_body_retention_days)
+            source_ids = await self._repository.list_temporary_media_source_ids()
+            for source_id in sorted(source_ids):
+                await self._snapshot_store.prune_source_before(source_id, cutoff)
+            return await self._repository.redact_expired_media_bodies(before=cutoff)
 
     async def run_source(
         self,
         source_id: str,
         trigger: Trigger = Trigger.MANUAL,
     ) -> RunSummary:
-        return await self._execute_source(source_id, trigger, probe=False)
+        return await self._execute_source(
+            source_id,
+            trigger,
+            probe=False,
+            circuit=RunDomainCircuit(),
+        )
 
     async def probe_source(self, source_id: str) -> RunSummary:
         """Probe a reviewed source once without persisting an enabled state."""
 
-        return await self._execute_source(source_id, Trigger.MANUAL, probe=True)
+        return await self._execute_source(
+            source_id,
+            Trigger.MANUAL,
+            probe=True,
+            circuit=RunDomainCircuit(),
+        )
 
     async def _execute_source(
         self,
@@ -182,14 +202,12 @@ class IngestionService:
         trigger: Trigger,
         *,
         probe: bool,
+        circuit: RunDomainCircuit,
     ) -> RunSummary:
         source = self._registry.require(source_id)
         await self._ensure_sources_synced()
         started_at = self._clock()
-        if (
-            trigger is Trigger.SCHEDULED
-            and await self._repository.is_source_suspended(source_id)
-        ):
+        if trigger is Trigger.SCHEDULED and await self._repository.is_source_suspended(source_id):
             return self._summary(
                 source,
                 trigger,
@@ -226,6 +244,7 @@ class IngestionService:
                     started_at,
                     metrics,
                     probe=probe,
+                    circuit=circuit,
                 )
             except asyncio.CancelledError:
                 summary = self._summary(
@@ -257,10 +276,16 @@ class IngestionService:
         trigger: Trigger = Trigger.SCHEDULED,
     ) -> tuple[RunSummary, ...]:
         semaphore = asyncio.Semaphore(self._max_concurrency)
+        circuit = RunDomainCircuit()
 
         async def run_bounded(source: SourceDefinition) -> RunSummary:
             async with semaphore:
-                return await self.run_source(source.source_id, trigger)
+                return await self._execute_source(
+                    source.source_id,
+                    trigger,
+                    probe=False,
+                    circuit=circuit,
+                )
 
         results = await asyncio.gather(
             *(run_bounded(source) for source in self._registry.sources),
@@ -290,6 +315,7 @@ class IngestionService:
         metrics: FetchMetrics,
         *,
         probe: bool = False,
+        circuit: RunDomainCircuit,
     ) -> RunSummary:
         counts = _RunCounts()
         try:
@@ -320,17 +346,6 @@ class IngestionService:
                 metrics,
             )
 
-        if _uses_temporary_media_body(source):
-            cutoff = started_at - timedelta(days=self._gdelt_media_body_retention_days)
-            await self._snapshot_store.prune_source_before(
-                source.source_id,
-                cutoff,
-            )
-            await self._repository.redact_expired_media_bodies(
-                source_ids=(source.source_id,),
-                before=cutoff,
-            )
-
         etag, last_modified = self._conditionals.get(source.source_id, (None, None))
         context = FetchContext(
             trigger=trigger,
@@ -338,6 +353,8 @@ class IngestionService:
             etag=etag,
             last_modified=last_modified,
             metrics=metrics,
+            circuit=circuit,
+            allow_original_fetch=not probe,
         )
         try:
             async for item in collector.collect(source, context):
@@ -400,6 +417,7 @@ class IngestionService:
                 publisher_key=_metadata_string(document.metadata, "publisher_key"),
                 attribution=_metadata_string(document.metadata, "attribution"),
                 content_scope=_metadata_string(document.metadata, "content_scope"),
+                platforms=document.platforms,
             )
         )
 
@@ -457,13 +475,6 @@ class IngestionService:
                 "count_bytes_received": summary.bytes_received,
             },
         )
-
-
-def _uses_temporary_media_body(source: SourceDefinition) -> bool:
-    return source.adapter is SourceAdapter.GDELT or (
-        source.trust_tier is TrustTier.MEDIA
-        and source.content_scope is ContentScope.FULL_TEXT
-    )
 
 
 def _artifact_response(artifact: ResponseArtifact) -> FetchResponse:

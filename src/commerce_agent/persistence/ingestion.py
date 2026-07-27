@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from commerce_agent.ingestion.models import (
+    Platform,
     RunStatus,
     RunSummary,
     SourceDefinition,
@@ -19,12 +20,13 @@ from commerce_agent.ingestion.models import (
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
-    DocumentAnalysis,
     DocumentProvenance,
     DocumentVersion,
+    DocumentVersionPlatform,
     FetchRun,
     OfficialNoticeAudit,
     Source,
+    SourceAuditedPlatform,
     SourceHealth,
     SourceLease,
     SourceMaterialPolicy,
@@ -33,9 +35,7 @@ from commerce_agent.persistence.models import (
 
 SOURCE_LEASE_TTL = timedelta(hours=24)
 SOURCE_FAILURE_THRESHOLD: Final[int] = 3
-EXPIRED_MEDIA_BODY: Final[str] = (
-    "[media body expired; use analysis evidence and original link]"
-)
+EXPIRED_MEDIA_BODY: Final[str] = "[media body expired; use analysis evidence and original link]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +57,10 @@ class PersistableDocument:
     publisher_key: str | None = None
     attribution: str | None = None
     content_scope: str | None = None
+    platforms: tuple[Platform, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "platforms", tuple(self.platforms))
         provenance = (self.publisher_key, self.attribution, self.content_scope)
         if any(value is not None for value in provenance):
             if any(not isinstance(value, str) or not value.strip() for value in provenance):
@@ -112,18 +114,17 @@ class IngestionRepository(Protocol):
         started_at: datetime | None = None,
     ) -> int: ...
 
-    async def find_document(
-        self, source_id: str, canonical_url: str
-    ) -> StoredDocument | None: ...
+    async def find_document(self, source_id: str, canonical_url: str) -> StoredDocument | None: ...
 
     async def persist_version(self, candidate: PersistableDocument) -> PersistOutcome: ...
 
     async def redact_expired_media_bodies(
         self,
         *,
-        source_ids: Sequence[str],
         before: datetime,
     ) -> int: ...
+
+    async def list_temporary_media_source_ids(self) -> tuple[str, ...]: ...
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None: ...
 
@@ -135,9 +136,7 @@ class SqlAlchemyIngestionRepository:
     async def is_source_suspended(self, source_id: str) -> bool:
         async with self._session_factory() as session:
             status = await session.scalar(
-                select(SourceHealth.health_status).where(
-                    SourceHealth.source_id == source_id
-                )
+                select(SourceHealth.health_status).where(SourceHealth.source_id == source_id)
             )
         return status == "suspended"
 
@@ -184,13 +183,23 @@ class SqlAlchemyIngestionRepository:
                     source.updated_at = now
 
                 await session.execute(
-                    delete(SourcePlatform).where(
-                        SourcePlatform.source_id == definition.source_id
-                    )
+                    delete(SourcePlatform).where(SourcePlatform.source_id == definition.source_id)
                 )
                 session.add_all(
                     SourcePlatform(source_id=definition.source_id, platform=platform.value)
                     for platform in definition.platforms
+                )
+                await session.execute(
+                    delete(SourceAuditedPlatform).where(
+                        SourceAuditedPlatform.source_id == definition.source_id
+                    )
+                )
+                session.add_all(
+                    SourceAuditedPlatform(
+                        source_id=definition.source_id,
+                        platform=platform.value,
+                    )
+                    for platform in definition.strict_coverage_platforms
                 )
                 policy_values = (
                     definition.publisher_key,
@@ -272,9 +281,7 @@ class SqlAlchemyIngestionRepository:
             await session.flush()
             return run.id
 
-    async def find_document(
-        self, source_id: str, canonical_url: str
-    ) -> StoredDocument | None:
+    async def find_document(self, source_id: str, canonical_url: str) -> StoredDocument | None:
         async with self._session_factory() as session:
             document = await session.scalar(
                 select(Document).where(
@@ -360,6 +367,42 @@ class SqlAlchemyIngestionRepository:
                 ) != candidate_provenance:
                     raise ValueError("document_provenance_conflict")
 
+            existing_platforms = tuple(
+                Platform(platform)
+                for platform in (
+                    await session.scalars(
+                        select(DocumentVersionPlatform.platform)
+                        .where(DocumentVersionPlatform.document_version_id == version_id)
+                        .order_by(DocumentVersionPlatform.platform)
+                    )
+                ).all()
+            )
+            candidate_platforms = candidate.platforms
+            if not candidate_platforms:
+                if existing_platforms:
+                    candidate_platforms = existing_platforms
+                else:
+                    candidate_platforms = tuple(
+                        Platform(platform)
+                        for platform in (
+                            await session.scalars(
+                                select(SourcePlatform.platform)
+                                .where(SourcePlatform.source_id == candidate.source_id)
+                                .order_by(SourcePlatform.platform)
+                            )
+                        ).all()
+                    )
+            if not existing_platforms:
+                session.add_all(
+                    DocumentVersionPlatform(
+                        document_version_id=version_id,
+                        platform=platform.value,
+                    )
+                    for platform in candidate_platforms
+                )
+            elif set(existing_platforms) != set(candidate_platforms):
+                raise ValueError("document_platforms_conflict")
+
             if created_version:
                 now = datetime.now(UTC)
                 await session.execute(
@@ -389,36 +432,65 @@ class SqlAlchemyIngestionRepository:
     async def redact_expired_media_bodies(
         self,
         *,
-        source_ids: Sequence[str],
         before: datetime,
     ) -> int:
-        if not source_ids:
-            return 0
         candidate_ids = (
             select(DocumentVersion.id)
             .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
             .join(
                 DocumentProvenance,
                 DocumentProvenance.document_version_id == DocumentVersion.id,
             )
-            .join(
-                DocumentAnalysis,
-                DocumentAnalysis.document_version_id == DocumentVersion.id,
-            )
             .where(
-                Document.source_id.in_(tuple(source_ids)),
+                Source.trust_tier == "media",
                 DocumentProvenance.content_scope == "full_text",
                 DocumentVersion.fetched_at < before,
                 DocumentVersion.body != EXPIRED_MEDIA_BODY,
             )
         )
+        now = datetime.now(UTC)
         async with self._session_factory.begin() as session:
+            await session.execute(
+                update(AnalysisJob)
+                .where(
+                    AnalysisJob.document_version_id.in_(candidate_ids),
+                    AnalysisJob.status.in_(("pending", "retry_wait", "running")),
+                )
+                .values(
+                    status="failed",
+                    error_code="media_body_expired",
+                    next_attempt_at=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
             result = await session.execute(
                 update(DocumentVersion)
                 .where(DocumentVersion.id.in_(candidate_ids))
                 .values(body=EXPIRED_MEDIA_BODY, snapshot_path=None)
             )
             return result.rowcount
+
+    async def list_temporary_media_source_ids(self) -> tuple[str, ...]:
+        statement = (
+            select(Source.id)
+            .join(Document, Document.source_id == Source.id)
+            .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+            .join(
+                DocumentProvenance,
+                DocumentProvenance.document_version_id == DocumentVersion.id,
+            )
+            .where(
+                Source.trust_tier == "media",
+                DocumentProvenance.content_scope == "full_text",
+            )
+            .distinct()
+            .order_by(Source.id)
+        )
+        async with self._session_factory() as session:
+            return tuple((await session.scalars(statement)).all())
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None:
         async with self._session_factory.begin() as session:
@@ -468,9 +540,11 @@ class SqlAlchemyIngestionRepository:
             else:
                 health.consecutive_failures += 1
                 health.last_error_code = summary.error_code
-                health.health_status = "suspended" if (
-                    health.consecutive_failures >= SOURCE_FAILURE_THRESHOLD
-                ) else ("degraded" if summary.status is RunStatus.PARTIAL else "error")
+                health.health_status = (
+                    "suspended"
+                    if (health.consecutive_failures >= SOURCE_FAILURE_THRESHOLD)
+                    else ("degraded" if summary.status is RunStatus.PARTIAL else "error")
+                )
 
 
 def _source_values(source: SourceDefinition) -> dict[str, object]:

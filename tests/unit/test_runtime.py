@@ -528,6 +528,7 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
     assert isinstance(built_scheduler, IngestionScheduler)
     assert captured["mode"] == "cloudflare_doh"
     assert captured["http_kwargs"]["safety_policy"] is policy  # type: ignore[index]
+    assert captured["http_kwargs"]["max_redirects"] == 3  # type: ignore[index]
     assert captured["api_collector_kwargs"] == {  # type: ignore[comparison-overlap]
         "fetch_gdelt_originals": False,
         "gdelt_original_fetch_limit": 5,

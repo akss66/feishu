@@ -14,13 +14,13 @@ def article_html(text: str) -> bytes:
 
 
 def test_public_article_accepts_complete_platform_relevant_html() -> None:
-    validate_public_article(
-        body=article_html(
-            "Amazon marketplace sellers must review the updated compliance policy."
-        ),
+    matched = validate_public_article(
+        body=article_html("Amazon marketplace sellers must review the updated compliance policy."),
         content_type="text/html; charset=utf-8",
-        platforms=(Platform.AMAZON,),
+        platforms=(Platform.AMAZON, Platform.TEMU),
     )
+
+    assert matched == (Platform.AMAZON,)
 
 
 @pytest.mark.parametrize(
@@ -130,6 +130,27 @@ def test_title_prefilter_uses_the_same_platform_aliases_as_body_gate() -> None:
         "本地体育赛事举行",
         (Platform.AMAZON, Platform.TEMU),
     )
+
+
+@pytest.mark.parametrize("text", ["watts policy", "buttons update", "attributes changed"])
+def test_short_tts_alias_requires_a_token_boundary(text: str) -> None:
+    assert not mentions_target_platform(text, (Platform.TIKTOK_SHOP,))
+
+
+def test_article_gate_uses_extracted_article_body_not_platform_navigation() -> None:
+    navigation = "<div class='sidebar'>" + ("Amazon seller navigation " * 40) + "</div>"
+    unrelated_article = (
+        "<article>"
+        + ("<p>A local sporting event drew spectators from nearby towns.</p>" * 20)
+        + "</article>"
+    )
+
+    with pytest.raises(ArticleGateError, match="article_platform_irrelevant"):
+        validate_public_article(
+            body=f"<html><body>{navigation}{unrelated_article}</body></html>".encode(),
+            content_type="text/html",
+            platforms=(Platform.AMAZON,),
+        )
 
 
 @pytest.mark.parametrize(

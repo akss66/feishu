@@ -23,6 +23,7 @@ from commerce_agent.ingestion.collectors.base import (
 from commerce_agent.ingestion.collectors.feed import _parse_datetime
 from commerce_agent.ingestion.http import FetchError, FetchRequest
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     ContentScope,
     FetchContext,
@@ -79,6 +80,7 @@ class ApiCollector:
 
         seen: set[str] = set()
         original_fetches = 0
+        original_fetch_stopped = False
         limit = item_limit(source)
         for raw_item in raw_items:
             if not isinstance(raw_item, Mapping):
@@ -104,11 +106,7 @@ class ApiCollector:
             seen.add(url)
             raw_title = _path_value(raw_item, title_field) if title_field else None
             raw_published = _path_value(raw_item, published_field) if published_field else None
-            title = (
-                raw_title.strip()
-                if isinstance(raw_title, str) and raw_title.strip()
-                else None
-            )
+            title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
             published_at = _parse_datetime(
                 raw_published if isinstance(raw_published, str) else None
             )
@@ -117,6 +115,7 @@ class ApiCollector:
             content_type = "application/json"
             item_artifact = artifact
             content_scope: ContentScope | None = None
+            matched_platforms = None
             if source.adapter is SourceAdapter.GDELT:
                 stored_item = {
                     "url": url,
@@ -135,6 +134,8 @@ class ApiCollector:
                 source.adapter is SourceAdapter.GDELT
                 and profile is not None
                 and self._fetch_gdelt_originals
+                and context.allow_original_fetch
+                and not original_fetch_stopped
                 and profile.article_access is ArticleAccess.ALLOWED_PUBLIC
                 and original_fetches < self._gdelt_original_fetch_limit
             ):
@@ -145,11 +146,13 @@ class ApiCollector:
                             url=url,
                             allowed_hosts=profile.allowed_hosts,
                             metrics=context.metrics,
+                            source_id=source.source_id,
+                            circuit=context.circuit,
                         )
                     )
                     if require_success(article_response):
                         article_content_type = article_response.headers.get("content-type")
-                        validate_public_article(
+                        matched_platforms = validate_public_article(
                             body=article_response.body,
                             content_type=article_content_type,
                             platforms=source.platforms,
@@ -163,8 +166,13 @@ class ApiCollector:
                     CollectorError,
                     FetchError,
                     UrlSafetyError,
-                ):
-                    pass
+                ) as error:
+                    if getattr(error, "code", None) in {
+                        "compliance_review_required",
+                        "rate_limited",
+                    }:
+                        original_fetch_stopped = True
+                        yield CollectedFailure(error.code)
             yield CollectedItem(
                 url=url,
                 body=item_body,
@@ -176,6 +184,7 @@ class ApiCollector:
                 last_modified=response.last_modified,
                 artifact=item_artifact,
                 content_scope=content_scope,
+                platforms=matched_platforms,
             )
             if len(seen) >= limit:
                 return

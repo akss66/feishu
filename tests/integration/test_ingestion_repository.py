@@ -30,6 +30,7 @@ from commerce_agent.persistence.models import (
     DocumentAnalysis,
     DocumentProvenance,
     DocumentVersion,
+    DocumentVersionPlatform,
     FetchRun,
     GroupBinding,
     OfficialNoticeAudit,
@@ -72,6 +73,7 @@ def _candidate(
     content_hash: str = "version-a",
     content_group_hash: str = "group-a",
     fetched_at: datetime | None = None,
+    platforms: tuple[Platform, ...] = (Platform.AMAZON,),
 ) -> PersistableDocument:
     return PersistableDocument(
         source_id="amazon-news",
@@ -88,6 +90,7 @@ def _candidate(
         snapshot_path="2026/07/20/amazon-news/snapshot.bin.gz",
         etag='"etag-a"',
         last_modified="Sun, 19 Jul 2026 08:00:00 GMT",
+        platforms=platforms,
     )
 
 
@@ -109,9 +112,7 @@ async def test_sync_sources_upserts_definitions_and_replaces_platform_mapping(tm
             stored = await session.get(Source, "amazon-news")
             platforms = (
                 await session.scalars(
-                    select(SourcePlatform.platform).where(
-                        SourcePlatform.source_id == "amazon-news"
-                    )
+                    select(SourcePlatform.platform).where(SourcePlatform.source_id == "amazon-news")
                 )
             ).all()
 
@@ -253,13 +254,9 @@ async def test_source_lease_is_atomic_and_recovers_after_ttl(tmp_path) -> None:
         assert recovered != first
         await repository.release_source("amazon-news", first)
         check_at = started_at + timedelta(days=1, hours=1)
-        assert (
-            await repository.claim_source("amazon-news", acquired_at=check_at) is None
-        )
+        assert await repository.claim_source("amazon-news", acquired_at=check_at) is None
         await competing.release_source("amazon-news", recovered)
-        assert (
-            await repository.claim_source("amazon-news", acquired_at=check_at) is not None
-        )
+        assert await repository.claim_source("amazon-news", acquired_at=check_at) is not None
     finally:
         await database.dispose()
 
@@ -269,9 +266,7 @@ async def test_first_failed_run_initializes_health_failure_count(tmp_path) -> No
     started_at = datetime(2026, 7, 20, 4, tzinfo=UTC)
     try:
         await repository.sync_sources([_source()])
-        run_id = await repository.start_run(
-            "amazon-news", Trigger.SCHEDULED, started_at=started_at
-        )
+        run_id = await repository.start_run("amazon-news", Trigger.SCHEDULED, started_at=started_at)
 
         await repository.finish_run(
             run_id,
@@ -301,9 +296,7 @@ async def test_first_partial_run_initializes_health_failure_count(tmp_path) -> N
     started_at = datetime(2026, 7, 20, 5, tzinfo=UTC)
     try:
         await repository.sync_sources([_source()])
-        run_id = await repository.start_run(
-            "amazon-news", Trigger.MANUAL, started_at=started_at
-        )
+        run_id = await repository.start_run("amazon-news", Trigger.MANUAL, started_at=started_at)
 
         await repository.finish_run(
             run_id,
@@ -525,9 +518,7 @@ async def test_persist_version_enforces_identity_and_immutable_version_uniquenes
 
         async with database.session() as session:
             document_count = await session.scalar(select(func.count()).select_from(Document))
-            version_count = await session.scalar(
-                select(func.count()).select_from(DocumentVersion)
-            )
+            version_count = await session.scalar(select(func.count()).select_from(DocumentVersion))
             grouped_document_count = await session.scalar(
                 select(func.count())
                 .select_from(Document)
@@ -659,7 +650,51 @@ async def test_approved_media_full_text_is_persisted_with_complete_provenance(
         await database.dispose()
 
 
-async def test_expired_analyzed_gdelt_body_is_redacted_without_losing_provenance(
+async def test_persist_version_stores_exact_document_platforms(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    try:
+        await repository.sync_sources([_source()])
+        outcome = await repository.persist_version(_candidate(platforms=(Platform.AMAZON,)))
+
+        async with database.session() as session:
+            platforms = (
+                await session.scalars(
+                    select(DocumentVersionPlatform.platform).where(
+                        DocumentVersionPlatform.document_version_id == outcome.version_id
+                    )
+                )
+            ).all()
+
+        assert platforms == [Platform.AMAZON.value]
+    finally:
+        await database.dispose()
+
+
+async def test_legacy_empty_platform_retry_preserves_existing_exact_mapping(
+    tmp_path,
+) -> None:
+    database, repository = await _repository(tmp_path)
+    try:
+        await repository.sync_sources([_source()])
+        first = await repository.persist_version(_candidate(platforms=(Platform.AMAZON,)))
+
+        duplicate = await repository.persist_version(_candidate(platforms=()))
+
+        async with database.session() as session:
+            platforms = tuple(
+                await session.scalars(
+                    select(DocumentVersionPlatform.platform).where(
+                        DocumentVersionPlatform.document_version_id == first.version_id
+                    )
+                )
+            )
+        assert duplicate.created_version is False
+        assert platforms == (Platform.AMAZON.value,)
+    finally:
+        await database.dispose()
+
+
+async def test_expired_media_bodies_are_globally_redacted_without_losing_provenance(
     tmp_path,
 ) -> None:
     database, repository = await _repository(tmp_path)
@@ -672,6 +707,8 @@ async def test_expired_analyzed_gdelt_body_is_redacted_without_losing_provenance
         content_scope=ContentScope.METADATA_ONLY,
         attribution="GDELT index; original publisher shown per item",
         publisher_key=None,
+        compliance=ComplianceStatus.PENDING_REVIEW,
+        enabled=False,
     )
     try:
         await repository.sync_sources([gdelt])
@@ -705,6 +742,21 @@ async def test_expired_analyzed_gdelt_body_is_redacted_without_losing_provenance
                 content_scope="full_text",
             )
         )
+        failed = await repository.persist_version(
+            replace(
+                _candidate(
+                    canonical_url="https://publisher.example/failed",
+                    content_hash="1" * 64,
+                    content_group_hash="2" * 64,
+                    fetched_at=now - timedelta(days=8),
+                ),
+                source_id=gdelt.source_id,
+                body="Amazon failed media article body.",
+                publisher_key="publisher.example",
+                attribution="GDELT index; original publisher shown per item",
+                content_scope="full_text",
+            )
+        )
         async with database.session.begin() as session:
             session.add(
                 DocumentAnalysis(
@@ -722,18 +774,39 @@ async def test_expired_analyzed_gdelt_body_is_redacted_without_losing_provenance
                     analyzed_at=now - timedelta(days=7),
                 )
             )
+            failed_job = await session.scalar(
+                select(AnalysisJob).where(AnalysisJob.document_version_id == failed.version_id)
+            )
+            assert failed_job is not None
+            failed_job.status = "failed"
+            failed_job.error_code = "analysis_failed"
+            session.add(
+                SourceHealth(
+                    source_id=gdelt.source_id,
+                    health_status="suspended",
+                    consecutive_failures=3,
+                )
+            )
 
+        # The source is no longer present in the live registry, but its retained
+        # media bodies remain subject to the global seven-day policy.
+        await repository.sync_sources(())
+        source_ids = await repository.list_temporary_media_source_ids()
         redacted = await repository.redact_expired_media_bodies(
-            source_ids=(gdelt.source_id,),
             before=now - timedelta(days=7),
         )
 
         async with database.session() as session:
             analyzed_version = await session.get(DocumentVersion, analyzed.version_id)
             pending_version = await session.get(DocumentVersion, pending.version_id)
+            failed_version = await session.get(DocumentVersion, failed.version_id)
             provenance = await session.get(DocumentProvenance, analyzed.version_id)
+            pending_job = await session.scalar(
+                select(AnalysisJob).where(AnalysisJob.document_version_id == pending.version_id)
+            )
 
-        assert redacted == 1
+        assert source_ids == (gdelt.source_id,)
+        assert redacted == 3
         assert analyzed_version is not None
         assert analyzed_version.body == (
             "[media body expired; use analysis evidence and original link]"
@@ -741,7 +814,19 @@ async def test_expired_analyzed_gdelt_body_is_redacted_without_losing_provenance
         assert analyzed_version.snapshot_path is None
         assert analyzed_version.content_hash == "d" * 64
         assert pending_version is not None
-        assert pending_version.body == "Amazon pending media article body."
+        assert pending_version.body == (
+            "[media body expired; use analysis evidence and original link]"
+        )
+        assert pending_version.snapshot_path is None
+        assert pending_job is not None
+        assert pending_job.status == "failed"
+        assert pending_job.error_code == "media_body_expired"
+        assert pending_job.lease_token is None
+        assert pending_job.lease_expires_at is None
+        assert failed_version is not None
+        assert failed_version.body == (
+            "[media body expired; use analysis evidence and original link]"
+        )
         assert provenance is not None
         assert provenance.publisher_key == "publisher.example"
         assert provenance.content_scope == "full_text"
@@ -789,9 +874,7 @@ async def test_concurrent_duplicate_version_inserts_converge_without_integrity_e
 
         async with database.session() as session:
             document_count = await session.scalar(select(func.count()).select_from(Document))
-            version_count = await session.scalar(
-                select(func.count()).select_from(DocumentVersion)
-            )
+            version_count = await session.scalar(select(func.count()).select_from(DocumentVersion))
 
         assert {outcome.document_id for outcome in outcomes} == {outcomes[0].document_id}
         assert {outcome.version_id for outcome in outcomes} == {outcomes[0].version_id}
