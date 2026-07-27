@@ -15,6 +15,7 @@ from commerce_agent.intelligence.models import DeliveryClaim, MessageKind
 CARD_UTF8_LIMIT = 28_000
 TEXT_UTF8_LIMIT = 20_000
 MAX_FALLBACK_ITEMS = 15
+_DAILY_CONTEXT_SECTIONS = frozenset({"今日覆盖", "待核实线索", "来源异常"})
 
 _SAFE_FEISHU_ERROR_CODES = frozenset(
     {
@@ -321,6 +322,24 @@ def _markdown_block(content: str) -> dict[str, object]:
     }
 
 
+def _section_blocks(
+    sections: object,
+    *,
+    allowed_titles: frozenset[str] | None = None,
+) -> list[dict[str, object]]:
+    if not isinstance(sections, list):
+        return []
+    return [
+        _markdown_block(
+            f"**{_plain(section['title'])}**\n"
+            + "\n".join(f"- {_plain(item)}" for item in section["items"])
+        )
+        for section in sections
+        if isinstance(section, dict)
+        and (allowed_titles is None or section.get("title") in allowed_titles)
+    ]
+
+
 def semantic_to_card(
     payload: dict[str, object], *, kind: MessageKind | None = None
 ) -> dict[str, object]:
@@ -328,14 +347,15 @@ def semantic_to_card(
     items = payload.get("items", [])
     if isinstance(items, list) and items:
         blocks = [_markdown_block(alert_markdown(item)) for item in items]
-    elif isinstance(sections, list):
-        blocks = [
-            _markdown_block(
-                f"**{_plain(section['title'])}**\n"
-                + "\n".join(f"- {_plain(item)}" for item in section["items"])
+        if kind is MessageKind.DAILY_REPORT:
+            blocks.extend(
+                _section_blocks(
+                    sections,
+                    allowed_titles=_DAILY_CONTEXT_SECTIONS,
+                )
             )
-            for section in sections
-        ]
+    elif isinstance(sections, list):
+        blocks = _section_blocks(sections)
     else:
         blocks = [_markdown_block(alert_markdown(item)) for item in items]
     return {
@@ -369,6 +389,18 @@ def semantic_to_text(payload: dict[str, object]) -> str:
         for item in items[:MAX_FALLBACK_ITEMS]:
             if not append_complete(alert_markdown(item, compact=True)):
                 break
+        if isinstance(sections, list):
+            for section in sections:
+                if (
+                    not isinstance(section, dict)
+                    or section.get("title") not in _DAILY_CONTEXT_SECTIONS
+                ):
+                    continue
+                if not append_complete(f"\n{_plain(section['title'])}"):
+                    break
+                for section_item in section["items"]:
+                    if not append_complete(f"- {_plain(section_item)}"):
+                        return "\n".join(lines)
     elif isinstance(sections, list):
         remaining = MAX_FALLBACK_ITEMS
         for section in sections:

@@ -116,6 +116,30 @@ def test_daily_card_prefers_evidence_rich_items_when_updates_exist() -> None:
     assert isinstance(first_element["text"]["content"], str)
 
 
+def test_daily_card_keeps_readable_coverage_and_anomaly_after_analysis_items() -> None:
+    claim = _claim(
+        kind=MessageKind.DAILY_REPORT,
+        payload={
+            "title": "Daily intelligence",
+            "theme": "blue",
+            "risk_profile": "default",
+            "items": [_alert_item()],
+            "sections": [
+                {"title": "AI 今日提炼", "items": ["不重复展示"]},
+                {"title": "今日覆盖", "items": ["平台 8/10｜有效来源 17/20"]},
+                {"title": "来源异常", "items": ["Ozon：今日超时，本次为部分覆盖"]},
+            ],
+        },
+    )
+
+    rendered = FeishuMessageRenderer().render(claim)
+    encoded = json.dumps(rendered, ensure_ascii=False)
+
+    assert "平台 8/10｜有效来源 17/20" in encoded
+    assert "Ozon：今日超时，本次为部分覆盖" in encoded
+    assert "不重复展示" not in encoded
+
+
 @pytest.mark.parametrize(
     ("kind", "payload", "expected_theme"),
     [

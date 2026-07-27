@@ -28,6 +28,25 @@ if TYPE_CHECKING:
 
 _RISK_ORDER = {RiskLevel.LOW: 1, RiskLevel.MEDIUM: 2, RiskLevel.HIGH: 3}
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+_PLATFORM_LABELS = {
+    Platform.AMAZON: "Amazon",
+    Platform.TEMU: "TEMU",
+    Platform.SHEIN: "SHEIN",
+    Platform.ALIEXPRESS: "AliExpress",
+    Platform.SHOPEE: "Shopee",
+    Platform.EBAY: "eBay",
+    Platform.COUPANG: "Coupang",
+    Platform.OZON: "Ozon",
+    Platform.JOYBUY: "Joybuy",
+    Platform.TIKTOK_SHOP: "TikTok Shop",
+}
+_ANOMALY_LABELS = {
+    "timeout": "今日超时，本次为部分覆盖",
+    "suspended": "连续失败，已暂停并等待复核",
+    "summary_only": "仅返回摘要，未进入 AI 结论",
+    "no_full_text": "暂无合规完整正文来源",
+    "authorization_required": "需要来源授权，当前未启用",
+}
 _PROFILE_LABELS = {
     RiskProfile.CONSERVATIVE: "保守",
     RiskProfile.DEFAULT: "默认",
@@ -180,15 +199,56 @@ def _title(report_date: date, profile: RiskProfile) -> str:
 
 
 def _coverage_line(row: CoverageRow) -> str:
-    if not row.effective_source_count:
-        return f"{row.platform.value}：该平台尚无合规启用来源"
-    if not row.verified_update_count:
-        return f"{row.platform.value}：无已验证更新"
-    return f"{row.platform.value}：已验证 {row.verified_update_count} 条"
+    return (
+        f"{_PLATFORM_LABELS[row.platform]} "
+        f"{min(row.effective_source_count, row.target_source_count)}/"
+        f"{row.target_source_count}｜正文 {row.full_text_update_count}"
+        f"｜摘要线索 {row.feed_summary_count}"
+        f"｜元数据线索 {row.metadata_only_count}"
+    )
 
 
 def _coverage_lines(coverage: tuple[CoverageRow, ...]) -> list[str]:
-    return [_coverage_line(row) for row in coverage]
+    covered_platforms = sum(row.effective_source_count > 0 for row in coverage)
+    effective_sources = sum(
+        min(row.effective_source_count, row.target_source_count)
+        for row in coverage
+    )
+    return [
+        f"平台 {covered_platforms}/10｜有效来源 {effective_sources}/20",
+        *[_coverage_line(row) for row in coverage],
+    ]
+
+
+def _coverage_sections(coverage: tuple[CoverageRow, ...]) -> list[dict[str, object]]:
+    sections: list[dict[str, object]] = [
+        {"title": "今日覆盖", "items": _coverage_lines(coverage)}
+    ]
+    leads = [
+        (
+            f"{_PLATFORM_LABELS[row.platform]}：仅摘要 {row.feed_summary_count} 条、"
+            f"元数据 {row.metadata_only_count} 条；未进入 AI 风险判断"
+        )
+        for row in coverage
+        if row.feed_summary_count or row.metadata_only_count
+    ]
+    if leads:
+        sections.append({"title": "待核实线索", "items": leads})
+    anomalies: list[str] = []
+    for row in coverage:
+        for anomaly in row.source_anomalies:
+            parts = anomaly.rsplit(":", 2)
+            codes = tuple(reversed(parts[1:])) if len(parts) == 3 else ()
+            label = next(
+                (_ANOMALY_LABELS[code] for code in codes if code in _ANOMALY_LABELS),
+                "来源状态异常，本次为部分覆盖",
+            )
+            text = f"{_PLATFORM_LABELS[row.platform]}：{label}"
+            if text not in anomalies:
+                anomalies.append(text)
+    if anomalies:
+        sections.append({"title": "来源异常", "items": anomalies})
+    return sections
 
 
 def build_health_payload(
@@ -202,7 +262,7 @@ def build_health_payload(
         "risk_profile": profile.value,
         "sections": [
             {"title": "AI 今日提炼", "items": ["本窗口无已验证更新。"]},
-            {"title": "数据覆盖与来源", "items": _coverage_lines(coverage)},
+            *_coverage_sections(coverage),
         ],
     }
 
@@ -343,14 +403,7 @@ def build_b_payload(
                 ],
             },
             {"title": "今日建议", "items": recommended_actions},
-            {
-                "title": "数据覆盖与来源",
-                "items": _coverage_lines(coverage)
-                + [
-                    f"{item.candidate.source_name}｜{item.candidate.canonical_url}"
-                    for item in selected
-                ],
-            },
+            *_coverage_sections(coverage),
         ],
     }
 

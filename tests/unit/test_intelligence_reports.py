@@ -23,6 +23,7 @@ from commerce_agent.intelligence.reports import (
     CoverageRow,
     DailyReportComposer,
     DailyReportService,
+    build_health_payload,
     report_window,
 )
 
@@ -209,16 +210,58 @@ def test_empty_day_builds_health_report_with_platform_source_coverage() -> None:
     encoded = json.dumps(draft.payload, ensure_ascii=False)
 
     assert draft.selected_analysis_ids == ()
-    assert "ebay：无已验证更新" in encoded
-    assert "temu：该平台尚无合规启用来源" in encoded
+    assert "eBay 1/2｜正文 0｜摘要线索 0｜元数据线索 0" in encoded
+    assert "TEMU 0/2｜正文 0｜摘要线索 0｜元数据线索 0" in encoded
+
+
+def test_daily_card_shows_platform_source_coverage_leads_and_safe_anomaly() -> None:
+    coverage = tuple(
+        CoverageRow(
+            platform=platform,
+            effective_source_count=2 if platform is Platform.AMAZON else 0,
+            target_source_count=2,
+            verified_update_count=3 if platform is Platform.AMAZON else 0,
+            full_text_update_count=3 if platform is Platform.AMAZON else 0,
+            feed_summary_count=1 if platform is Platform.AMAZON else 0,
+            metadata_only_count=0,
+            source_anomalies=(
+                ("source-a:suspended:timeout",)
+                if platform is Platform.OZON
+                else ()
+            ),
+        )
+        for platform in Platform
+    )
+
+    payload = build_health_payload(
+        date(2026, 7, 21),
+        coverage,
+        RiskProfile.DEFAULT,
+    )
+
+    coverage_section = next(
+        section for section in payload["sections"] if section["title"] == "今日覆盖"
+    )
+    assert coverage_section["items"][0] == "平台 1/10｜有效来源 2/20"
+    assert "Amazon 2/2｜正文 3｜摘要线索 1｜元数据线索 0" in coverage_section["items"]
+    leads = next(
+        section for section in payload["sections"] if section["title"] == "待核实线索"
+    )
+    assert leads["items"] == [
+        "Amazon：仅摘要 1 条、元数据 0 条；未进入 AI 风险判断"
+    ]
+    anomalies = next(
+        section for section in payload["sections"] if section["title"] == "来源异常"
+    )
+    assert anomalies["items"] == ["Ozon：今日超时，本次为部分覆盖"]
 
 
 @pytest.mark.parametrize(
     ("enabled_sources", "verified_updates", "expected"),
     [
-        (0, 0, "ebay：该平台尚无合规启用来源"),
-        (1, 0, "ebay：无已验证更新"),
-        (1, 2, "ebay：已验证 2 条"),
+        (0, 0, "eBay 0/2｜正文 0｜摘要线索 0｜元数据线索 0"),
+        (1, 0, "eBay 1/2｜正文 0｜摘要线索 0｜元数据线索 0"),
+        (1, 2, "eBay 1/2｜正文 2｜摘要线索 0｜元数据线索 0"),
     ],
 )
 def test_b_and_health_reports_share_three_state_coverage_wording(
@@ -246,8 +289,8 @@ def test_b_and_health_reports_share_three_state_coverage_wording(
         report_date=date(2026, 7, 21), analyses=(), coverage=coverage
     )
 
-    assert b_report.payload["sections"][-1]["items"][0] == expected
-    assert health_report.payload["sections"][-1]["items"][0] == expected
+    assert b_report.payload["sections"][-1]["items"][1] == expected
+    assert health_report.payload["sections"][-1]["items"][1] == expected
 
 
 def test_conservative_daily_hides_unreviewed_model_actions() -> None:
