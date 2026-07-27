@@ -693,7 +693,14 @@ async def test_gdelt_original_article_is_fetched_only_for_allowed_public() -> No
             ]
         }
     ).encode()
-    article_body = b"<html><article>Original article body</article></html>"
+    article_body = (
+        b"<html><article>"
+        + (
+            b"<p>Amazon marketplace sellers must review this policy update carefully.</p>"
+            * 20
+        )
+        + b"</article></html>"
+    )
     http = FakeHttpPort(
         {
             discovery_url: discovery_body,
@@ -714,7 +721,12 @@ async def test_gdelt_original_article_is_fetched_only_for_allowed_public() -> No
     )
 
     items = await collected(
-        ApiCollector(http, publisher_lookup=lambda _: profile),
+        ApiCollector(
+            http,
+            publisher_lookup=lambda _: profile,
+            fetch_gdelt_originals=True,
+            gdelt_original_fetch_limit=5,
+        ),
         _fixture_gdelt_source(discovery_url),
     )
 
@@ -767,7 +779,11 @@ async def test_gdelt_original_article_is_not_fetched_for_disallowed_access(
     )
 
     items = await collected(
-        ApiCollector(http, publisher_lookup=lambda _: profile),
+        ApiCollector(
+            http,
+            publisher_lookup=lambda _: profile,
+            fetch_gdelt_originals=True,
+        ),
         _fixture_gdelt_source(discovery_url),
     )
 
@@ -778,6 +794,173 @@ async def test_gdelt_original_article_is_not_fetched_for_disallowed_access(
         assert len(items) == 1
         assert items[0].content_scope is ContentScope.METADATA_ONLY
         assert json.loads(items[0].body)["url"] == article_url
+
+
+@pytest.mark.asyncio
+async def test_gdelt_original_fetch_is_disabled_by_default() -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    article_url = "https://publisher.example/article"
+    discovery_body = json.dumps(
+        {
+            "articles": [
+                {
+                    "url": article_url,
+                    "title": "Amazon policy article",
+                    "seendate": "20260722T081500Z",
+                    "domain": "publisher.example",
+                }
+            ]
+        }
+    ).encode()
+    http = FakeHttpPort({discovery_url: discovery_body})
+    profile = PublisherProfile(
+        publisher_key="publisher.example",
+        display_name="Fixture Publisher",
+        category=MediaCategory.SPECIALIST,
+        article_access=ArticleAccess.ALLOWED_PUBLIC,
+        allowed_hosts=("publisher.example",),
+    )
+
+    items = await collected(
+        ApiCollector(http, publisher_lookup=lambda _: profile),
+        _fixture_gdelt_source(discovery_url),
+    )
+
+    assert [request.url for request in http.requests] == [discovery_url]
+    assert len(items) == 1
+    assert items[0].content_scope is ContentScope.METADATA_ONLY
+
+
+@pytest.mark.asyncio
+async def test_gdelt_original_fetch_budget_degrades_later_items_to_metadata() -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    first_url = "https://publisher.example/first"
+    second_url = "https://publisher.example/second"
+    discovery_body = json.dumps(
+        {
+            "articles": [
+                {
+                    "url": first_url,
+                    "title": "First Amazon article",
+                    "seendate": "20260722T081500Z",
+                    "domain": "publisher.example",
+                },
+                {
+                    "url": second_url,
+                    "title": "Second Amazon article",
+                    "seendate": "20260722T081600Z",
+                    "domain": "publisher.example",
+                },
+            ]
+        }
+    ).encode()
+    article_body = (
+        b"<html><article>"
+        + b"<p>Amazon marketplace policy details for sellers.</p>" * 20
+        + b"</article></html>"
+    )
+    http = FakeHttpPort(
+        {
+            discovery_url: discovery_body,
+            first_url: FetchResponse(
+                url=first_url,
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=article_body,
+            ),
+        }
+    )
+    profile = PublisherProfile(
+        publisher_key="publisher.example",
+        display_name="Fixture Publisher",
+        category=MediaCategory.SPECIALIST,
+        article_access=ArticleAccess.ALLOWED_PUBLIC,
+        allowed_hosts=("publisher.example",),
+    )
+
+    items = await collected(
+        ApiCollector(
+            http,
+            publisher_lookup=lambda _: profile,
+            fetch_gdelt_originals=True,
+            gdelt_original_fetch_limit=1,
+        ),
+        _fixture_gdelt_source(discovery_url),
+    )
+
+    assert [request.url for request in http.requests] == [discovery_url, first_url]
+    assert [item.content_scope for item in items] == [
+        ContentScope.FULL_TEXT,
+        ContentScope.METADATA_ONLY,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "article_response",
+    [
+        FetchResponse(
+            url="https://publisher.example/article",
+            status_code=403,
+            headers={"content-type": "text/html"},
+        ),
+        FetchResponse(
+            url="https://publisher.example/article",
+            status_code=200,
+            headers={"content-type": "application/pdf"},
+            body=b"%PDF",
+        ),
+        FetchResponse(
+            url="https://publisher.example/article",
+            status_code=200,
+            headers={"content-type": "text/html"},
+            body=b"<html><p>Amazon short page.</p></html>",
+        ),
+    ],
+)
+async def test_gdelt_original_fetch_failure_keeps_metadata_lead(
+    article_response: FetchResponse,
+) -> None:
+    discovery_url = "https://api.gdeltproject.org/api/v2/doc/doc?query=marketplace"
+    article_url = article_response.url
+    discovery_body = json.dumps(
+        {
+            "articles": [
+                {
+                    "url": article_url,
+                    "title": "Amazon policy article",
+                    "seendate": "20260722T081500Z",
+                    "domain": "publisher.example",
+                }
+            ]
+        }
+    ).encode()
+    http = FakeHttpPort(
+        {
+            discovery_url: discovery_body,
+            article_url: article_response,
+        }
+    )
+    profile = PublisherProfile(
+        publisher_key="publisher.example",
+        display_name="Fixture Publisher",
+        category=MediaCategory.SPECIALIST,
+        article_access=ArticleAccess.ALLOWED_PUBLIC,
+        allowed_hosts=("publisher.example",),
+    )
+
+    items = await collected(
+        ApiCollector(
+            http,
+            publisher_lookup=lambda _: profile,
+            fetch_gdelt_originals=True,
+        ),
+        _fixture_gdelt_source(discovery_url),
+    )
+
+    assert len(items) == 1
+    assert items[0].content_scope is ContentScope.METADATA_ONLY
+    assert json.loads(items[0].body)["url"] == article_url
 
 
 @pytest.mark.parametrize(

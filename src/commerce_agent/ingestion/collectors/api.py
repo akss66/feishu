@@ -7,6 +7,10 @@ from urllib.parse import urlsplit
 
 import idna
 
+from commerce_agent.ingestion.article_gate import (
+    ArticleGateError,
+    validate_public_article,
+)
 from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     HttpPort,
@@ -17,7 +21,7 @@ from commerce_agent.ingestion.collectors.base import (
     response_artifact,
 )
 from commerce_agent.ingestion.collectors.feed import _parse_datetime
-from commerce_agent.ingestion.http import FetchRequest
+from commerce_agent.ingestion.http import FetchError, FetchRequest
 from commerce_agent.ingestion.models import (
     CollectedItem,
     ContentScope,
@@ -25,6 +29,7 @@ from commerce_agent.ingestion.models import (
     SourceAdapter,
     SourceDefinition,
 )
+from commerce_agent.ingestion.security import UrlSafetyError
 from commerce_agent.media.catalog import (
     ArticleAccess,
     PublisherProfile,
@@ -73,6 +78,7 @@ class ApiCollector:
             raise CollectorError("invalid_payload")
 
         seen: set[str] = set()
+        original_fetches = 0
         limit = item_limit(source)
         for raw_item in raw_items:
             if not isinstance(raw_item, Mapping):
@@ -128,21 +134,37 @@ class ApiCollector:
             if (
                 source.adapter is SourceAdapter.GDELT
                 and profile is not None
+                and self._fetch_gdelt_originals
                 and profile.article_access is ArticleAccess.ALLOWED_PUBLIC
+                and original_fetches < self._gdelt_original_fetch_limit
             ):
-                article_response = await self._http.get(
-                    FetchRequest(
-                        url=url,
-                        allowed_hosts=profile.allowed_hosts,
-                        metrics=context.metrics,
+                original_fetches += 1
+                try:
+                    article_response = await self._http.get(
+                        FetchRequest(
+                            url=url,
+                            allowed_hosts=profile.allowed_hosts,
+                            metrics=context.metrics,
+                        )
                     )
-                )
-                if not require_success(article_response):
-                    continue
-                item_body = article_response.body
-                content_type = article_response.headers.get("content-type")
-                item_artifact = response_artifact(article_response)
-                content_scope = ContentScope.FULL_TEXT
+                    if require_success(article_response):
+                        article_content_type = article_response.headers.get("content-type")
+                        validate_public_article(
+                            body=article_response.body,
+                            content_type=article_content_type,
+                            platforms=source.platforms,
+                        )
+                        item_body = article_response.body
+                        content_type = article_content_type
+                        item_artifact = response_artifact(article_response)
+                        content_scope = ContentScope.FULL_TEXT
+                except (
+                    ArticleGateError,
+                    CollectorError,
+                    FetchError,
+                    UrlSafetyError,
+                ):
+                    pass
             yield CollectedItem(
                 url=url,
                 body=item_body,

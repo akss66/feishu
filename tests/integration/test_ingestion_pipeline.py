@@ -280,7 +280,14 @@ async def test_allowed_public_media_article_reaches_the_analysis_queue(
         b'"title":"Marketplace policy update","seendate":"20260722T081500Z",'
         b'"domain":"publisher.example"}]}'
     )
-    article_body = (FIXTURES / "article_en.html").read_bytes()
+    article_body = (
+        b"<html><article><h1>Amazon marketplace policy update</h1>"
+        + (
+            b"<p>Amazon marketplace sellers must review the updated compliance policy.</p>"
+            * 20
+        )
+        + b"</article></html>"
+    )
     http = FixtureHttp(
         {
             discovery_url: FetchResponse(
@@ -313,6 +320,7 @@ async def test_allowed_public_media_article_reaches_the_analysis_queue(
             CollectorKind.API: ApiCollector(
                 http,
                 publisher_lookup=lambda _: profile,
+                fetch_gdelt_originals=True,
             )
         },
         extractor=ContentExtractor(StaticLanguageDetector()),
