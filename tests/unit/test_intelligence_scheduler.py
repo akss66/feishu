@@ -10,6 +10,7 @@ from commerce_agent.intelligence.reports import ReportAlreadySent
 from commerce_agent.intelligence.scheduler import (
     ANALYSIS_JOB_ID,
     DAILY_JOB_ID,
+    DAILY_PREPARE_JOB_ID,
     DELIVERY_JOB_ID,
     IntelligenceScheduler,
 )
@@ -42,10 +43,15 @@ class Analysis:
 
 class Reports:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, object]] = []
+        self.preview_calls: list[tuple[str, object]] = []
+        self.queue_calls: list[tuple[str, object]] = []
 
-    async def generate_and_queue(self, group_id: str, report_date: object) -> int:
-        self.calls.append((group_id, report_date))
+    async def preview(self, group_id: str, report_date: object) -> object:
+        self.preview_calls.append((group_id, report_date))
+        return object()
+
+    async def queue_previewed(self, group_id: str, report_date: object) -> int:
+        self.queue_calls.append((group_id, report_date))
         return 1
 
 
@@ -113,7 +119,12 @@ def test_registers_enabled_jobs_with_stable_ids_and_non_reentrant_schedules() ->
     scheduler.start()
 
     assert backend.starts == 1
-    assert set(backend.jobs) == {ANALYSIS_JOB_ID, DELIVERY_JOB_ID, DAILY_JOB_ID}
+    assert set(backend.jobs) == {
+        ANALYSIS_JOB_ID,
+        DELIVERY_JOB_ID,
+        DAILY_PREPARE_JOB_ID,
+        DAILY_JOB_ID,
+    }
     _, analysis_options = backend.jobs[ANALYSIS_JOB_ID]
     assert {
         key: analysis_options[key]
@@ -134,6 +145,10 @@ def test_registers_enabled_jobs_with_stable_ids_and_non_reentrant_schedules() ->
     assert daily_options["hour"] == 9
     assert daily_options["minute"] == 0
     assert daily_options["max_instances"] == 1
+    _, prepare_options = backend.jobs[DAILY_PREPARE_JOB_ID]
+    assert prepare_options["trigger"] == "cron"
+    assert prepare_options["hour"] == 8
+    assert prepare_options["minute"] == 40
     assert backend.timezone == "Asia/Shanghai"
 
 
@@ -166,16 +181,34 @@ async def test_active_binding_absence_safely_skips_alerts_and_daily_report() -> 
     scheduler.start()
 
     await backend.jobs[ANALYSIS_JOB_ID][0]()
+    await backend.jobs[DAILY_PREPARE_JOB_ID][0]()
     await backend.jobs[DAILY_JOB_ID][0]()
 
     assert analysis.calls == [10]
     assert alerts.calls == []
-    assert reports.calls == []
+    assert reports.preview_calls == []
+    assert reports.queue_calls == []
+
+
+async def test_daily_prepare_and_send_are_separate_jobs() -> None:
+    scheduler, backend, _, reports, _, _ = build_scheduler()
+    scheduler.start()
+
+    await backend.jobs[DAILY_PREPARE_JOB_ID][0]()
+    await backend.jobs[DAILY_JOB_ID][0]()
+    await backend.jobs[DAILY_JOB_ID][0]()
+
+    report_date = datetime(2026, 7, 22, 1, tzinfo=UTC).date()
+    assert reports.preview_calls == [("chat-one", report_date)]
+    assert reports.queue_calls == [
+        ("chat-one", report_date),
+        ("chat-one", report_date),
+    ]
 
 
 async def test_already_sent_daily_report_is_an_idempotent_scheduler_noop(caplog) -> None:
     class AlreadySentReports(Reports):
-        async def generate_and_queue(self, group_id: str, report_date: object) -> int:
+        async def queue_previewed(self, group_id: str, report_date: object) -> int:
             del group_id, report_date
             raise ReportAlreadySent("private group and report details")
 

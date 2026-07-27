@@ -112,6 +112,11 @@ async def _run_configured(settings: Settings) -> None:
                 llm,
                 resources.channel,
                 bindings,
+                ingestion=(
+                    resources.scheduler.service
+                    if resources.scheduler is not None
+                    else None
+                ),
             )
             resources.intelligence_scheduler = intelligence.scheduler
             service = BotService(
@@ -201,7 +206,9 @@ def _build_intelligence(
     llm: Any,
     channel: Any,
     bindings: Any,
+    ingestion: Any | None = None,
 ) -> IntelligenceRuntime:
+    from commerce_agent.ingestion.pre_report import PreReportPipeline
     from commerce_agent.intelligence.analyzer import IntelligenceAnalyzer
     from commerce_agent.intelligence.delivery import (
         DeliveryWorker,
@@ -281,6 +288,12 @@ def _build_intelligence(
         IntelligenceScheduler(
             analysis=analysis,
             reports=reports,
+            pre_report=PreReportPipeline(
+                ingestion,
+                analysis,
+                reports,
+                timezone=timezone,
+            ),
             alerts=alerts,
             delivery=delivery,
             bindings=bindings,

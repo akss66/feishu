@@ -377,7 +377,11 @@ async def test_runtime_passes_configured_concurrency_to_qa_adapter(
     monkeypatch.setattr(runtime, "SqlAlchemyGroupBindingStore", lambda session: object())
     monkeypatch.setattr(runtime, "DeepSeekGateway", lambda client, model: object())
     monkeypatch.setattr(runtime, "FeishuChannel", lambda **kwargs: object())
-    monkeypatch.setattr(runtime, "_build_intelligence", lambda *args: intelligence)
+    monkeypatch.setattr(
+        runtime,
+        "_build_intelligence",
+        lambda *args, **kwargs: intelligence,
+    )
     monkeypatch.setattr(runtime, "BotService", lambda *args, **kwargs: object())
     monkeypatch.setattr(runtime, "FeishuAdapter", Adapter)
     monkeypatch.setattr(runtime, "_serve", serve)

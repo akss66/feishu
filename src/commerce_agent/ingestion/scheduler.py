@@ -58,6 +58,10 @@ class IngestionScheduler:
         self._scheduler.start()
         self._started = True
 
+    @property
+    def service(self) -> _IngestionService:
+        return self._service
+
     async def _run(self) -> None:
         task = asyncio.current_task()
         if task is not None:

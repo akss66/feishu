@@ -17,6 +17,7 @@ from commerce_agent.intelligence.reports import ReportAlreadySent
 ANALYSIS_JOB_ID = "intelligence-analysis-drain"
 DELIVERY_JOB_ID = "intelligence-delivery-retry"
 DAILY_JOB_ID = "intelligence-daily-report"
+DAILY_PREPARE_JOB_ID = "intelligence-daily-prepare"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +27,13 @@ class _Analysis(Protocol):
 
 
 class _Reports(Protocol):
-    async def generate_and_queue(self, group_id: str, report_date: Any) -> int: ...
+    async def preview(self, group_id: str, report_date: Any) -> Any: ...
+
+    async def queue_previewed(self, group_id: str, report_date: Any) -> int: ...
+
+
+class _PreReport(Protocol):
+    async def prepare(self, group_id: str, report_date: Any) -> Any: ...
 
 
 class _Alerts(Protocol):
@@ -49,6 +56,7 @@ class IntelligenceScheduler:
         *,
         analysis: _Analysis,
         reports: _Reports,
+        pre_report: _PreReport | None = None,
         alerts: _Alerts,
         delivery: _Delivery,
         bindings: _Bindings,
@@ -63,6 +71,7 @@ class IntelligenceScheduler:
     ) -> None:
         self._analysis = analysis
         self._reports = reports
+        self._pre_report = pre_report
         self._alerts = alerts
         self._delivery = delivery
         self._bindings = bindings
@@ -103,7 +112,14 @@ class IntelligenceScheduler:
             )
         if self._daily_enabled:
             self._add_job(
-                self._run_daily,
+                self._run_daily_prepare,
+                trigger="cron",
+                hour=(self._daily_hour - 1) % 24,
+                minute=40,
+                job_id=DAILY_PREPARE_JOB_ID,
+            )
+            self._add_job(
+                self._run_daily_send,
                 trigger="cron",
                 hour=self._daily_hour,
                 minute=0,
@@ -138,15 +154,35 @@ class IntelligenceScheduler:
         finally:
             self._untrack(task)
 
-    async def _run_daily(self) -> None:
+    async def _run_daily_prepare(self) -> None:
         task = self._track_current_task()
         try:
             group_id = await self._bindings.get_active_chat_id()
             if group_id is not None:
                 report_date = self._clock().astimezone(self._timezone).date()
-                await self._reports.generate_and_queue(group_id, report_date)
+                if self._pre_report is not None:
+                    await self._pre_report.prepare(group_id, report_date)
+                else:
+                    await self._reports.preview(group_id, report_date)
+        except Exception as error:
+            _LOGGER.error(
+                "intelligence daily prepare failed (exception_type=%s)",
+                type(error).__name__,
+            )
+        finally:
+            self._untrack(task)
+
+    async def _run_daily_send(self) -> None:
+        task = self._track_current_task()
+        try:
+            group_id = await self._bindings.get_active_chat_id()
+            if group_id is not None:
+                report_date = self._clock().astimezone(self._timezone).date()
+                await self._reports.queue_previewed(group_id, report_date)
         except ReportAlreadySent:
             _LOGGER.info("daily report already sent; skipping")
+        except (KeyError, RuntimeError):
+            _LOGGER.error("daily_report_not_prepared")
         except Exception as error:
             _LOGGER.error(
                 "intelligence daily job failed (exception_type=%s)",
@@ -199,6 +235,7 @@ class IntelligenceScheduler:
 
 __all__ = [
     "ANALYSIS_JOB_ID",
+    "DAILY_PREPARE_JOB_ID",
     "DAILY_JOB_ID",
     "DELIVERY_JOB_ID",
     "IntelligenceScheduler",
