@@ -107,3 +107,30 @@ AI 分析、自动日报、即时预警和有据问答四个开关均默认关�
 生产环境当前不开放浏览器采集。保持 `INGESTION_BROWSER_ENABLED=false`；启用时，运行时和
 CLI 组合会安全拒绝。浏览器 collector 的单元能力保留供后续使用，但只有 HTTP 与浏览器抓取
 统一使用 10 MiB 响应上限、全局并发限制和逐域名速率预算后，才能评审生产开放。
+
+## 十平台数据覆盖说明
+
+当前产品范围只包括 Amazon、TEMU、SHEIN、AliExpress、Shopee、eBay、Coupang、Ozon、
+Joybuy 和 TikTok Shop，覆盖全球站点。采集内容分为三个等级：
+
+- `full_text`：正文和使用权都通过验收，可进入 LLM 分析并生成风险、置信度、依据和建议动作。
+- `summary`：只作为导读和链接展示，不据此生成确定性风险结论。
+- `metadata_only`：只作为待核实线索，不进入 LLM。
+
+当前严格覆盖是 **3 / 10 个平台、3 / 20 个有效来源**，属于可测试的部分覆盖版本，不代表
+十平台已经全部达标。逐平台矩阵、候选来源状态和验收证据见
+[`docs/operations/ten-platform-source-acceptance.md`](docs/operations/ten-platform-source-acceptance.md)。
+
+已审核的官方公告可以在飞书中按以下格式人工提交：
+
+```text
+提交情报
+平台：Amazon
+官方账号：亚马逊全球开店
+原文链接：https://mp.weixin.qq.com/...
+正文：
+这里粘贴已核对的官方公告正文
+```
+
+可选官方通知邮箱默认关闭，只有完成发件人白名单和 TLS 配置后才启用。后续采购授权媒体
+全文时实现 `LicensedNewsProvider` 接口；未配置的数据商适配器保持禁用并返回空结果。
