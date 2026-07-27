@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +49,28 @@ def test_request_summary_redacts_query_values_without_losing_host_and_path() -> 
     assert "https://news.example.com/path/to/article" in summary
     assert "private-marker" not in summary
     assert "safe=value" not in summary
+
+
+def test_result_diagnostic_redacts_item_url_and_preserves_failure_codes() -> None:
+    client = _TwoRequestBudget(_NeverCalledHttpPort())
+    results: list[CollectedItem | CollectedFailure] = [
+        CollectedItem(
+            url=(
+                "https://news.example.com/path/to/article"
+                "?token=private-marker&safe=value#private-fragment"
+            ),
+            body=b"article",
+        ),
+        CollectedFailure("article_access_wall"),
+    ]
+
+    diagnostic = _result_diagnostic("fixture-source", client, results)
+
+    assert "https://news.example.com/path/to/article" in diagnostic
+    assert "private-marker" not in diagnostic
+    assert "safe=value" not in diagnostic
+    assert "private-fragment" not in diagnostic
+    assert "article_access_wall" in diagnostic
 
 
 @pytest.mark.skipif(
@@ -141,9 +164,13 @@ class _NeverCalledHttpPort:
 
 def _request_summary(client: _TwoRequestBudget) -> str:
     statuses = [response.status_code for response in client.responses]
-    redactor = UrlSafetyPolicy()
-    urls = [redactor.redact_for_log(request.url) for request in client.requests]
+    urls = _redacted_urls(request.url for request in client.requests)
     return f"requests={client.request_count}; urls={urls!r}; statuses={statuses!r}"
+
+
+def _redacted_urls(urls: Iterable[object]) -> list[str]:
+    redactor = UrlSafetyPolicy()
+    return [redactor.redact_for_log(url) for url in urls]
 
 
 def _fetch_failure_diagnostic(
@@ -167,7 +194,9 @@ def _result_diagnostic(
     failure_codes = [
         result.error_code for result in results if isinstance(result, CollectedFailure)
     ]
-    item_urls = [result.url for result in results if isinstance(result, CollectedItem)]
+    item_urls = _redacted_urls(
+        result.url for result in results if isinstance(result, CollectedItem)
+    )
     return (
         f"{source_id}: {_request_summary(client)}; "
         f"candidate_documents={item_urls!r}; failure_codes={failure_codes!r}"
