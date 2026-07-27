@@ -57,8 +57,13 @@ _EARLY_SIGNAL_ACTIONS = (
 @dataclass(frozen=True, slots=True)
 class CoverageRow:
     platform: Platform
-    enabled_source_count: int
+    effective_source_count: int
+    target_source_count: int
     verified_update_count: int
+    full_text_update_count: int
+    feed_summary_count: int
+    metadata_only_count: int
+    source_anomalies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +145,7 @@ def _title(report_date: date, profile: RiskProfile) -> str:
 
 
 def _coverage_line(row: CoverageRow) -> str:
-    if not row.enabled_source_count:
+    if not row.effective_source_count:
         return f"{row.platform.value}：该平台尚无合规启用来源"
     if not row.verified_update_count:
         return f"{row.platform.value}：无已验证更新"

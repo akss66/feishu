@@ -38,6 +38,8 @@ from commerce_agent.persistence.models import (
     DocumentProvenance,
     DocumentVersion,
     Source,
+    SourceHealth,
+    SourceMaterialPolicy,
     SourcePlatform,
     UTCDateTime,
 )
@@ -480,12 +482,29 @@ class SqlAlchemyIntelligenceRepository:
         self, *, window_start: datetime, window_end: datetime
     ) -> tuple[CoverageRow, ...]:
         async with self._session_factory() as session:
-            enabled_counts = dict(
+            effective_counts = dict(
                 (
                     await session.execute(
-                        select(SourcePlatform.platform, func.count(Source.id.distinct()))
+                        select(
+                            SourcePlatform.platform,
+                            func.count(SourceMaterialPolicy.publisher_key.distinct()),
+                        )
                         .join(Source, Source.id == SourcePlatform.source_id)
-                        .where(Source.compliance == "allowed", Source.enabled.is_(True))
+                        .join(
+                            SourceMaterialPolicy,
+                            SourceMaterialPolicy.source_id == Source.id,
+                        )
+                        .outerjoin(SourceHealth, SourceHealth.source_id == Source.id)
+                        .where(
+                            Source.compliance == "allowed",
+                            Source.enabled.is_(True),
+                            SourceMaterialPolicy.content_scope
+                            == ContentScope.FULL_TEXT.value,
+                            or_(
+                                SourceHealth.source_id.is_(None),
+                                SourceHealth.health_status != "suspended",
+                            ),
+                        )
                         .group_by(SourcePlatform.platform)
                     )
                 ).all()
@@ -509,10 +528,17 @@ class SqlAlchemyIntelligenceRepository:
                         .join(Document, Document.id == DocumentVersion.document_id)
                         .join(Source, Source.id == Document.source_id)
                         .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                        .join(
+                            DocumentProvenance,
+                            DocumentProvenance.document_version_id
+                            == DocumentVersion.id,
+                        )
                         .where(
                             Document.current_version_id == DocumentVersion.id,
                             Source.compliance == "allowed",
                             Source.enabled.is_(True),
+                            DocumentProvenance.content_scope
+                            == ContentScope.FULL_TEXT.value,
                             AnalysisJob.status == "completed",
                             DocumentAnalysis.evidence_confidence >= 75,
                             DocumentVersion.fetched_at >= window_start,
@@ -522,11 +548,77 @@ class SqlAlchemyIntelligenceRepository:
                     )
                 ).all()
             )
+            scope_rows = (
+                await session.execute(
+                    select(
+                        SourcePlatform.platform,
+                        DocumentProvenance.content_scope,
+                        func.count(Document.content_group_hash.distinct()),
+                    )
+                    .select_from(DocumentVersion)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .join(Source, Source.id == Document.source_id)
+                    .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                    .join(
+                        DocumentProvenance,
+                        DocumentProvenance.document_version_id == DocumentVersion.id,
+                    )
+                    .where(
+                        Source.compliance == "allowed",
+                        Source.enabled.is_(True),
+                        DocumentVersion.fetched_at >= window_start,
+                        DocumentVersion.fetched_at < window_end,
+                    )
+                    .group_by(
+                        SourcePlatform.platform,
+                        DocumentProvenance.content_scope,
+                    )
+                )
+            ).all()
+            scope_counts = {
+                (platform, content_scope): count
+                for platform, content_scope, count in scope_rows
+            }
+            anomaly_rows = (
+                await session.execute(
+                    select(
+                        SourcePlatform.platform,
+                        Source.id,
+                        SourceHealth.health_status,
+                        SourceHealth.last_error_code,
+                    )
+                    .select_from(SourceHealth)
+                    .join(Source, Source.id == SourceHealth.source_id)
+                    .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                    .where(
+                        Source.compliance == "allowed",
+                        Source.enabled.is_(True),
+                        SourceHealth.health_status == "suspended",
+                    )
+                    .order_by(SourcePlatform.platform, Source.id)
+                )
+            ).all()
+            anomalies: dict[str, list[str]] = {}
+            for platform, source_id, health_status, error_code in anomaly_rows:
+                anomalies.setdefault(platform, []).append(
+                    f"{source_id}:{health_status}:{error_code or 'unknown'}"
+                )
         return tuple(
             CoverageRow(
                 platform=platform,
-                enabled_source_count=enabled_counts.get(platform.value, 0),
+                effective_source_count=effective_counts.get(platform.value, 0),
+                target_source_count=2,
                 verified_update_count=verified_counts.get(platform.value, 0),
+                full_text_update_count=scope_counts.get(
+                    (platform.value, ContentScope.FULL_TEXT.value), 0
+                ),
+                feed_summary_count=scope_counts.get(
+                    (platform.value, ContentScope.FEED_SUMMARY.value), 0
+                ),
+                metadata_only_count=scope_counts.get(
+                    (platform.value, ContentScope.METADATA_ONLY.value), 0
+                ),
+                source_anomalies=tuple(anomalies.get(platform.value, ())),
             )
             for platform in Platform
         )

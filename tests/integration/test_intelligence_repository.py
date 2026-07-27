@@ -46,6 +46,7 @@ from commerce_agent.persistence.models import (
     DeliveryOutbox,
     DocumentAnalysis,
     DocumentVersion,
+    SourceHealth,
 )
 
 NOW = datetime(2026, 7, 21, 1, tzinfo=UTC)
@@ -790,7 +791,7 @@ async def test_report_query_uses_current_allowed_versions_and_exact_window(tmp_p
         await database.dispose()
 
 
-async def test_coverage_lists_every_platform_and_counts_enabled_verified_sources(
+async def test_coverage_lists_effective_publishers_material_scopes_and_anomalies(
     tmp_path,
 ) -> None:
     database = Database(f"sqlite+aiosqlite:///{tmp_path / 'coverage.db'}")
@@ -800,14 +801,57 @@ async def test_coverage_lists_every_platform_and_counts_enabled_verified_sources
     start = datetime(2026, 7, 20, 1, tzinfo=UTC)
     end = datetime(2026, 7, 21, 1, tzinfo=UTC)
     try:
-        await ingestion.sync_sources([_source(source_id="enabled")])
+        full_source = _source(source_id="enabled-full")
+        summary_source = replace(
+            _source(source_id="enabled-summary"),
+            content_scope=ContentScope.FEED_SUMMARY,
+            publisher_key="summary.example.com",
+        )
+        metadata_source = replace(
+            _source(source_id="enabled-metadata"),
+            content_scope=ContentScope.METADATA_ONLY,
+            publisher_key="metadata.example.com",
+        )
+        suspended_source = replace(
+            _source(source_id="suspended-full"),
+            publisher_key="suspended.example.com",
+        )
+        await ingestion.sync_sources(
+            [full_source, summary_source, metadata_source, suspended_source]
+        )
         outcome = await ingestion.persist_version(
             replace(
-                _candidate(source_id="enabled", content_hash="7" * 64),
+                _candidate(source_id=full_source.source_id, content_hash="7" * 64),
                 fetched_at=start,
             )
         )
+        await ingestion.persist_version(
+            replace(
+                _candidate(source_id=summary_source.source_id, content_hash="6" * 64),
+                fetched_at=start,
+                publisher_key=summary_source.publisher_key,
+                attribution=summary_source.attribution,
+                content_scope="feed_summary",
+            )
+        )
+        await ingestion.persist_version(
+            replace(
+                _candidate(source_id=metadata_source.source_id, content_hash="5" * 64),
+                fetched_at=start,
+                publisher_key=metadata_source.publisher_key,
+                attribution=metadata_source.attribution,
+                content_scope="metadata_only",
+            )
+        )
         async with database.session.begin() as session:
+            session.add(
+                SourceHealth(
+                    source_id=suspended_source.source_id,
+                    consecutive_failures=3,
+                    last_error_code="timeout",
+                    health_status="suspended",
+                )
+            )
             job = await session.scalar(
                 select(AnalysisJob).where(
                     AnalysisJob.document_version_id == outcome.version_id
@@ -836,10 +880,73 @@ async def test_coverage_lists_every_platform_and_counts_enabled_verified_sources
         by_platform = {row.platform: row for row in rows}
 
         assert set(by_platform) == set(Platform)
-        assert by_platform[Platform.EBAY].enabled_source_count == 1
+        assert by_platform[Platform.EBAY].effective_source_count == 1
+        assert by_platform[Platform.EBAY].target_source_count == 2
         assert by_platform[Platform.EBAY].verified_update_count == 1
-        assert by_platform[Platform.TEMU].enabled_source_count == 0
+        assert by_platform[Platform.EBAY].full_text_update_count == 1
+        assert by_platform[Platform.EBAY].feed_summary_count == 1
+        assert by_platform[Platform.EBAY].metadata_only_count == 1
+        assert by_platform[Platform.EBAY].source_anomalies == (
+            "suspended-full:suspended:timeout",
+        )
+        assert by_platform[Platform.TEMU].effective_source_count == 0
         assert by_platform[Platform.TEMU].verified_update_count == 0
+    finally:
+        await database.dispose()
+
+
+async def test_coverage_ignores_legacy_non_full_text_analysis(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'legacy-summary.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    start = datetime(2026, 7, 20, 1, tzinfo=UTC)
+    end = datetime(2026, 7, 21, 1, tzinfo=UTC)
+    source = replace(
+        _source(source_id="legacy-summary"),
+        content_scope=ContentScope.FEED_SUMMARY,
+    )
+    try:
+        await ingestion.sync_sources([source])
+        outcome = await ingestion.persist_version(
+            replace(
+                _candidate(source_id=source.source_id, content_hash="4" * 64),
+                fetched_at=start,
+                content_scope="feed_summary",
+            )
+        )
+        async with database.session.begin() as session:
+            job = await session.get(AnalysisJob, outcome.version_id)
+            assert job is not None
+            job.status = "completed"
+            session.add(
+                DocumentAnalysis(
+                    document_version_id=outcome.version_id,
+                    schema_version="1",
+                    prompt_version="1",
+                    model_name="legacy-test-model",
+                    headline_zh=_valid_result().headline_zh,
+                    summary_zh=_valid_result().summary_zh,
+                    event_type=_valid_result().event_type.value,
+                    risk_level=_valid_result().risk_level.value,
+                    evidence_confidence=90,
+                    event_fingerprint="legacy-summary-event",
+                    structured_payload=_valid_result().model_dump(mode="json"),
+                    analyzed_at=NOW,
+                )
+            )
+
+        row = next(
+            item
+            for item in await repository.list_coverage(
+                window_start=start,
+                window_end=end,
+            )
+            if item.platform is Platform.EBAY
+        )
+
+        assert row.verified_update_count == 0
+        assert row.feed_summary_count == 1
     finally:
         await database.dispose()
 

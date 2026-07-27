@@ -166,8 +166,8 @@ def test_report_uses_official_source_before_recency_for_tied_events() -> None:
 
 def test_empty_day_builds_health_report_with_platform_source_coverage() -> None:
     coverage = (
-        CoverageRow(Platform.EBAY, enabled_source_count=1, verified_update_count=0),
-        CoverageRow(Platform.TEMU, enabled_source_count=0, verified_update_count=0),
+        CoverageRow(Platform.EBAY, 1, 2, 0, 0, 0, 0),
+        CoverageRow(Platform.TEMU, 0, 2, 0, 0, 0, 0),
     )
 
     draft = DailyReportComposer().compose(
@@ -196,8 +196,12 @@ def test_b_and_health_reports_share_three_state_coverage_wording(
     coverage = (
         CoverageRow(
             Platform.EBAY,
-            enabled_source_count=enabled_sources,
+            effective_source_count=enabled_sources,
+            target_source_count=2,
             verified_update_count=verified_updates,
+            full_text_update_count=verified_updates,
+            feed_summary_count=0,
+            metadata_only_count=0,
         ),
     )
     composer = DailyReportComposer()
