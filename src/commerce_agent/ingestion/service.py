@@ -17,6 +17,7 @@ from commerce_agent.ingestion.models import (
     CollectedFailure,
     CollectedItem,
     CollectorKind,
+    ContentScope,
     FetchContext,
     FetchMetrics,
     ResponseArtifact,
@@ -25,6 +26,7 @@ from commerce_agent.ingestion.models import (
     SourceAdapter,
     SourceDefinition,
     Trigger,
+    TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.snapshots import SnapshotStore, SnapshotStoreError
@@ -150,6 +152,7 @@ class IngestionService:
         self._snapshot_store = snapshot_store
         self._repository = repository
         self._max_concurrency = max_concurrency
+        # This backwards-compatible setting governs every temporary media body.
         self._gdelt_media_body_retention_days = gdelt_media_body_retention_days
         self._clock = clock
         self._sync_lock = asyncio.Lock()
@@ -317,7 +320,7 @@ class IngestionService:
                 metrics,
             )
 
-        if source.adapter is SourceAdapter.GDELT:
+        if _uses_temporary_media_body(source):
             cutoff = started_at - timedelta(days=self._gdelt_media_body_retention_days)
             await self._snapshot_store.prune_source_before(
                 source.source_id,
@@ -454,6 +457,13 @@ class IngestionService:
                 "count_bytes_received": summary.bytes_received,
             },
         )
+
+
+def _uses_temporary_media_body(source: SourceDefinition) -> bool:
+    return source.adapter is SourceAdapter.GDELT or (
+        source.trust_tier is TrustTier.MEDIA
+        and source.content_scope is ContentScope.FULL_TEXT
+    )
 
 
 def _artifact_response(artifact: ResponseArtifact) -> FetchResponse:

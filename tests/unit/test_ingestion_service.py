@@ -16,6 +16,7 @@ from commerce_agent.ingestion.models import (
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     ExtractedDocument,
     FetchContext,
     Platform,
@@ -175,6 +176,64 @@ async def test_gdelt_run_expires_media_bodies_and_snapshots_after_seven_days() -
     cutoff = NOW - timedelta(days=7)
     assert snapshots.pruned == [(gdelt.source_id, cutoff)]
     assert repository.media_redactions == [((gdelt.source_id,), cutoff)]
+
+
+async def test_direct_full_text_media_expires_bodies_after_seven_days() -> None:
+    direct_media = replace(
+        source("media-cifnews-cross-border", collector=CollectorKind.HTML),
+        trust_tier=TrustTier.MEDIA,
+        content_scope=ContentScope.FULL_TEXT,
+        publisher_key="cifnews.com",
+        attribution="雨果跨境",
+    )
+    ingestion, repository, snapshots = service(
+        [direct_media],
+        {CollectorKind.HTML: FakeCollector()},
+    )
+
+    await ingestion.run_source(direct_media.source_id)
+
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [(direct_media.source_id, cutoff)]
+    assert repository.media_redactions == [((direct_media.source_id,), cutoff)]
+
+
+@pytest.mark.parametrize(
+    ("source_definition", "collector"),
+    [
+        (
+            replace(
+                source("official-full-text", collector=CollectorKind.HTML),
+                content_scope=ContentScope.FULL_TEXT,
+            ),
+            CollectorKind.HTML,
+        ),
+        (
+            replace(
+                source("media-metadata-only", collector=CollectorKind.HTML),
+                trust_tier=TrustTier.MEDIA,
+                content_scope=ContentScope.METADATA_ONLY,
+                publisher_key="metadata.example.com",
+                attribution="Metadata Media",
+            ),
+            CollectorKind.HTML,
+        ),
+    ],
+    ids=("official-full-text", "media-metadata-only"),
+)
+async def test_non_temporary_media_bodies_are_not_expired(
+    source_definition: SourceDefinition,
+    collector: CollectorKind,
+) -> None:
+    ingestion, repository, snapshots = service(
+        [source_definition],
+        {collector: FakeCollector()},
+    )
+
+    await ingestion.run_source(source_definition.source_id)
+
+    assert snapshots.pruned == []
+    assert repository.media_redactions == []
 
 
 class FakeRepository:
