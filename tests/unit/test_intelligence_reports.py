@@ -134,6 +134,39 @@ def test_report_prefers_official_source_for_same_event() -> None:
     assert draft.selected_analysis_ids == (official.analysis_id,)
 
 
+def test_report_merges_platforms_and_sources_for_same_event() -> None:
+    amazon_base = _analysis(1, fingerprint="event-shared", confidence=80)
+    ebay_base = _analysis(2, fingerprint="event-shared", confidence=90)
+    amazon = replace(
+        amazon_base,
+        candidate=replace(
+            amazon_base.candidate,
+            platforms=(Platform.AMAZON,),
+            source_references=(("Amazon", "https://example.com/amazon"),),
+        ),
+    )
+    ebay = replace(
+        ebay_base,
+        candidate=replace(
+            ebay_base.candidate,
+            platforms=(Platform.EBAY,),
+            source_references=(("eBay", "https://example.com/ebay"),),
+        ),
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21),
+        analyses=(amazon, ebay),
+    )
+
+    item = draft.payload["items"][0]
+    assert item["platforms"] == ["amazon", "ebay"]
+    assert item["source_references"] == [
+        {"source_name": "Amazon", "source_url": "https://example.com/amazon"},
+        {"source_name": "eBay", "source_url": "https://example.com/ebay"},
+    ]
+
+
 def test_report_ranks_by_risk_then_confidence_then_recency() -> None:
     older = datetime(2026, 7, 20, 10, tzinfo=UTC)
     newer = older + timedelta(hours=1)

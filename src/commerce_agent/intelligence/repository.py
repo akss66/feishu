@@ -11,6 +11,7 @@ from uuid import uuid4
 from sqlalchemy import case, exists, func, literal, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from commerce_agent.ingestion.models import ContentScope, Platform, TrustTier
 from commerce_agent.intelligence.models import (
@@ -30,6 +31,7 @@ from commerce_agent.intelligence.reports import (
 )
 from commerce_agent.intelligence.retrieval import CorpusCandidate
 from commerce_agent.persistence.models import (
+    AnalysisDuplicate,
     AnalysisJob,
     DailyReport,
     DeliveryOutbox,
@@ -114,6 +116,42 @@ class SqlAlchemyIntelligenceRepository:
             & (AnalysisJob.lease_expires_at <= now)
             & (AnalysisJob.attempt_count < 2),
         )
+        earlier_job = aliased(AnalysisJob)
+        earlier_version = aliased(DocumentVersion)
+        earlier_document = aliased(Document)
+        earlier_source = aliased(Source)
+        earlier_provenance = aliased(DocumentProvenance)
+        earlier_relevant = or_(
+            earlier_job.status == "pending",
+            (earlier_job.status == "retry_wait")
+            & (earlier_job.next_attempt_at <= now),
+            earlier_job.status == "running",
+            earlier_job.status == "completed",
+        )
+        earlier_same_content = (
+            select(literal(1))
+            .select_from(earlier_job)
+            .join(
+                earlier_version,
+                earlier_version.id == earlier_job.document_version_id,
+            )
+            .join(
+                earlier_document,
+                earlier_document.id == earlier_version.document_id,
+            )
+            .join(earlier_source, earlier_source.id == earlier_document.source_id)
+            .join(
+                earlier_provenance,
+                earlier_provenance.document_version_id == earlier_version.id,
+            )
+            .where(
+                earlier_document.content_group_hash == Document.content_group_hash,
+                earlier_job.id < AnalysisJob.id,
+                earlier_relevant,
+                earlier_source.compliance == "allowed",
+                earlier_provenance.content_scope == ContentScope.FULL_TEXT.value,
+            )
+        )
         next_job_id = (
             select(AnalysisJob.id)
             .join(
@@ -129,6 +167,7 @@ class SqlAlchemyIntelligenceRepository:
             .where(due)
             .where(Source.compliance == "allowed")
             .where(DocumentProvenance.content_scope == ContentScope.FULL_TEXT.value)
+            .where(~exists(earlier_same_content))
             .order_by(AnalysisJob.created_at, AnalysisJob.id)
             .limit(1)
             .scalar_subquery()
@@ -149,6 +188,7 @@ class SqlAlchemyIntelligenceRepository:
         )
 
         async with self._session_factory.begin() as session:
+            await self._link_completed_duplicates(session, due=due, now=now)
             await session.execute(
                 update(AnalysisJob)
                 .where(
@@ -169,6 +209,86 @@ class SqlAlchemyIntelligenceRepository:
             if job_id is None:
                 return None
             return await self._load_candidate(session, job_id)
+
+    async def _link_completed_duplicates(
+        self,
+        session: AsyncSession,
+        *,
+        due: object,
+        now: datetime,
+    ) -> None:
+        duplicate_candidates = (
+            await session.execute(
+                select(
+                    AnalysisJob.id,
+                    DocumentVersion.id,
+                    Document.content_group_hash,
+                )
+                .select_from(AnalysisJob)
+                .join(
+                    DocumentVersion,
+                    DocumentVersion.id == AnalysisJob.document_version_id,
+                )
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .join(Source, Source.id == Document.source_id)
+                .join(
+                    DocumentProvenance,
+                    DocumentProvenance.document_version_id == DocumentVersion.id,
+                )
+                .where(
+                    due,
+                    Source.compliance == "allowed",
+                    DocumentProvenance.content_scope == ContentScope.FULL_TEXT.value,
+                )
+                .order_by(AnalysisJob.id)
+            )
+        ).all()
+        for job_id, version_id, group_hash in duplicate_candidates:
+            canonical_analysis_id = await session.scalar(
+                select(DocumentAnalysis.id)
+                .join(
+                    DocumentVersion,
+                    DocumentVersion.id == DocumentAnalysis.document_version_id,
+                )
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .join(
+                    AnalysisJob,
+                    AnalysisJob.document_version_id == DocumentVersion.id,
+                )
+                .where(
+                    Document.content_group_hash == group_hash,
+                    DocumentVersion.id != version_id,
+                    AnalysisJob.status == "completed",
+                )
+                .order_by(DocumentAnalysis.id)
+                .limit(1)
+            )
+            if canonical_analysis_id is None:
+                continue
+            result = await session.execute(
+                update(AnalysisJob)
+                .where(AnalysisJob.id == job_id, due)
+                .values(
+                    status="duplicate",
+                    next_attempt_at=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    error_code=None,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                continue
+            await session.execute(
+                sqlite_insert(AnalysisDuplicate)
+                .values(
+                    duplicate_document_version_id=version_id,
+                    canonical_analysis_id=canonical_analysis_id,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["duplicate_document_version_id"]
+                )
+            )
 
     async def complete_analysis(
         self,
@@ -465,7 +585,7 @@ class SqlAlchemyIntelligenceRepository:
             platforms_by_source: dict[str, list[Platform]] = {}
             for source_id, platform in platform_rows:
                 platforms_by_source.setdefault(source_id, []).append(Platform(platform))
-            return tuple(
+            scored = [
                 _scored_analysis(
                     analysis,
                     job,
@@ -476,7 +596,69 @@ class SqlAlchemyIntelligenceRepository:
                     platforms=tuple(platforms_by_source.get(source.id, ())),
                 )
                 for analysis, job, version, document, source, provenance in rows
-            )
+            ]
+            duplicate_rows = (
+                await session.execute(
+                    select(
+                        AnalysisDuplicate.canonical_analysis_id,
+                        Source.name,
+                        Document.canonical_url,
+                        SourcePlatform.platform,
+                    )
+                    .select_from(AnalysisDuplicate)
+                    .join(
+                        DocumentVersion,
+                        DocumentVersion.id
+                        == AnalysisDuplicate.duplicate_document_version_id,
+                    )
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .join(Source, Source.id == Document.source_id)
+                    .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                    .where(
+                        AnalysisDuplicate.canonical_analysis_id.in_(
+                            [item.analysis_id for item in scored]
+                        )
+                    )
+                )
+            ).all()
+            duplicate_platforms: dict[int, set[Platform]] = {}
+            duplicate_references: dict[int, set[tuple[str, str]]] = {}
+            for analysis_id, source_name, canonical_url, platform in duplicate_rows:
+                duplicate_platforms.setdefault(analysis_id, set()).add(
+                    Platform(platform)
+                )
+                duplicate_references.setdefault(analysis_id, set()).add(
+                    (source_name, canonical_url)
+                )
+            enriched: list[ScoredAnalysis] = []
+            for item in scored:
+                platforms = set(item.candidate.platforms)
+                platforms.update(duplicate_platforms.get(item.analysis_id, set()))
+                references = {
+                    (
+                        item.candidate.attribution or item.candidate.source_name,
+                        item.candidate.canonical_url,
+                    )
+                }
+                references.update(
+                    duplicate_references.get(item.analysis_id, set())
+                )
+                enriched.append(
+                    replace(
+                        item,
+                        candidate=replace(
+                            item.candidate,
+                            platforms=tuple(
+                                sorted(
+                                    platforms,
+                                    key=lambda platform: list(Platform).index(platform),
+                                )
+                            ),
+                            source_references=tuple(sorted(references)),
+                        ),
+                    )
+                )
+            return tuple(enriched)
 
     async def list_coverage(
         self, *, window_start: datetime, window_end: datetime

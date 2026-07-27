@@ -27,6 +27,9 @@ _TRACKING_KEYS = frozenset(
         "utm_term",
     }
 )
+_WECHAT_TRACKING_KEYS = frozenset(
+    {"scene", "from", "subscene", "clicktime", "enterid", "ascene"}
+)
 _PERCENT_ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
 _UNRESERVED = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
@@ -80,10 +83,13 @@ def canonicalize_url(url: str) -> str:
     netloc = host if port is None or default_port else f"{host}:{port}"
 
     path = _canonical_path(parsed.path or "/")
+    tracking_keys = _TRACKING_KEYS
+    if host == "mp.weixin.qq.com" and path.startswith("/s/"):
+        tracking_keys = tracking_keys | _WECHAT_TRACKING_KEYS
     retained = [
         (unicodedata.normalize("NFC", key), unicodedata.normalize("NFC", value))
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key.lower() not in _TRACKING_KEYS
+        if key.lower() not in tracking_keys
     ]
     retained.sort(key=lambda pair: (pair[0], pair[1]))
     query = urlencode(retained, doseq=True)

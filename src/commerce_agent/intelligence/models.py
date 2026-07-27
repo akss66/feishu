@@ -98,6 +98,7 @@ class AnalysisCandidate:
     publisher_key: str | None = None
     attribution: str | None = None
     content_scope: str | None = None
+    source_references: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

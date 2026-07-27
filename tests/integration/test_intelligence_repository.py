@@ -41,6 +41,7 @@ from commerce_agent.persistence.ingestion import (
     SqlAlchemyIngestionRepository,
 )
 from commerce_agent.persistence.models import (
+    AnalysisDuplicate,
     AnalysisJob,
     DailyReport,
     DeliveryOutbox,
@@ -453,6 +454,83 @@ async def test_claim_skips_metadata_only_documents(tmp_path) -> None:
             job = await session.get(AnalysisJob, outcome.version_id)
         assert job is not None
         assert job.status == "pending"
+    finally:
+        await database.dispose()
+
+
+async def test_same_body_from_email_and_feishu_is_analyzed_once(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'cross-channel.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    email_source = replace(
+        _source(source_id="amazon-email"),
+        platforms=(Platform.AMAZON,),
+    )
+    feishu_source = replace(
+        _source(source_id="ebay-feishu"),
+        platforms=(Platform.EBAY,),
+    )
+    try:
+        await ingestion.sync_sources((email_source, feishu_source))
+        first_outcome = await ingestion.persist_version(
+            replace(
+                _candidate(
+                    source_id=email_source.source_id,
+                    content_hash="a" * 64,
+                    canonical_url="https://example.com/email",
+                ),
+                content_group_hash="shared-body",
+            )
+        )
+        second_outcome = await ingestion.persist_version(
+            replace(
+                _candidate(
+                    source_id=feishu_source.source_id,
+                    content_hash="b" * 64,
+                    canonical_url="https://example.com/feishu",
+                ),
+                content_group_hash="shared-body",
+            )
+        )
+
+        first = await repository.claim_next(now=NOW)
+        assert first is not None
+        assert await repository.claim_next(now=NOW) is None
+        analysis_id = await repository.complete_analysis(
+            first,
+            _valid_result(),
+            90,
+            "event-1",
+            risk_level=RiskLevel.HIGH,
+            now=NOW,
+            model_name="test-model",
+        )
+
+        assert await repository.claim_next(now=NOW) is None
+        async with database.session() as session:
+            second_job = await session.scalar(
+                select(AnalysisJob).where(
+                    AnalysisJob.document_version_id == second_outcome.version_id
+                )
+            )
+            duplicate = await session.get(AnalysisDuplicate, second_outcome.version_id)
+        assert second_job is not None
+        assert second_job.status == "duplicate"
+        assert duplicate is not None
+        assert duplicate.canonical_analysis_id == analysis_id
+
+        analyses = await repository.list_report_analyses(
+            window_start=datetime(2026, 7, 20, tzinfo=UTC),
+            window_end=datetime(2026, 7, 22, tzinfo=UTC),
+        )
+        assert len(analyses) == 1
+        assert analyses[0].candidate.document_version_id == first_outcome.version_id
+        assert analyses[0].candidate.platforms == (
+            Platform.AMAZON,
+            Platform.EBAY,
+        )
+        assert len(analyses[0].candidate.source_references) == 2
     finally:
         await database.dispose()
 

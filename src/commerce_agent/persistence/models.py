@@ -268,6 +268,21 @@ class DocumentAnalysis(Base):
     )
 
 
+class AnalysisDuplicate(Base):
+    __tablename__ = "analysis_duplicates"
+
+    duplicate_document_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    canonical_analysis_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_analyses.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+
 class DailyReport(Base):
     __tablename__ = "daily_reports"
 

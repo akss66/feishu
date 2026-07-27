@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from zoneinfo import ZoneInfo
@@ -101,7 +101,42 @@ def rank_key(item: ScoredAnalysis) -> tuple[int, int, int, datetime, int]:
 
 def _preferred_event_item(items: list[ScoredAnalysis]) -> ScoredAnalysis:
     official = [item for item in items if item.candidate.trust_tier is TrustTier.OFFICIAL]
-    return max(official or items, key=rank_key)
+    preferred = max(official or items, key=rank_key)
+    platforms = tuple(
+        sorted(
+            {
+                platform
+                for item in items
+                for platform in item.candidate.platforms
+            },
+            key=lambda platform: list(Platform).index(platform),
+        )
+    )
+    references = tuple(
+        sorted(
+            {
+                reference
+                for item in items
+                for reference in (
+                    item.candidate.source_references
+                    or (
+                        (
+                            item.candidate.attribution or item.candidate.source_name,
+                            item.candidate.canonical_url,
+                        ),
+                    )
+                )
+            }
+        )
+    )
+    return replace(
+        preferred,
+        candidate=replace(
+            preferred.candidate,
+            platforms=platforms,
+            source_references=references,
+        ),
+    )
 
 
 class DailyReportComposer:
@@ -216,6 +251,19 @@ def _daily_item(item: ScoredAnalysis, profile: RiskProfile) -> dict[str, object]
         "actions": _daily_actions(item, profile, verified=verified),
         "uncertainties": list(item.result.uncertainties),
         "source_url": item.candidate.canonical_url,
+        "platforms": [platform.value for platform in item.candidate.platforms],
+        "source_references": [
+            {"source_name": source_name, "source_url": source_url}
+            for source_name, source_url in (
+                item.candidate.source_references
+                or (
+                    (
+                        item.candidate.attribution or item.candidate.source_name,
+                        item.candidate.canonical_url,
+                    ),
+                )
+            )
+        ],
         **source_fields,
     }
 

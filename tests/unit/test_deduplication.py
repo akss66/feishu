@@ -38,6 +38,15 @@ def test_keeps_duplicate_business_parameters_without_merging_distinct_urls() -> 
     assert first != second
 
 
+def test_wechat_tracking_parameters_do_not_change_identity() -> None:
+    first = canonicalize_url(
+        "https://mp.weixin.qq.com/s/abc?scene=1&from=timeline&subscene=10000"
+    )
+    second = canonicalize_url("https://mp.weixin.qq.com/s/abc")
+
+    assert first == second
+
+
 def test_unicode_paths_have_one_stable_nfc_percent_encoded_form() -> None:
     literal = canonicalize_url("https://example.com/cafe\u0301/商品")
     encoded = canonicalize_url(
