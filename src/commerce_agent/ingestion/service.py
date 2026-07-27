@@ -22,6 +22,7 @@ from commerce_agent.ingestion.models import (
     ResponseArtifact,
     RunStatus,
     RunSummary,
+    SourceAdapter,
     SourceDefinition,
     Trigger,
 )
@@ -34,7 +35,6 @@ from commerce_agent.persistence.ingestion import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_GDELT_MEDIA_SOURCE_ID = "media-gdelt-cross-border"
 _KNOWN_ERROR_CODES = frozenset(
     {
         "blank_content",
@@ -317,10 +317,15 @@ class IngestionService:
                 metrics,
             )
 
-        if source.source_id == _GDELT_MEDIA_SOURCE_ID:
+        if source.adapter is SourceAdapter.GDELT:
+            cutoff = started_at - timedelta(days=self._gdelt_media_body_retention_days)
             await self._snapshot_store.prune_source_before(
                 source.source_id,
-                started_at - timedelta(days=30),
+                cutoff,
+            )
+            await self._repository.redact_expired_media_bodies(
+                source_ids=(source.source_id,),
+                before=cutoff,
             )
 
         etag, last_modified = self._conditionals.get(source.source_id, (None, None))

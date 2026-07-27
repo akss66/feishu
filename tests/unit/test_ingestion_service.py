@@ -159,20 +159,22 @@ class FakeSnapshotStore:
         )
 
 
-async def test_gdelt_run_prunes_raw_snapshots_older_than_thirty_days() -> None:
+async def test_gdelt_run_expires_media_bodies_and_snapshots_after_seven_days() -> None:
     gdelt = replace(
         source("media-gdelt-cross-border", collector=CollectorKind.API),
         trust_tier=TrustTier.MEDIA,
         adapter=SourceAdapter.GDELT,
     )
-    ingestion, _, snapshots = service(
+    ingestion, repository, snapshots = service(
         [gdelt],
         {CollectorKind.API: FakeCollector()},
     )
 
     await ingestion.run_source(gdelt.source_id)
 
-    assert snapshots.pruned == [(gdelt.source_id, NOW - timedelta(days=30))]
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [(gdelt.source_id, cutoff)]
+    assert repository.media_redactions == [((gdelt.source_id,), cutoff)]
 
 
 class FakeRepository:
@@ -190,6 +192,7 @@ class FakeRepository:
         self.started: list[tuple[int, str, Trigger, datetime | None]] = []
         self.persisted: list[PersistableDocument] = []
         self.finished: list[tuple[int, RunSummary]] = []
+        self.media_redactions: list[tuple[tuple[str, ...], datetime]] = []
         self.lease_tokens: dict[str, str] = {}
         self.suspended_source_ids: set[str] = set()
 
@@ -249,6 +252,15 @@ class FakeRepository:
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None:
         self.finished.append((run_id, summary))
+
+    async def redact_expired_media_bodies(
+        self,
+        *,
+        source_ids: Sequence[str],
+        before: datetime,
+    ) -> int:
+        self.media_redactions.append((tuple(source_ids), before))
+        return 0
 
 
 class RecordingCompliance:

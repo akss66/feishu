@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +19,7 @@ from commerce_agent.ingestion.models import (
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
+    DocumentAnalysis,
     DocumentProvenance,
     DocumentVersion,
     FetchRun,
@@ -32,6 +33,9 @@ from commerce_agent.persistence.models import (
 
 SOURCE_LEASE_TTL = timedelta(hours=24)
 SOURCE_FAILURE_THRESHOLD: Final[int] = 3
+EXPIRED_MEDIA_BODY: Final[str] = (
+    "[media body expired; use analysis evidence and original link]"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +117,13 @@ class IngestionRepository(Protocol):
     ) -> StoredDocument | None: ...
 
     async def persist_version(self, candidate: PersistableDocument) -> PersistOutcome: ...
+
+    async def redact_expired_media_bodies(
+        self,
+        *,
+        source_ids: Sequence[str],
+        before: datetime,
+    ) -> int: ...
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None: ...
 
@@ -374,6 +385,40 @@ class SqlAlchemyIngestionRepository:
                 created_document=created_document,
                 created_version=created_version,
             )
+
+    async def redact_expired_media_bodies(
+        self,
+        *,
+        source_ids: Sequence[str],
+        before: datetime,
+    ) -> int:
+        if not source_ids:
+            return 0
+        candidate_ids = (
+            select(DocumentVersion.id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(
+                DocumentProvenance,
+                DocumentProvenance.document_version_id == DocumentVersion.id,
+            )
+            .join(
+                DocumentAnalysis,
+                DocumentAnalysis.document_version_id == DocumentVersion.id,
+            )
+            .where(
+                Document.source_id.in_(tuple(source_ids)),
+                DocumentProvenance.content_scope == "full_text",
+                DocumentVersion.fetched_at < before,
+                DocumentVersion.body != EXPIRED_MEDIA_BODY,
+            )
+        )
+        async with self._session_factory.begin() as session:
+            result = await session.execute(
+                update(DocumentVersion)
+                .where(DocumentVersion.id.in_(candidate_ids))
+                .values(body=EXPIRED_MEDIA_BODY, snapshot_path=None)
+            )
+            return result.rowcount
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None:
         async with self._session_factory.begin() as session:

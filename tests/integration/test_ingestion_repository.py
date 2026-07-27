@@ -14,6 +14,7 @@ from commerce_agent.ingestion.models import (
     Platform,
     RunStatus,
     RunSummary,
+    SourceAdapter,
     SourceDefinition,
     Trigger,
     TrustTier,
@@ -26,6 +27,7 @@ from commerce_agent.persistence.ingestion import (
 from commerce_agent.persistence.models import (
     AnalysisJob,
     Document,
+    DocumentAnalysis,
     DocumentProvenance,
     DocumentVersion,
     FetchRun,
@@ -653,6 +655,96 @@ async def test_approved_media_full_text_is_persisted_with_complete_provenance(
         assert provenance.attribution == "Fixture Publisher"
         assert provenance.content_scope == "full_text"
         assert [job.document_version_id for job in jobs] == [outcome.version_id]
+    finally:
+        await database.dispose()
+
+
+async def test_expired_analyzed_gdelt_body_is_redacted_without_losing_provenance(
+    tmp_path,
+) -> None:
+    database, repository = await _repository(tmp_path)
+    now = datetime(2026, 7, 27, 9, tzinfo=UTC)
+    gdelt = replace(
+        _source(),
+        source_id="media-gdelt-amazon",
+        adapter=SourceAdapter.GDELT,
+        trust_tier=TrustTier.MEDIA,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index; original publisher shown per item",
+        publisher_key=None,
+    )
+    try:
+        await repository.sync_sources([gdelt])
+        analyzed = await repository.persist_version(
+            replace(
+                _candidate(
+                    canonical_url="https://publisher.example/analyzed",
+                    content_hash="d" * 64,
+                    content_group_hash="e" * 64,
+                    fetched_at=now - timedelta(days=8),
+                ),
+                source_id=gdelt.source_id,
+                body="Amazon analyzed media article body.",
+                publisher_key="publisher.example",
+                attribution="GDELT index; original publisher shown per item",
+                content_scope="full_text",
+            )
+        )
+        pending = await repository.persist_version(
+            replace(
+                _candidate(
+                    canonical_url="https://publisher.example/pending",
+                    content_hash="f" * 64,
+                    content_group_hash="0" * 64,
+                    fetched_at=now - timedelta(days=8),
+                ),
+                source_id=gdelt.source_id,
+                body="Amazon pending media article body.",
+                publisher_key="publisher.example",
+                attribution="GDELT index; original publisher shown per item",
+                content_scope="full_text",
+            )
+        )
+        async with database.session.begin() as session:
+            session.add(
+                DocumentAnalysis(
+                    document_version_id=analyzed.version_id,
+                    schema_version="1",
+                    prompt_version="test",
+                    model_name="test-model",
+                    headline_zh="测试",
+                    summary_zh="测试摘要",
+                    event_type="policy",
+                    risk_level="medium",
+                    evidence_confidence=90,
+                    event_fingerprint="1" * 64,
+                    structured_payload={},
+                    analyzed_at=now - timedelta(days=7),
+                )
+            )
+
+        redacted = await repository.redact_expired_media_bodies(
+            source_ids=(gdelt.source_id,),
+            before=now - timedelta(days=7),
+        )
+
+        async with database.session() as session:
+            analyzed_version = await session.get(DocumentVersion, analyzed.version_id)
+            pending_version = await session.get(DocumentVersion, pending.version_id)
+            provenance = await session.get(DocumentProvenance, analyzed.version_id)
+
+        assert redacted == 1
+        assert analyzed_version is not None
+        assert analyzed_version.body == (
+            "[media body expired; use analysis evidence and original link]"
+        )
+        assert analyzed_version.snapshot_path is None
+        assert analyzed_version.content_hash == "d" * 64
+        assert pending_version is not None
+        assert pending_version.body == "Amazon pending media article body."
+        assert provenance is not None
+        assert provenance.publisher_key == "publisher.example"
+        assert provenance.content_scope == "full_text"
     finally:
         await database.dispose()
 
