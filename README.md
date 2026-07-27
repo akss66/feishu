@@ -134,3 +134,23 @@ Joybuy 和 TikTok Shop，覆盖全球站点。采集内容分为三个等级：
 
 可选官方通知邮箱默认关闭，只有完成发件人白名单和 TLS 配置后才启用。后续采购授权媒体
 全文时实现 `LicensedNewsProvider` 接口；未配置的数据商适配器保持禁用并返回空结果。
+
+### GDELT 新闻雷达与原文抓取
+
+十个平台各有一个 GDELT 新闻发现源，均以 `metadata_only` 模式启用。GDELT 负责返回标题、
+媒体、发布时间和原文链接；它不会让新闻自动成为可分析全文，也不会提高严格全文覆盖数。
+
+原文二次抓取使用独立开关，默认关闭：
+
+```dotenv
+GDELT_ORIGINAL_FETCH_ENABLED=false
+GDELT_ORIGINAL_FETCH_MAX_PER_SOURCE=5
+GDELT_MEDIA_BODY_RETENTION_DAYS=7
+```
+
+完成受控网络 smoke 后才可将第一个值改为 `true` 并重启。即使开关开启，也只请求发布者
+目录中标记为 `allowed_public` 的精确域名；当前包括 FTC、GOV.UK 和欧盟官网。登录墙、
+付费墙、验证码、非 HTML、正文不完整、平台无关或带第三方版权限制的页面都会降级为
+“待核实线索”，不会进入 AI。
+
+已经分析完成的媒体正文最多保留 7 天；摘要、短证据、哈希、归属和原文链接继续保留。

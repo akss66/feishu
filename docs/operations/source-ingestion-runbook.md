@@ -172,3 +172,21 @@ Remove-Item Env:RUN_PUBLIC_SOURCE_SMOKE
 
 遇到 401、403、429、验证码或登录墙时停止采集并转人工复核，不绕过访问控制。官方通知
 邮箱保持默认关闭；需要回退时关闭 `OFFICIAL_NOTICE_EMAIL_ENABLED` 并重启，不删除审计记录。
+
+## GDELT 受控原文抓取
+
+10 个 `media-gdelt-*` 来源已启用为元数据新闻雷达，每个平台每 120 分钟最多执行一个包含
+25 条候选的有界查询。原文抓取与发现源相互独立：
+
+1. 保持 `GDELT_ORIGINAL_FETCH_ENABLED=false` 完成首次发现 smoke。
+2. 确认 GDELT 未返回 429，并且审核目录中至少一个 `allowed_public` 发布者能通过正文质量门。
+3. 将本机 `.env` 中该值改为 `true` 后重启机器人。
+4. 每个 GDELT 平台源每轮最多尝试 5 篇原文；失败仍保留标题和链接。
+
+准入条件包括公开 HTTPS、SSRF 安全检查、最多 3 次重定向、10 MiB 响应上限、HTML 媒体
+类型、至少 300 个可见字符、明确的平台名称且不存在访问墙或版权限制标记。未知发布者及
+`authorization_required`、`licensed_api`、`metadata_only`、`denied` 状态均不发起原文请求。
+
+已完成分析的 GDELT 全文和原始快照在 7 天后清理，待分析正文不会提前清理。回退只需设置
+`GDELT_ORIGINAL_FETCH_ENABLED=false` 并重启；10 个新闻发现源仍继续提供待核实线索。如需
+完全关闭某个平台，再将对应 `media-gdelt-*` 来源设为 `enabled: false`。
