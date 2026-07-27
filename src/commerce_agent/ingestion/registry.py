@@ -22,6 +22,7 @@ from commerce_agent.ingestion.models import (
     SourceDefinition,
     TrustTier,
 )
+from commerce_agent.ingestion.security import canonical_hostname
 
 
 class SourceRegistryError(ValueError):
@@ -39,10 +40,6 @@ _EnumT = TypeVar(
 )
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PUBLISHER_KEY = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
-_DNS_HOSTNAME = re.compile(
-    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)"
-    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
-)
 _ROOT_FIELDS = frozenset({"version", "sources"})
 _SOURCE_FIELDS = frozenset(
     {
@@ -438,7 +435,9 @@ def _require_url(value: object, field: str, context: str) -> str:
 
 
 def _is_forbidden_static_host(hostname: str) -> bool:
-    normalized = hostname.rstrip(".").lower()
+    normalized = canonical_hostname(hostname, required=False)
+    if normalized is None:
+        return True
     if (
         normalized == "localhost"
         or normalized.endswith(".localhost")
@@ -527,11 +526,11 @@ def _validate_html_scope_config(
     configured_hosts = config.get("allowed_hosts")
     if isinstance(configured_hosts, str):
         hosts = _comma_separated_tokens(configured_hosts)
-        entry_host = urlsplit(entry_url).hostname
+        entry_host = canonical_hostname(urlsplit(entry_url).hostname, required=False)
         if (
             hosts is None
             or entry_host is None
-            or entry_host.rstrip(".").lower() not in hosts
+            or entry_host not in hosts
             or any(not _is_safe_normalized_hostname(host) for host in hosts)
         ):
             raise SourceRegistryError(
@@ -557,13 +556,17 @@ def _comma_separated_tokens(value: str) -> tuple[str, ...] | None:
 
 
 def _is_safe_normalized_hostname(host: str) -> bool:
-    return (
-        host == host.lower()
-        and not host.endswith(".")
-        and len(host) <= 253
-        and _DNS_HOSTNAME.fullmatch(host) is not None
-        and not _is_forbidden_static_host(host)
-    )
+    canonical = canonical_hostname(host, required=False)
+    if canonical is None or host != canonical:
+        return False
+    try:
+        address = ip_address(canonical)
+    except ValueError:
+        pass
+    else:
+        if address.version == 6:
+            return False
+    return not _is_forbidden_static_host(canonical)
 
 
 def _is_safe_path_prefix(prefix: str) -> bool:

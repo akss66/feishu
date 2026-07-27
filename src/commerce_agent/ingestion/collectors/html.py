@@ -30,7 +30,7 @@ from commerce_agent.ingestion.models import (
     FetchContext,
     SourceDefinition,
 )
-from commerce_agent.ingestion.security import UrlSafetyError
+from commerce_agent.ingestion.security import UrlSafetyError, canonical_hostname
 
 _SELECTOR_PART = re.compile(r"^(?P<tag>[a-zA-Z][\w-]*|\*)?(?P<suffix>(?:[.#][\w-]+)*)$")
 _SELECTOR_SUFFIX = re.compile(r"([.#])([\w-]+)")
@@ -112,10 +112,10 @@ class HtmlCollector:
         use_public_article_gate = _public_article_gate(source)
 
         def candidate_filter(candidate: CollectedItem) -> bool:
-            host = urlsplit(candidate.url).hostname
+            host = canonical_hostname(urlsplit(candidate.url).hostname, required=False)
             return (
                 host is not None
-                and host.rstrip(".").lower() in hosts
+                and host in hosts
                 and _matches_path_prefix(candidate, path_prefixes)
                 and (
                     not use_public_article_gate

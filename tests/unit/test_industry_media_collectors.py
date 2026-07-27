@@ -78,6 +78,8 @@ def direct_media_source(
 
 def registry_document(
     collector_config: dict[str, str | int | bool],
+    *,
+    entry_url: str = "https://www.cifnews.com/",
 ) -> dict[str, object]:
     return {
         "version": 1,
@@ -85,7 +87,7 @@ def registry_document(
             {
                 "source_id": "media-cifnews-cross-border",
                 "name": "雨果跨境",
-                "entry_url": "https://www.cifnews.com/",
+                "entry_url": entry_url,
                 "platforms": ["amazon"],
                 "trust_tier": "media",
                 "collector": "html",
@@ -111,10 +113,15 @@ def registry_document(
 def load_registry(
     tmp_path: Path,
     collector_config: dict[str, str | int | bool],
+    *,
+    entry_url: str = "https://www.cifnews.com/",
 ) -> SourceRegistry:
     path = tmp_path / "sources.yaml"
     path.write_text(
-        yaml.safe_dump(registry_document(collector_config), sort_keys=False),
+        yaml.safe_dump(
+            registry_document(collector_config, entry_url=entry_url),
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     return SourceRegistry.from_yaml(path)
@@ -180,6 +187,37 @@ async def test_cifnews_fetches_only_scoped_platform_article() -> None:
         for request in http.requests
     )
     assert len(items) == 1
+
+
+@pytest.mark.asyncio
+async def test_html_collector_matches_unicode_candidate_to_punycode_allowlist() -> None:
+    source = direct_media_source(
+        source_id="media-idna-cross-border",
+        entry_url="https://xn--fa-hia.de/",
+        platforms=(Platform.AMAZON,),
+        config={
+            "link_selector": "a.idna",
+            "link_path_prefixes": "/article/",
+            "allowed_hosts": "xn--fa-hia.de",
+            "item_limit": 1,
+        },
+    )
+    detail_url = "https://faß.de/article/1"
+    http = FakeHttpPort(
+        {
+            source.entry_url: fixture_response("cifnews_home.html", source.entry_url),
+            detail_url: fixture_response("cifnews_article.html", detail_url),
+        }
+    )
+
+    items = await collect_items(HtmlCollector(http), source)
+
+    assert [request.url for request in http.requests] == [
+        source.entry_url,
+        detail_url,
+    ]
+    assert all(request.allowed_hosts == ("xn--fa-hia.de",) for request in http.requests)
+    assert [item.url for item in items] == [detail_url]
 
 
 @pytest.mark.asyncio
@@ -318,6 +356,23 @@ def test_registry_accepts_direct_html_scope_and_gate_config(tmp_path: Path) -> N
         "link_path_prefixes": "/article/,/news/",
         "public_article_gate": True,
     }
+
+
+def test_registry_matches_unicode_entry_host_to_punycode_allowlist(
+    tmp_path: Path,
+) -> None:
+    registry = load_registry(
+        tmp_path,
+        {
+            "link_selector": "a",
+            "allowed_hosts": "xn--fa-hia.de",
+        },
+        entry_url="https://faß.de/",
+    )
+
+    assert registry.require("media-cifnews-cross-border").collector_config[
+        "allowed_hosts"
+    ] == "xn--fa-hia.de"
 
 
 @pytest.mark.parametrize(

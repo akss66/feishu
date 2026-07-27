@@ -101,11 +101,11 @@ class UrlSafetyPolicy:
         if port not in {None, 443}:
             raise UrlSafetyError("port_not_allowed")
 
-        host = _normalize_host(parsed.hostname)
+        host = canonical_hostname(parsed.hostname)
         normalized_allowed_hosts = {
             normalized
             for candidate in allowed_hosts
-            if (normalized := _normalize_host(candidate, required=False)) is not None
+            if (normalized := canonical_hostname(candidate, required=False)) is not None
         }
         if host not in normalized_allowed_hosts:
             raise UrlSafetyError("host_not_allowed")
@@ -173,7 +173,7 @@ def _parse_url(url: str) -> SplitResult:
     return parsed
 
 
-def _normalize_host(host: str | None, *, required: bool = True) -> str | None:
+def canonical_hostname(host: str | None, *, required: bool = True) -> str | None:
     if host is None:
         if required:
             raise UrlSafetyError("invalid_url")
@@ -259,7 +259,7 @@ def _render_url_for_log(url: str) -> str:
     if re.fullmatch(r"[a-z][a-z0-9+.-]*", scheme) is None or parsed.hostname is None:
         return "[REDACTED_URL]"
     try:
-        host = _normalize_host(parsed.hostname)
+        host = canonical_hostname(parsed.hostname)
     except UrlSafetyError:
         return "[REDACTED_URL]"
     netloc = f"[{host}]" if _as_ip_address(host) and ":" in host else host

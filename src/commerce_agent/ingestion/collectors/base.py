@@ -16,6 +16,7 @@ from commerce_agent.ingestion.models import (
     ResponseArtifact,
     SourceDefinition,
 )
+from commerce_agent.ingestion.security import canonical_hostname
 
 DEFAULT_ITEM_LIMIT = 100
 _METADATA_HOSTS = frozenset(
@@ -110,17 +111,20 @@ class Collector(Protocol):
 def allowed_hosts(source: SourceDefinition) -> tuple[str, ...]:
     configured = source.collector_config.get("allowed_hosts")
     if isinstance(configured, str):
-        return tuple(
-            dict.fromkeys(
-                token.strip().rstrip(".").lower()
-                for token in configured.split(",")
-                if token.strip()
-            )
-        )
+        normalized_hosts: list[str] = []
+        for token in configured.split(","):
+            if not token.strip():
+                continue
+            normalized = canonical_hostname(token.strip(), required=False)
+            if normalized is None:
+                raise CollectorError("invalid_config")
+            normalized_hosts.append(normalized)
+        return tuple(dict.fromkeys(normalized_hosts))
     host = urlsplit(source.entry_url).hostname
-    if host is None:
+    normalized = canonical_hostname(host, required=False)
+    if normalized is None:
         raise CollectorError("invalid_config")
-    return (host.rstrip(".").lower(),)
+    return (normalized,)
 
 
 def item_limit(source: SourceDefinition) -> int:
