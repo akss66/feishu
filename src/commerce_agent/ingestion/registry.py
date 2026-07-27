@@ -39,6 +39,10 @@ _EnumT = TypeVar(
 )
 _SOURCE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PUBLISHER_KEY = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
+_DNS_HOSTNAME = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
 _ROOT_FIELDS = frozenset({"version", "sources"})
 _SOURCE_FIELDS = frozenset(
     {
@@ -75,7 +79,16 @@ _REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {
 _CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
     CollectorKind.RSS: frozenset({"item_limit"}),
     CollectorKind.SITEMAP: frozenset({"item_limit"}),
-    CollectorKind.HTML: frozenset({"link_selector", "article_selector", "item_limit"}),
+    CollectorKind.HTML: frozenset(
+        {
+            "link_selector",
+            "article_selector",
+            "item_limit",
+            "allowed_hosts",
+            "link_path_prefixes",
+            "public_article_gate",
+        }
+    ),
     CollectorKind.API: frozenset(
         {
             "items_path",
@@ -98,6 +111,8 @@ _REQUIRED_CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
 _METADATA_HOSTS = frozenset(
     {
         "instance-data.ec2.internal",
+        "metadata.aws.internal",
+        "metadata.azure.internal",
         "metadata.google.internal",
         "metadata.goog",
     }
@@ -215,8 +230,12 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
             f"{context}: enabled sources must have compliance status 'allowed'"
         )
 
+    entry_url = _require_url(source["entry_url"], "entry_url", context)
     collector_config = _parse_collector_config(
-        source.get("collector_config", {}), collector, context
+        source.get("collector_config", {}),
+        collector,
+        entry_url,
+        context,
     )
     content_scope = _parse_optional_enum(
         ContentScope,
@@ -255,7 +274,7 @@ def _parse_source(raw_source: object, index: int) -> SourceDefinition:
     return SourceDefinition(
         source_id=raw_id,
         name=_require_nonempty_string(source["name"], "name", context),
-        entry_url=_require_url(source["entry_url"], "entry_url", context),
+        entry_url=entry_url,
         platforms=_parse_platforms(source["platforms"], context),
         trust_tier=trust_tier,
         collector=collector,
@@ -470,7 +489,10 @@ def _parse_date(value: object, field: str, context: str) -> date:
 
 
 def _parse_collector_config(
-    value: object, collector: CollectorKind, context: str
+    value: object,
+    collector: CollectorKind,
+    entry_url: str,
+    context: str,
 ) -> Mapping[str, Scalar]:
     config = _require_mapping(value, f"{context}: collector_config")
     _reject_unknown_keys(config, _CONFIG_FIELDS[collector], f"{context}: collector_config")
@@ -483,10 +505,77 @@ def _parse_collector_config(
     for key, item in config.items():
         if key == "item_limit":
             parsed[key] = _require_positive_int(item, key, context)
+        elif key == "public_article_gate":
+            parsed[key] = _require_bool(item, key, context)
         elif not isinstance(item, str) or not item.strip():
             raise SourceRegistryError(
                 f"{context}: collector_config field '{key}' must be a non-empty string"
             )
         else:
             parsed[key] = item.strip()
+    if collector is CollectorKind.HTML:
+        _validate_html_scope_config(parsed, entry_url=entry_url, context=context)
     return parsed
+
+
+def _validate_html_scope_config(
+    config: Mapping[str, Scalar],
+    *,
+    entry_url: str,
+    context: str,
+) -> None:
+    configured_hosts = config.get("allowed_hosts")
+    if isinstance(configured_hosts, str):
+        hosts = _comma_separated_tokens(configured_hosts)
+        entry_host = urlsplit(entry_url).hostname
+        if (
+            hosts is None
+            or entry_host is None
+            or entry_host.rstrip(".").lower() not in hosts
+            or any(not _is_safe_normalized_hostname(host) for host in hosts)
+        ):
+            raise SourceRegistryError(
+                f"{context}: collector_config field 'allowed_hosts' must contain "
+                "safe normalized hostnames and include the entry host"
+            )
+
+    configured_prefixes = config.get("link_path_prefixes")
+    if isinstance(configured_prefixes, str):
+        prefixes = _comma_separated_tokens(configured_prefixes)
+        if prefixes is None or any(not _is_safe_path_prefix(prefix) for prefix in prefixes):
+            raise SourceRegistryError(
+                f"{context}: collector_config field 'link_path_prefixes' must contain "
+                "non-root absolute paths without query or fragment"
+            )
+
+
+def _comma_separated_tokens(value: str) -> tuple[str, ...] | None:
+    raw_tokens = value.split(",")
+    if any(not token.strip() for token in raw_tokens):
+        return None
+    return tuple(token.strip() for token in raw_tokens)
+
+
+def _is_safe_normalized_hostname(host: str) -> bool:
+    return (
+        host == host.lower()
+        and not host.endswith(".")
+        and len(host) <= 253
+        and _DNS_HOSTNAME.fullmatch(host) is not None
+        and not _is_forbidden_static_host(host)
+    )
+
+
+def _is_safe_path_prefix(prefix: str) -> bool:
+    parsed = urlsplit(prefix)
+    return (
+        prefix.startswith("/")
+        and prefix != "/"
+        and "//" != prefix[:2]
+        and "?" not in prefix
+        and "#" not in prefix
+        and "\\" not in prefix
+        and not any(character.isspace() for character in prefix)
+        and not parsed.scheme
+        and not parsed.netloc
+    )

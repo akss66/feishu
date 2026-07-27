@@ -108,6 +108,15 @@ class Collector(Protocol):
 
 
 def allowed_hosts(source: SourceDefinition) -> tuple[str, ...]:
+    configured = source.collector_config.get("allowed_hosts")
+    if isinstance(configured, str):
+        return tuple(
+            dict.fromkeys(
+                token.strip().rstrip(".").lower()
+                for token in configured.split(",")
+                if token.strip()
+            )
+        )
     host = urlsplit(source.entry_url).hostname
     if host is None:
         raise CollectorError("invalid_config")
