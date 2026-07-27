@@ -40,9 +40,15 @@ class ApiCollector:
         http_port: HttpPort,
         *,
         publisher_lookup: PublisherLookup = publisher_profile,
+        fetch_gdelt_originals: bool = False,
+        gdelt_original_fetch_limit: int = 5,
     ) -> None:
+        if gdelt_original_fetch_limit < 1:
+            raise ValueError("gdelt_original_fetch_limit must be positive")
         self._http = http_port
         self._publisher_lookup = publisher_lookup
+        self._fetch_gdelt_originals = fetch_gdelt_originals
+        self._gdelt_original_fetch_limit = gdelt_original_fetch_limit
 
     async def collect(
         self,

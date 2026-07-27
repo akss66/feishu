@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
     ingestion_scheduler_enabled: bool = False
+    gdelt_original_fetch_enabled: bool = False
+    gdelt_original_fetch_max_per_source: int = Field(default=5, ge=1, le=25)
+    gdelt_media_body_retention_days: Literal[7] = 7
     intelligence_analysis_enabled: bool = False
     intelligence_daily_report_enabled: bool = False
     intelligence_alerts_enabled: bool = False

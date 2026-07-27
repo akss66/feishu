@@ -136,10 +136,13 @@ class IngestionService:
         snapshot_store: SnapshotStore,
         repository: IngestionRepository,
         max_concurrency: int = 4,
+        gdelt_media_body_retention_days: int = 7,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be positive")
+        if gdelt_media_body_retention_days != 7:
+            raise ValueError("gdelt media body retention must be 7 days")
         self._registry = registry
         self._compliance = compliance
         self._collectors = dict(collectors)
@@ -147,6 +150,7 @@ class IngestionService:
         self._snapshot_store = snapshot_store
         self._repository = repository
         self._max_concurrency = max_concurrency
+        self._gdelt_media_body_retention_days = gdelt_media_body_retention_days
         self._clock = clock
         self._sync_lock = asyncio.Lock()
         self._sources_synced = False

@@ -365,7 +365,11 @@ async def _build_ingestion(
             CollectorKind.RSS: FeedCollector(http_client),
             CollectorKind.SITEMAP: SitemapCollector(http_client),
             CollectorKind.HTML: HtmlCollector(http_client),
-            CollectorKind.API: ApiCollector(http_client),
+            CollectorKind.API: ApiCollector(
+                http_client,
+                fetch_gdelt_originals=settings.gdelt_original_fetch_enabled,
+                gdelt_original_fetch_limit=settings.gdelt_original_fetch_max_per_source,
+            ),
             CollectorKind.BROWSER: BrowserCollector(
                 enabled=False,
                 browser_port=None,
@@ -380,6 +384,7 @@ async def _build_ingestion(
             snapshot_store=SnapshotStore(settings.snapshot_dir),
             repository=repository,
             max_concurrency=settings.ingestion_global_concurrency,
+            gdelt_media_body_retention_days=settings.gdelt_media_body_retention_days,
         )
         await service.initialize()
         scheduler = IngestionScheduler(

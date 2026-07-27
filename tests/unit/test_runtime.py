@@ -459,6 +459,11 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
         def __init__(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
+    class ApiCollector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            captured["api_collector_kwargs"] = kwargs
+
     class Extractor:
         def __init__(self, detector: object) -> None:
             del detector
@@ -488,18 +493,16 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
         ingestion_max_response_bytes=4096,
         ingestion_user_agent="test-agent",
         ingestion_interval_minutes=120,
+        gdelt_original_fetch_enabled=False,
+        gdelt_original_fetch_max_per_source=5,
+        gdelt_media_body_retention_days=7,
         snapshot_dir=".",
     )
     monkeypatch.setattr(bootstrap, "build_resolver_bundle", build_bundle)
     monkeypatch.setattr(ingestion_cli, "build_registry", lambda: SimpleNamespace())
     monkeypatch.setattr(http, "IngestionHttpClient", HttpClient)
-    collector_names = (
-        "ApiCollector",
-        "BrowserCollector",
-        "FeedCollector",
-        "HtmlCollector",
-        "SitemapCollector",
-    )
+    monkeypatch.setattr(collectors, "ApiCollector", ApiCollector)
+    collector_names = ("BrowserCollector", "FeedCollector", "HtmlCollector", "SitemapCollector")
     for name in collector_names:
         monkeypatch.setattr(collectors, name, Collector)
     monkeypatch.setattr(extract, "ContentExtractor", Extractor)
@@ -525,5 +528,10 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
     assert isinstance(built_scheduler, IngestionScheduler)
     assert captured["mode"] == "cloudflare_doh"
     assert captured["http_kwargs"]["safety_policy"] is policy  # type: ignore[index]
+    assert captured["api_collector_kwargs"] == {  # type: ignore[comparison-overlap]
+        "fetch_gdelt_originals": False,
+        "gdelt_original_fetch_limit": 5,
+    }
+    assert captured["service_kwargs"]["gdelt_media_body_retention_days"] == 7  # type: ignore[index]
     assert owned_resources[0].name == "http"  # type: ignore[attr-defined]
     assert owned_resources[1] is resolver

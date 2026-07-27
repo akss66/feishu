@@ -28,6 +28,9 @@ def test_settings_apply_safe_ingestion_defaults(monkeypatch: pytest.MonkeyPatch)
     assert settings.snapshot_dir == Path("data/snapshots")
     assert settings.ingestion_user_agent.strip()
     assert settings.ingestion_scheduler_enabled is False
+    assert settings.gdelt_original_fetch_enabled is False
+    assert settings.gdelt_original_fetch_max_per_source == 5
+    assert settings.gdelt_media_body_retention_days == 7
 
 
 def test_settings_accept_cloudflare_doh_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,6 +119,8 @@ def test_legacy_evidence_threshold_only_accepts_75(
         ("INGESTION_HTTP_TIMEOUT_SECONDS", "0"),
         ("INGESTION_MAX_RESPONSE_BYTES", "0"),
         ("INGESTION_USER_AGENT", "   "),
+        ("GDELT_ORIGINAL_FETCH_MAX_PER_SOURCE", "0"),
+        ("GDELT_ORIGINAL_FETCH_MAX_PER_SOURCE", "26"),
     ],
 )
 def test_settings_reject_invalid_ingestion_limits(
