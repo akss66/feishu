@@ -19,6 +19,10 @@ _ACCESS_WALL_MARKERS = (
     "checking your browser",
     "challenge-platform",
 )
+_RIGHTS_RESTRICTION_MARKERS = (
+    "third-party copyright",
+    "all rights reserved",
+)
 _PLATFORM_ALIASES: dict[Platform, tuple[str, ...]] = {
     Platform.AMAZON: ("amazon",),
     Platform.TEMU: ("temu",),
@@ -56,6 +60,8 @@ def validate_public_article(
     folded = visible_text.casefold()
     if any(marker in folded for marker in _ACCESS_WALL_MARKERS):
         raise ArticleGateError("article_access_wall")
+    if any(marker in folded for marker in _RIGHTS_RESTRICTION_MARKERS):
+        raise ArticleGateError("article_rights_restricted")
     if len(visible_text) < _MIN_VISIBLE_CHARACTERS:
         raise ArticleGateError("article_body_incomplete")
     if not any(

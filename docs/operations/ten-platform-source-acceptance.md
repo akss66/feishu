@@ -279,6 +279,47 @@
 - Live smoke date and result: not run
 - Final status: pending_review / enabled=false
 
+## GDELT 可抓取原文发布者
+
+以下发布者具有明确的公开再利用依据，并且只允许访问列出的精确主机。它们不是十个平台
+自身的官方公告来源；在日报中应归为“监管机构/公共机构信息”。
+
+### ftc.gov
+
+- Publisher: United States Federal Trade Commission
+- Allowed hosts: `ftc.gov`
+- Terms evidence: https://www.ftc.gov/policy-notices/website-policy states that most FTC
+  material is United States Government work in the public domain and requests attribution.
+- Robots evidence: https://www.ftc.gov/robots.txt permits public news paths and declares a
+  five-second crawl delay; disallowed paths remain inaccessible.
+- Review date: 2026-07-27
+- Final status: `allowed_public`; original fetch still requires the runtime switch and article
+  quality gate.
+
+### gov.uk
+
+- Publisher: UK Government
+- Allowed hosts: `gov.uk`
+- Terms evidence: https://www.gov.uk/help/terms-conditions states that most GOV.UK content is
+  published under the Open Government Licence and may be reproduced under its conditions.
+- Robots evidence: https://www.gov.uk/robots.txt permits ordinary public pages while excluding
+  search, print, and explicitly blocked crawler paths.
+- Review date: 2026-07-27
+- Final status: `allowed_public`; attribution and licence conditions remain mandatory.
+
+### european-union.europa.eu
+
+- Publisher: European Union
+- Allowed hosts: `european-union.europa.eu`
+- Terms evidence: https://european-union.europa.eu/legal-notice states that EU-owned site
+  content is CC BY 4.0 unless otherwise indicated; attribution and change disclosure are
+  required, while third-party content is excluded.
+- Robots evidence: https://european-union.europa.eu/robots.txt permits ordinary public content
+  and excludes administrative, account, search, and other listed paths.
+- Review date: 2026-07-27
+- Final status: `allowed_public`; pages carrying a different copyright notice must be rejected
+  or downgraded to metadata.
+
 ## 当前严格覆盖矩阵
 
 “达标”按每个平台至少 2 个独立、可归属、允许使用的有效发布者计算；同一发布者的多语言

@@ -50,6 +50,13 @@ def test_public_article_accepts_complete_platform_relevant_html() -> None:
             article_html("A long report about an unrelated local sporting event."),
             "article_platform_irrelevant",
         ),
+        (
+            "text/html",
+            article_html(
+                "Amazon policy report. This page contains third-party copyright material."
+            ),
+            "article_rights_restricted",
+        ),
     ],
 )
 def test_public_article_rejects_unusable_pages(

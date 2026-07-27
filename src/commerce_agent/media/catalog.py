@@ -34,6 +34,7 @@ _SPECIALIST = MediaCategory.SPECIALIST
 _CHINESE = MediaCategory.CHINESE_INDUSTRY
 _AUTHORIZATION = ArticleAccess.AUTHORIZATION_REQUIRED
 _METADATA_ONLY = ArticleAccess.METADATA_ONLY
+_ALLOWED_PUBLIC = ArticleAccess.ALLOWED_PUBLIC
 
 _PUBLISHERS = (
     PublisherProfile("reuters.com", "Reuters", _AUTHORITY, _AUTHORIZATION, ("reuters.com",)),
@@ -97,6 +98,27 @@ _PUBLISHERS = (
     PublisherProfile("ebrun.com", "亿邦动力", _CHINESE, _METADATA_ONLY, ("ebrun.com",)),
     PublisherProfile("baijing.cn", "白鲸出海", _CHINESE, _METADATA_ONLY, ("baijing.cn",)),
     PublisherProfile("36kr.com", "36氪", _CHINESE, _METADATA_ONLY, ("36kr.com",)),
+    PublisherProfile(
+        "ftc.gov",
+        "Federal Trade Commission",
+        _AUTHORITY,
+        _ALLOWED_PUBLIC,
+        ("ftc.gov",),
+    ),
+    PublisherProfile(
+        "gov.uk",
+        "UK Government",
+        _AUTHORITY,
+        _ALLOWED_PUBLIC,
+        ("gov.uk",),
+    ),
+    PublisherProfile(
+        "european-union.europa.eu",
+        "European Union",
+        _AUTHORITY,
+        _ALLOWED_PUBLIC,
+        ("european-union.europa.eu",),
+    ),
 )
 _BY_KEY = {profile.publisher_key: profile for profile in _PUBLISHERS}
 
