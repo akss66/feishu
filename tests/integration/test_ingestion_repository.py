@@ -30,6 +30,7 @@ from commerce_agent.persistence.models import (
     DocumentVersion,
     FetchRun,
     GroupBinding,
+    OfficialNoticeAudit,
     Source,
     SourceHealth,
     SourceMaterialPolicy,
@@ -706,5 +707,36 @@ async def test_concurrent_duplicate_version_inserts_converge_without_integrity_e
         assert sum(outcome.created_version for outcome in outcomes) == 1
         assert document_count == 1
         assert version_count == 1
+    finally:
+        await database.dispose()
+
+
+async def test_official_notice_audit_stores_hashes_without_raw_identity_or_url(
+    tmp_path,
+) -> None:
+    database, repository = await _repository(tmp_path)
+    received_at = datetime(2026, 7, 27, 1, tzinfo=UTC)
+    try:
+        await repository.record_official_notice_audit(
+            audit_id="audit123",
+            transport="feishu",
+            source_account="amazon-global-selling-cn",
+            platform="amazon",
+            submitted_by_hash="a" * 64,
+            original_url_hash="b" * 64,
+            status="accepted",
+            error_code=None,
+            received_at=received_at,
+        )
+
+        async with database.session() as session:
+            audit = await session.get(OfficialNoticeAudit, "audit123")
+
+        assert audit is not None
+        assert audit.submitted_by_hash == "a" * 64
+        assert audit.original_url_hash == "b" * 64
+        assert audit.received_at == received_at
+        assert not hasattr(audit, "submitted_by")
+        assert not hasattr(audit, "original_url")
     finally:
         await database.dispose()

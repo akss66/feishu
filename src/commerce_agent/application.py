@@ -37,6 +37,14 @@ class QaService(Protocol):
     async def queue_answer(self, message: InboundMessage) -> int: ...
 
 
+class ManualSubmissionResultPort(Protocol):
+    audit_id: str
+
+
+class ManualSubmissionPort(Protocol):
+    async def submit(self, message: InboundMessage) -> ManualSubmissionResultPort: ...
+
+
 _PROFILE_LABELS = {
     RiskProfile.CONSERVATIVE: "保守",
     RiskProfile.DEFAULT: "默认",
@@ -64,6 +72,7 @@ class BotService:
         default_risk_profile: RiskProfile = RiskProfile.DEFAULT,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         qa: QaService | None = None,
+        manual_submissions: ManualSubmissionPort | None = None,
     ) -> None:
         self._bindings = bindings
         self._llm = llm
@@ -72,6 +81,7 @@ class BotService:
         self._default_risk_profile = default_risk_profile
         self._clock = clock
         self._qa = qa
+        self._manual_submissions = manual_submissions
 
     @property
     def qa_enabled(self) -> bool:
@@ -89,6 +99,20 @@ class BotService:
 
     async def handle(self, message: InboundMessage) -> str:
         command = parse_command(message.text)
+        if command.kind is CommandKind.SUBMIT_INTELLIGENCE:
+            if not await self._bindings.is_active(message.chat_id):
+                return "❌ 仅当前已绑定群可以提交官方材料。"
+            if self._manual_submissions is None:
+                return "❌ 官方材料提交功能尚未启用。"
+            try:
+                result = await self._manual_submissions.submit(message)
+            except ValueError:
+                return "❌ 材料校验失败，请检查平台、官方账号、原文链接和正文内容。"
+            audit_id = result.audit_id
+            return (
+                "✅ 已接收官方材料，等待正文校验和 AI 分析。"
+                f"材料编号：{audit_id}"
+            )
         if command.kind is CommandKind.HELP:
             help_text = "可用命令：\n- 帮助\n- 状态\n- 绑定本群 <绑定码>\n- AI测试 <问题>"
             if self._risk_profiles is not None:

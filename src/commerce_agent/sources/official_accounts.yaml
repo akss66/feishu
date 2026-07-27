@@ -1,0 +1,9 @@
+version: 1
+accounts:
+  - account_id: amazon-global-selling-cn
+    source_id: official-notice-amazon-global-selling-cn
+    display_name: 亚马逊全球开店
+    platforms: [amazon]
+    publisher_key: amazon.com
+    allowed_hosts: [mp.weixin.qq.com]
+    transports: [feishu, email]

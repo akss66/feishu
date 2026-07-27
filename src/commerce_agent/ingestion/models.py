@@ -33,6 +33,7 @@ class CollectorKind(StrEnum):
     HTML = "html"
     API = "api"
     BROWSER = "browser"
+    MANUAL_NOTICE = "manual_notice"
 
 
 class TrustTier(StrEnum):

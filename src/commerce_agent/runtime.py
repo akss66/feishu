@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -76,6 +77,7 @@ async def _run_configured(settings: Settings) -> None:
             )
 
         bindings = SqlAlchemyGroupBindingStore(resources.database.session)
+        manual_submissions = _build_manual_submissions(resources.database)
         resources.openai_client = AsyncOpenAI(
             api_key=settings.deepseek_api_key.get_secret_value(),
             base_url=str(settings.deepseek_base_url).rstrip("/"),
@@ -113,6 +115,7 @@ async def _run_configured(settings: Settings) -> None:
                 risk_profiles=intelligence.preferences,
                 default_risk_profile=intelligence.default_profile,
                 qa=intelligence.qa,
+                manual_submissions=manual_submissions,
             )
             resources.adapter = FeishuAdapter(
                 resources.channel,
@@ -121,13 +124,33 @@ async def _run_configured(settings: Settings) -> None:
                 qa_concurrency=settings.intelligence_ai_concurrency,
             )
         else:
-            service = BotService(bindings, llm, settings.bot_bind_code.get_secret_value())
+            service = BotService(
+                bindings,
+                llm,
+                settings.bot_bind_code.get_secret_value(),
+                manual_submissions=manual_submissions,
+            )
             resources.adapter = FeishuAdapter(resources.channel, service)
     except BaseException:
         await _close_resources(resources, scheduler_enabled=scheduler_enabled)
         raise
 
     await _serve(resources, scheduler_enabled=scheduler_enabled)
+
+
+def _build_manual_submissions(database: Any) -> Any:
+    from commerce_agent.ingestion.manual_submissions import ManualSubmissionService
+    from commerce_agent.ingestion.official_notices import OfficialAccountRegistry
+    from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
+
+    accounts_path = (
+        Path(__file__).parent / "sources" / "official_accounts.yaml"
+    )
+    accounts = OfficialAccountRegistry.from_yaml(accounts_path)
+    return ManualSubmissionService(
+        accounts,
+        SqlAlchemyIngestionRepository(database.session),
+    )
 
 
 def _build_intelligence(

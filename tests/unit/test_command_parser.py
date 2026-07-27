@@ -26,3 +26,12 @@ def test_parse_command(text: str, kind: CommandKind, argument: str) -> None:
 
     assert command.kind is kind
     assert command.argument == argument
+
+
+def test_parse_manual_submission_preserves_multiline_body() -> None:
+    text = "提交情报\n平台: amazon\n正文:\n完整正文"
+
+    command = parse_command(text)
+
+    assert command.kind is CommandKind.SUBMIT_INTELLIGENCE
+    assert command.argument == text

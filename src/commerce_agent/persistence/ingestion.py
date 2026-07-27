@@ -22,6 +22,7 @@ from commerce_agent.persistence.models import (
     DocumentProvenance,
     DocumentVersion,
     FetchRun,
+    OfficialNoticeAudit,
     Source,
     SourceHealth,
     SourceLease,
@@ -128,6 +129,34 @@ class SqlAlchemyIngestionRepository:
                 )
             )
         return status == "suspended"
+
+    async def record_official_notice_audit(
+        self,
+        *,
+        audit_id: str,
+        transport: str,
+        source_account: str,
+        platform: str,
+        submitted_by_hash: str,
+        original_url_hash: str,
+        status: str,
+        error_code: str | None,
+        received_at: datetime,
+    ) -> None:
+        async with self._session_factory.begin() as session:
+            session.add(
+                OfficialNoticeAudit(
+                    audit_id=audit_id,
+                    transport=transport,
+                    source_account=source_account,
+                    platform=platform,
+                    submitted_by_hash=submitted_by_hash,
+                    original_url_hash=original_url_hash,
+                    status=status,
+                    error_code=error_code,
+                    received_at=received_at,
+                )
+            )
 
     async def sync_sources(self, sources: Sequence[SourceDefinition]) -> None:
         now = datetime.now(UTC)

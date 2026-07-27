@@ -180,6 +180,52 @@ async def test_qa_exposes_queue_without_changing_unknown_synchronous_reply() -> 
     )
 
 
+async def test_bound_group_can_submit_official_intelligence() -> None:
+    class Submissions:
+        async def submit(self, inbound: InboundMessage):
+            assert inbound.sender_id == "user-123"
+            return type("Result", (), {"audit_id": "audit123"})()
+
+    bindings = FakeBindingStore()
+    bindings.active_chat_id = "chat-one"
+    service = BotService(
+        bindings,
+        FakeLLM(),
+        bind_code="correct-code",
+        manual_submissions=Submissions(),
+    )
+    inbound = InboundMessage(
+        chat_id="chat-one",
+        message_id="msg-one",
+        text="提交情报\n平台: amazon",
+        sender_id="user-123",
+    )
+
+    reply = await service.handle(inbound)
+
+    assert reply == (
+        "✅ 已接收官方材料，等待正文校验和 AI 分析。"
+        "材料编号：audit123"
+    )
+
+
+async def test_unbound_group_cannot_submit_official_intelligence() -> None:
+    class Submissions:
+        async def submit(self, inbound: InboundMessage):
+            raise AssertionError(inbound)
+
+    service = BotService(
+        FakeBindingStore(),
+        FakeLLM(),
+        bind_code="correct-code",
+        manual_submissions=Submissions(),
+    )
+
+    reply = await service.handle(message("提交情报\n平台: amazon"))
+
+    assert reply == "❌ 仅当前已绑定群可以提交官方材料。"
+
+
 async def test_qa_rejects_direct_queue_from_unbound_group_before_model_work() -> None:
     class Qa:
         async def queue_answer(self, inbound: InboundMessage) -> int:

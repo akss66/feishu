@@ -89,6 +89,30 @@ async def test_message_event_prefers_sdk_body_text_over_mentioned_content() -> N
     assert service.message.text == "\u5e2e\u52a9"
 
 
+async def test_message_event_passes_sender_identity_for_submission_audit() -> None:
+    class RecordingService:
+        def __init__(self) -> None:
+            self.message = None
+
+        async def handle(self, message) -> str:
+            self.message = message
+            return "accepted"
+
+    channel = FakeChannel()
+    service = RecordingService()
+    FeishuAdapter(channel, service)
+    event = SimpleNamespace(
+        chat_id="chat-one",
+        message_id="msg-one",
+        body_text="提交情报\n平台: amazon",
+        sender_id="user-123",
+    )
+
+    await channel.handlers["message"](event)
+
+    assert service.message.sender_id == "user-123"
+
+
 async def test_mention_only_message_shows_help_without_starting_qa() -> None:
     class RecordingService:
         qa_enabled = True

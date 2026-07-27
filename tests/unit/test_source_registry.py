@@ -189,7 +189,14 @@ def test_enum_values_are_stable() -> None:
         "joybuy",
         "tiktok_shop",
     ]
-    assert {item.value for item in CollectorKind} == {"rss", "sitemap", "html", "api", "browser"}
+    assert {item.value for item in CollectorKind} == {
+        "rss",
+        "sitemap",
+        "html",
+        "api",
+        "browser",
+        "manual_notice",
+    }
     assert {item.value for item in TrustTier} == {"official", "media"}
     assert {item.value for item in SourceAdapter} == {"generic", "gdelt"}
     assert {item.value for item in ContentScope} == {

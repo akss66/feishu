@@ -8,6 +8,7 @@ class InboundMessage:
     message_id: str
     text: str
     thread_id: str | None = None
+    sender_id: str | None = None
 
 
 class CommandKind(StrEnum):
@@ -16,6 +17,7 @@ class CommandKind(StrEnum):
     BIND = "bind"
     AI_TEST = "ai_test"
     RISK_PROFILE = "risk_profile"
+    SUBMIT_INTELLIGENCE = "submit_intelligence"
     UNKNOWN = "unknown"
 
 

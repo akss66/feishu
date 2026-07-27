@@ -2,6 +2,9 @@ from commerce_agent.domain import Command, CommandKind
 
 
 def parse_command(text: str) -> Command:
+    submission = text.replace("\r\n", "\n").strip()
+    if submission.split("\n", 1)[0].strip() == "提交情报":
+        return Command(CommandKind.SUBMIT_INTELLIGENCE, submission)
     normalized = " ".join(text.strip().split())
     if not normalized or normalized == "帮助":
         return Command(CommandKind.HELP)

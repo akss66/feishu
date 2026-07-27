@@ -108,6 +108,20 @@ class SourceMaterialPolicy(Base):
     content_scope: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class OfficialNoticeAudit(Base):
+    __tablename__ = "official_notice_audits"
+
+    audit_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    transport: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_account: Mapped[str] = mapped_column(String(128), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    submitted_by_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_url_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class SourceLease(Base):
     __tablename__ = "source_leases"
 

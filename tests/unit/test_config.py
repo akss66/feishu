@@ -197,7 +197,14 @@ async def test_runtime_composes_audited_websocket_and_releases_resources(
             events.append(("llm", client, model))
 
     class FakeService:
-        def __init__(self, bindings: object, llm: object, bind_code: str) -> None:
+        def __init__(
+            self,
+            bindings: object,
+            llm: object,
+            bind_code: str,
+            **kwargs: object,
+        ) -> None:
+            assert kwargs["manual_submissions"] is not None
             events.append(("service", bindings, llm, bind_code))
 
     class FakeChannel:
@@ -309,7 +316,11 @@ async def test_runtime_releases_created_resources_when_adapter_initialization_fa
     monkeypatch.setattr(runtime, "AsyncOpenAI", FakeOpenAI)
     monkeypatch.setattr(runtime, "SqlAlchemyGroupBindingStore", lambda session: object())
     monkeypatch.setattr(runtime, "DeepSeekGateway", lambda client, model: object())
-    monkeypatch.setattr(runtime, "BotService", lambda bindings, llm, bind_code: object())
+    monkeypatch.setattr(
+        runtime,
+        "BotService",
+        lambda bindings, llm, bind_code, **kwargs: object(),
+    )
     monkeypatch.setattr(runtime, "FeishuChannel", FakeChannel)
     monkeypatch.setattr(runtime, "FeishuAdapter", FailingAdapter)
 

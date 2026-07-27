@@ -48,6 +48,7 @@ class FeishuAdapter:
             message_id=event.message_id,
             text=text,
             thread_id=getattr(getattr(event, "conversation", None), "thread_id", None),
+            sender_id=getattr(event, "sender_id", None),
         )
         command = parse_command(text)
         if command.kind is CommandKind.AI_TEST and command.argument:
