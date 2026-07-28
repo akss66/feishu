@@ -71,11 +71,10 @@ async def _run_configured(settings: Settings) -> None:
     try:
         resources.database = Database(settings.database_url)
         await resources.database.create_schema()
-        if scheduler_enabled:
-            resources.scheduler, resources.ingestion_resources = await _build_ingestion(
-                settings,
-                resources.database,
-            )
+        resources.scheduler, resources.ingestion_resources = await _build_ingestion(
+            settings,
+            resources.database,
+        )
 
         bindings = SqlAlchemyGroupBindingStore(resources.database.session)
         manual_submissions = _build_manual_submissions(resources.database)
@@ -113,7 +112,9 @@ async def _run_configured(settings: Settings) -> None:
                 resources.channel,
                 bindings,
                 ingestion=(
-                    resources.scheduler.service if resources.scheduler is not None else None
+                    resources.scheduler.service
+                    if scheduler_enabled and resources.scheduler is not None
+                    else None
                 ),
             )
             resources.intelligence_scheduler = intelligence.scheduler
@@ -386,6 +387,9 @@ async def _build_ingestion(
         scheduler = IngestionScheduler(
             service,
             interval_minutes=settings.ingestion_interval_minutes,
+            collection_enabled=bool(
+                getattr(settings, "ingestion_scheduler_enabled", True)
+            ),
             timezone="UTC",
         )
         return scheduler, (http_client, *resolver_bundle.resources)
@@ -407,7 +411,7 @@ async def _serve(resources: RuntimeResources, *, scheduler_enabled: bool) -> Non
             resources.intelligence_scheduler.start()
         if resources.email_notice_scheduler is not None:
             resources.email_notice_scheduler.start()
-        if scheduler_enabled and resources.scheduler is not None:
+        if resources.scheduler is not None:
             resources.scheduler.start()
         if resources.adapter is not None:
             await resources.adapter.connect()
@@ -434,7 +438,7 @@ async def _close_resources(
         await close(resources.intelligence_scheduler.aclose)
     if resources.email_notice_scheduler is not None:
         await close(resources.email_notice_scheduler.aclose)
-    if scheduler_enabled and resources.scheduler is not None:
+    if resources.scheduler is not None:
         await close(resources.scheduler.aclose)
     if resources.adapter is not None:
         await close(resources.adapter.close)

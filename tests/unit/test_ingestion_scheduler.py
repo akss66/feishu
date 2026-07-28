@@ -101,6 +101,24 @@ async def test_registered_retention_job_runs_without_source_ingestion() -> None:
     assert service.triggers == []
 
 
+async def test_collection_disabled_still_registers_dedicated_retention_only() -> None:
+    backend = FakeAsyncIOScheduler(timezone="UTC")
+    service = RecordingService()
+    scheduler = IngestionScheduler(
+        service,
+        collection_enabled=False,
+        scheduler=backend,
+    )
+
+    scheduler.start()
+
+    assert list(backend.jobs) == [RETENTION_JOB_ID]
+    callback, _ = backend.jobs[RETENTION_JOB_ID]
+    await callback()
+    assert service.retention_runs == 1
+    assert service.triggers == []
+
+
 async def test_ingestion_exception_is_contained_for_future_schedules() -> None:
     class FailingService:
         async def run_all(self, trigger: Trigger) -> tuple[object, ...]:

@@ -124,9 +124,16 @@ class IngestionRepository(Protocol):
         self,
         *,
         before: datetime,
+        clear_snapshot_paths: bool = True,
     ) -> int: ...
 
     async def list_temporary_media_source_ids(self) -> tuple[str, ...]: ...
+
+    async def list_expired_media_snapshot_paths(
+        self,
+        *,
+        before: datetime,
+    ) -> tuple[str, ...]: ...
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None: ...
 
@@ -470,8 +477,9 @@ class SqlAlchemyIngestionRepository:
         self,
         *,
         before: datetime,
+        clear_snapshot_paths: bool = True,
     ) -> int:
-        candidate_ids = (
+        expired_ids = (
             select(DocumentVersion.id)
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
@@ -483,9 +491,9 @@ class SqlAlchemyIngestionRepository:
                 Source.trust_tier == "media",
                 DocumentProvenance.content_scope == "full_text",
                 DocumentVersion.fetched_at < before,
-                DocumentVersion.body != EXPIRED_MEDIA_BODY,
             )
         )
+        candidate_ids = expired_ids.where(DocumentVersion.body != EXPIRED_MEDIA_BODY)
         now = datetime.now(UTC)
         async with self._session_factory.begin() as session:
             await session.execute(
@@ -506,9 +514,43 @@ class SqlAlchemyIngestionRepository:
             result = await session.execute(
                 update(DocumentVersion)
                 .where(DocumentVersion.id.in_(candidate_ids))
-                .values(body=EXPIRED_MEDIA_BODY, snapshot_path=None)
+                .values(body=EXPIRED_MEDIA_BODY)
             )
+            if clear_snapshot_paths:
+                await session.execute(
+                    update(DocumentVersion)
+                    .where(
+                        DocumentVersion.id.in_(expired_ids),
+                        DocumentVersion.snapshot_path.is_not(None),
+                    )
+                    .values(snapshot_path=None)
+                )
             return result.rowcount
+
+    async def list_expired_media_snapshot_paths(
+        self,
+        *,
+        before: datetime,
+    ) -> tuple[str, ...]:
+        statement = (
+            select(DocumentVersion.snapshot_path)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .join(
+                DocumentProvenance,
+                DocumentProvenance.document_version_id == DocumentVersion.id,
+            )
+            .where(
+                Source.trust_tier == "media",
+                DocumentProvenance.content_scope == "full_text",
+                DocumentVersion.fetched_at < before,
+                DocumentVersion.snapshot_path.is_not(None),
+            )
+            .distinct()
+            .order_by(DocumentVersion.snapshot_path)
+        )
+        async with self._session_factory() as session:
+            return tuple((await session.scalars(statement)).all())
 
     async def list_temporary_media_source_ids(self) -> tuple[str, ...]:
         statement = (

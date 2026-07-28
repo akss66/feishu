@@ -362,6 +362,13 @@ async def test_runtime_passes_configured_concurrency_to_qa_adapter(
             del channel, service, delivery
             captured["qa_concurrency"] = qa_concurrency
 
+    async def build_ingestion(
+        settings: object,
+        database: object,
+    ) -> tuple[object, tuple[object, ...]]:
+        del settings, database
+        return SimpleNamespace(service=object()), ()
+
     async def serve(resources: object, *, scheduler_enabled: bool) -> None:
         del resources, scheduler_enabled
 
@@ -372,6 +379,12 @@ async def test_runtime_passes_configured_concurrency_to_qa_adapter(
         qa=object(),
         delivery=object(),
     )
+
+    def build_intelligence(*args: object, **kwargs: object) -> object:
+        del args
+        captured["intelligence_ingestion"] = kwargs["ingestion"]
+        return intelligence
+
     monkeypatch.setattr(runtime, "Database", Database)
     monkeypatch.setattr(runtime, "AsyncOpenAI", lambda **kwargs: object())
     monkeypatch.setattr(runtime, "SqlAlchemyGroupBindingStore", lambda session: object())
@@ -380,24 +393,61 @@ async def test_runtime_passes_configured_concurrency_to_qa_adapter(
     monkeypatch.setattr(
         runtime,
         "_build_intelligence",
-        lambda *args, **kwargs: intelligence,
+        build_intelligence,
     )
     monkeypatch.setattr(runtime, "BotService", lambda *args, **kwargs: object())
     monkeypatch.setattr(runtime, "FeishuAdapter", Adapter)
+    monkeypatch.setattr(runtime, "_build_ingestion", build_ingestion)
     monkeypatch.setattr(runtime, "_serve", serve)
 
     await runtime._run_configured(settings)
 
-    assert captured == {"qa_concurrency": 7}
+    assert captured == {
+        "intelligence_ingestion": None,
+        "qa_concurrency": 7,
+    }
 
 
-async def test_disabled_scheduler_is_neither_started_nor_stopped() -> None:
+async def test_disabled_collection_still_starts_and_stops_retention_scheduler() -> None:
     events: list[str] = []
 
     await _serve(resources(events), scheduler_enabled=False)
 
-    assert "scheduler_start" not in events
-    assert "scheduler_stop" not in events
+    assert events[:3] == ["scheduler_start", "connect", "scheduler_stop"]
+
+
+async def test_disabled_collection_still_builds_startup_retention_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commerce_agent import runtime
+
+    class RetentionBuilderReached(RuntimeError):
+        pass
+
+    class Settings:
+        ingestion_browser_enabled = False
+        ingestion_scheduler_enabled = False
+        database_url = "sqlite+aiosqlite:///:memory:"
+
+    class Database:
+        session = object()
+
+        def __init__(self, url: str) -> None:
+            del url
+
+        async def create_schema(self) -> None: ...
+
+        async def dispose(self) -> None: ...
+
+    async def build_ingestion(settings: object, database: object) -> object:
+        del settings, database
+        raise RetentionBuilderReached
+
+    monkeypatch.setattr(runtime, "Database", Database)
+    monkeypatch.setattr(runtime, "_build_ingestion", build_ingestion)
+
+    with pytest.raises(RetentionBuilderReached):
+        await runtime._run_configured(Settings())
 
 
 async def test_runtime_rejects_browser_mode_before_creating_resources(

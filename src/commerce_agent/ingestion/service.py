@@ -17,6 +17,7 @@ from commerce_agent.ingestion.models import (
     CollectedFailure,
     CollectedItem,
     CollectorKind,
+    ContentScope,
     FetchContext,
     FetchMetrics,
     ResponseArtifact,
@@ -24,6 +25,7 @@ from commerce_agent.ingestion.models import (
     RunSummary,
     SourceDefinition,
     Trigger,
+    TrustTier,
 )
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.snapshots import SnapshotStore, SnapshotStoreError
@@ -51,6 +53,8 @@ _KNOWN_ERROR_CODES = frozenset(
         "invalid_config",
         "invalid_payload",
         "invalid_selector",
+        "invalid_snapshot_path",
+        "invalid_snapshot_timestamp",
         "invalid_source_id",
         "invalid_url",
         "item_limit_exceeded",
@@ -122,6 +126,13 @@ class _RunCounts:
             self.skipped += 1
 
 
+@dataclass(frozen=True, slots=True)
+class RetentionResult:
+    snapshots_pruned: int
+    bodies_redacted: int
+    error_codes: tuple[str, ...] = ()
+
+
 class IngestionService:
     """Run collectors without overlapping a source or coupling source failures."""
 
@@ -163,16 +174,65 @@ class IngestionService:
         await self._ensure_sources_synced()
         await self.run_retention()
 
-    async def run_retention(self) -> int:
+    async def run_retention(self) -> RetentionResult:
         """Apply the global seven-day temporary-media retention policy."""
 
         await self._ensure_sources_synced()
         async with self._retention_lock:
-            cutoff = self._clock() - timedelta(days=self._gdelt_media_body_retention_days)
-            source_ids = await self._repository.list_temporary_media_source_ids()
-            for source_id in sorted(source_ids):
-                await self._snapshot_store.prune_source_before(source_id, cutoff)
-            return await self._repository.redact_expired_media_bodies(before=cutoff)
+            now = self._clock()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError("retention clock must be timezone-aware")
+            cutoff = now.astimezone(UTC) - timedelta(
+                days=self._gdelt_media_body_retention_days
+            )
+            legacy_source_ids = tuple(
+                source.source_id
+                for source in self._registry.sources
+                if source.trust_tier is TrustTier.MEDIA
+                and source.content_scope is ContentScope.FULL_TEXT
+            )
+            snapshots_pruned = 0
+            bodies_redacted = 0
+            errors: list[str] = []
+            snapshot_index_ready = True
+            try:
+                legacy_paths = await self._repository.list_expired_media_snapshot_paths(
+                    before=cutoff
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                legacy_paths = ()
+                snapshot_index_ready = False
+                errors.append("database_snapshot_discovery_failed")
+                _log_retention_failure("repository_snapshot_index", error)
+            try:
+                snapshots_pruned = await self._snapshot_store.prune_before(
+                    cutoff,
+                    legacy_temporary_source_ids=legacy_source_ids,
+                    legacy_temporary_paths=tuple(sorted(legacy_paths)),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                snapshot_index_ready = False
+                errors.append("snapshot_prune_failed")
+                _log_retention_failure("snapshot_store", error)
+            try:
+                bodies_redacted = await self._repository.redact_expired_media_bodies(
+                    before=cutoff,
+                    clear_snapshot_paths=snapshot_index_ready,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                errors.append("database_redaction_failed")
+                _log_retention_failure("repository", error)
+            return RetentionResult(
+                snapshots_pruned=snapshots_pruned,
+                bodies_redacted=bodies_redacted,
+                error_codes=tuple(errors),
+            )
 
     async def run_source(
         self,
@@ -394,6 +454,11 @@ class IngestionService:
         snapshot = await self._snapshot_store.save(
             source.source_id,
             _artifact_response(item.artifact),
+            temporary=(
+                source.trust_tier is TrustTier.MEDIA
+                and (item.content_scope or source.content_scope)
+                is ContentScope.FULL_TEXT
+            ),
         )
         fetched_at = self._clock()
         document = self._extractor.extract(source, item, fetched_at=fetched_at)
@@ -528,3 +593,12 @@ def _controlled_detail_error_code(error_code: str) -> str:
     if error_code in _KNOWN_ERROR_CODES:
         return error_code
     return "detail_fetch_failed"
+
+
+def _log_retention_failure(component: str, error: BaseException) -> None:
+    _LOGGER.error(
+        "temporary-media retention cleanup failed "
+        "(component=%s exception_type=%s)",
+        component,
+        type(error).__name__,
+    )

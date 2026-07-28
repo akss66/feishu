@@ -19,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 class _IngestionService(Protocol):
     async def run_all(self, trigger: Trigger) -> tuple[Any, ...]: ...
 
-    async def run_retention(self) -> int: ...
+    async def run_retention(self) -> Any: ...
 
 
 class IngestionScheduler:
@@ -30,12 +30,14 @@ class IngestionScheduler:
         service: _IngestionService,
         *,
         interval_minutes: int = 120,
+        collection_enabled: bool = True,
         retention_enabled: bool = True,
         timezone: str = "UTC",
         scheduler: AsyncIOScheduler | Any | None = None,
     ) -> None:
         self._service = service
         self._interval_minutes = interval_minutes
+        self._collection_enabled = collection_enabled
         self._retention_enabled = retention_enabled
         self._scheduler = scheduler or AsyncIOScheduler(timezone=timezone)
         self._started = False
@@ -61,15 +63,16 @@ class IngestionScheduler:
                 coalesce=True,
                 replace_existing=True,
             )
-        self._scheduler.add_job(
-            self._run,
-            trigger="interval",
-            minutes=self._interval_minutes,
-            id=INGESTION_JOB_ID,
-            max_instances=1,
-            coalesce=True,
-            replace_existing=True,
-        )
+        if self._collection_enabled:
+            self._scheduler.add_job(
+                self._run,
+                trigger="interval",
+                minutes=self._interval_minutes,
+                id=INGESTION_JOB_ID,
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
         self._scheduler.start()
         self._started = True
 

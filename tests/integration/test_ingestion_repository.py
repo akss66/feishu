@@ -823,27 +823,69 @@ async def test_expired_media_bodies_are_globally_redacted_without_losing_provena
         # media bodies remain subject to the global seven-day policy.
         await repository.sync_sources(())
         source_ids = await repository.list_temporary_media_source_ids()
+        snapshot_paths = await repository.list_expired_media_snapshot_paths(
+            before=now - timedelta(days=7),
+        )
         redacted = await repository.redact_expired_media_bodies(
             before=now - timedelta(days=7),
+            clear_snapshot_paths=False,
         )
 
         async with database.session() as session:
+            pending_before_retry = await session.get(DocumentVersion, pending.version_id)
+            pending_job_before_retry = await session.scalar(
+                select(AnalysisJob).where(
+                    AnalysisJob.document_version_id == pending.version_id
+                )
+            )
+        assert pending_before_retry is not None
+        assert pending_before_retry.body == (
+            "[media body expired; use analysis evidence and original link]"
+        )
+        assert pending_before_retry.snapshot_path == (
+            "2026/07/20/amazon-news/snapshot.bin.gz"
+        )
+        assert pending_job_before_retry is not None
+        assert pending_job_before_retry.status == "failed"
+        assert pending_job_before_retry.error_code == "media_body_expired"
+
+        redacted_after_snapshot_retry = await repository.redact_expired_media_bodies(
+            before=now - timedelta(days=7),
+            clear_snapshot_paths=True,
+        )
+
+        async with database.session() as session:
+            analyzed_document = await session.get(Document, analyzed.document_id)
             analyzed_version = await session.get(DocumentVersion, analyzed.version_id)
             pending_version = await session.get(DocumentVersion, pending.version_id)
             failed_version = await session.get(DocumentVersion, failed.version_id)
             provenance = await session.get(DocumentProvenance, analyzed.version_id)
+            analysis = await session.scalar(
+                select(DocumentAnalysis).where(
+                    DocumentAnalysis.document_version_id == analyzed.version_id
+                )
+            )
             pending_job = await session.scalar(
                 select(AnalysisJob).where(AnalysisJob.document_version_id == pending.version_id)
             )
 
         assert source_ids == (gdelt.source_id,)
+        assert snapshot_paths == ("2026/07/20/amazon-news/snapshot.bin.gz",)
         assert redacted == 3
+        assert redacted_after_snapshot_retry == 0
+        assert analyzed_document is not None
+        assert analyzed_document.canonical_url == "https://publisher.example/analyzed"
         assert analyzed_version is not None
         assert analyzed_version.body == (
             "[media body expired; use analysis evidence and original link]"
         )
+        assert analyzed_version.title == "Fee update"
         assert analyzed_version.snapshot_path is None
         assert analyzed_version.content_hash == "d" * 64
+        assert analysis is not None
+        assert analysis.headline_zh == "测试"
+        assert analysis.summary_zh == "测试摘要"
+        assert analysis.event_fingerprint == "1" * 64
         assert pending_version is not None
         assert pending_version.body == (
             "[media body expired; use analysis evidence and original link]"
@@ -860,6 +902,7 @@ async def test_expired_media_bodies_are_globally_redacted_without_losing_provena
         )
         assert provenance is not None
         assert provenance.publisher_key == "publisher.example"
+        assert provenance.attribution == "GDELT index; original publisher shown per item"
         assert provenance.content_scope == "full_text"
     finally:
         await database.dispose()

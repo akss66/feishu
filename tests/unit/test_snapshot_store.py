@@ -36,7 +36,11 @@ async def test_saves_gzip_content_at_sha256_addressed_deterministic_path(tmp_pat
     reference = await store.save("amazon-news", response(body))
 
     assert reference.sha256 == digest
-    assert reference.relative_path == f"2026/07/20/amazon-news/{digest}.bin.gz"
+    assert reference.created_at == NOW
+    assert reference.relative_path == (
+        f"2026/07/20/amazon-news/"
+        f"20260720T103000000000Z-{digest}.archive.bin.gz"
+    )
     assert reference.byte_count == len(body)
     assert reference.media_type == "application/json"
     assert gzip.decompress((tmp_path / reference.relative_path).read_bytes()) == body
@@ -78,7 +82,14 @@ async def test_existing_hash_path_with_different_content_is_never_overwritten(
 ) -> None:
     body = b"expected"
     digest = hashlib.sha256(body).hexdigest()
-    target = tmp_path / "2026" / "07" / "20" / "amazon-news" / f"{digest}.bin.gz"
+    target = (
+        tmp_path
+        / "2026"
+        / "07"
+        / "20"
+        / "amazon-news"
+        / f"20260720T103000000000Z-{digest}.archive.bin.gz"
+    )
     target.parent.mkdir(parents=True)
     target.write_bytes(gzip.compress(b"different", mtime=0))
     original = target.read_bytes()
@@ -116,23 +127,111 @@ async def test_reference_metadata_never_contains_request_query_or_sensitive_head
     assert "cookie" not in rendered_metadata.lower()
 
 
-async def test_prunes_only_old_snapshots_for_the_exact_source(tmp_path: Path) -> None:
-    old_store = SnapshotStore(tmp_path, clock=lambda: NOW - timedelta(days=31))
-    recent_store = SnapshotStore(tmp_path, clock=lambda: NOW - timedelta(days=29))
-    old_media = await old_store.save("media-gdelt-cross-border", response(b"old media"))
-    recent_media = await recent_store.save(
-        "media-gdelt-cross-border", response(b"recent media")
+async def test_snapshot_created_seven_days_and_one_second_ago_is_deleted(
+    tmp_path: Path,
+) -> None:
+    cutoff = NOW - timedelta(days=7)
+    expired_store = SnapshotStore(tmp_path, clock=lambda: cutoff - timedelta(seconds=1))
+    expired = await expired_store.save(
+        "media-gdelt-cross-border",
+        response(b"expired media"),
+        temporary=True,
     )
-    other_source = await old_store.save("amazon-news", response(b"old official"))
 
-    removed = await recent_store.prune_source_before(
-        "media-gdelt-cross-border", NOW - timedelta(days=30)
+    removed = await SnapshotStore(tmp_path).prune_before(cutoff)
+
+    assert removed == 1
+    assert not (tmp_path / expired.relative_path).exists()
+
+
+async def test_snapshot_created_six_days_twenty_three_hours_fifty_nine_minutes_ago_is_kept(
+    tmp_path: Path,
+) -> None:
+    cutoff = NOW - timedelta(days=7)
+    recent_store = SnapshotStore(
+        tmp_path,
+        clock=lambda: NOW - timedelta(days=6, hours=23, minutes=59),
+    )
+    recent = await recent_store.save(
+        "media-gdelt-cross-border",
+        response(b"recent media"),
+        temporary=True,
+    )
+
+    removed = await SnapshotStore(tmp_path).prune_before(cutoff)
+
+    assert removed == 0
+    assert (tmp_path / recent.relative_path).exists()
+
+
+async def test_global_prune_keeps_expired_archive_snapshots(tmp_path: Path) -> None:
+    expired_store = SnapshotStore(tmp_path, clock=lambda: NOW - timedelta(days=8))
+    archived = await expired_store.save("amazon-news", response(b"official archive"))
+
+    removed = await SnapshotStore(tmp_path).prune_before(NOW - timedelta(days=7))
+
+    assert removed == 0
+    assert (tmp_path / archived.relative_path).exists()
+
+
+async def test_legacy_snapshot_uses_utc_day_start_as_fail_safe_timestamp(
+    tmp_path: Path,
+) -> None:
+    cutoff = datetime(2026, 7, 13, 10, tzinfo=UTC)
+    body = b"legacy temporary media"
+    digest = hashlib.sha256(body).hexdigest()
+    legacy = tmp_path / "2026" / "07" / "13" / "legacy-media" / f"{digest}.bin.gz"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(gzip.compress(body, mtime=0))
+
+    removed = await SnapshotStore(tmp_path).prune_before(
+        cutoff,
+        legacy_temporary_source_ids=("legacy-media",),
     )
 
     assert removed == 1
-    assert not (tmp_path / old_media.relative_path).exists()
-    assert (tmp_path / recent_media.relative_path).exists()
-    assert (tmp_path / other_source.relative_path).exists()
+    assert not legacy.exists()
+
+
+async def test_legacy_media_metadata_snapshot_is_not_pruned_by_source_name(
+    tmp_path: Path,
+) -> None:
+    body = b"legacy media metadata"
+    digest = hashlib.sha256(body).hexdigest()
+    legacy = (
+        tmp_path
+        / "2026"
+        / "07"
+        / "12"
+        / "media-gdelt-metadata"
+        / f"{digest}.bin.gz"
+    )
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(gzip.compress(body, mtime=0))
+
+    removed = await SnapshotStore(tmp_path).prune_before(NOW - timedelta(days=7))
+
+    assert removed == 0
+    assert legacy.exists()
+
+
+async def test_legacy_full_text_snapshot_is_pruned_by_exact_repository_path(
+    tmp_path: Path,
+) -> None:
+    body = b"legacy full text"
+    digest = hashlib.sha256(body).hexdigest()
+    relative = f"2026/07/12/media-gdelt-mixed/{digest}.bin.gz"
+    legacy = tmp_path / relative
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(gzip.compress(body, mtime=0))
+
+    removed = await SnapshotStore(tmp_path).prune_before(
+        NOW - timedelta(days=7),
+        legacy_temporary_paths=(relative,),
+    )
+
+    assert removed == 1
+    assert not legacy.exists()
 
 
 async def test_prune_rejects_escape_source_id_without_touching_outside_file(
