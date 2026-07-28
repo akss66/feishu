@@ -670,6 +670,37 @@ async def test_persist_version_stores_exact_document_platforms(tmp_path) -> None
         await database.dispose()
 
 
+async def test_new_article_varying_media_rejects_empty_exact_platforms(tmp_path) -> None:
+    database, repository = await _repository(tmp_path)
+    direct_media = replace(
+        _source(platforms=tuple(Platform)),
+        trust_tier=TrustTier.MEDIA,
+        collector=CollectorKind.HTML,
+        content_scope=ContentScope.FULL_TEXT,
+        attribution="Direct Media",
+        publisher_key="media.example.com",
+        collector_config={"item_limit": 10, "public_article_gate": True},
+    )
+    try:
+        await repository.sync_sources([direct_media])
+
+        with pytest.raises(ValueError, match="document_platforms_required"):
+            await repository.persist_version(
+                replace(
+                    _candidate(platforms=()),
+                    publisher_key=direct_media.publisher_key,
+                    attribution=direct_media.attribution,
+                    content_scope=ContentScope.FULL_TEXT.value,
+                )
+            )
+
+        async with database.session() as session:
+            assert (await session.scalars(select(Document))).all() == []
+            assert (await session.scalars(select(DocumentVersionPlatform))).all() == []
+    finally:
+        await database.dispose()
+
+
 async def test_legacy_empty_platform_retry_preserves_existing_exact_mapping(
     tmp_path,
 ) -> None:

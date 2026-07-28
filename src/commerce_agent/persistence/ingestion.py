@@ -10,6 +10,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from commerce_agent.ingestion.article_gate import matched_target_platforms
 from commerce_agent.ingestion.models import (
     Platform,
     RunStatus,
@@ -23,6 +24,7 @@ from commerce_agent.persistence.models import (
     DocumentProvenance,
     DocumentVersion,
     DocumentVersionPlatform,
+    DocumentVersionPlatformResolution,
     FetchRun,
     OfficialNoticeAudit,
     Source,
@@ -377,10 +379,41 @@ class SqlAlchemyIngestionRepository:
                     )
                 ).all()
             )
+            source = await session.get(Source, candidate.source_id)
+            if source is None:  # pragma: no cover - documents require a stored source
+                raise RuntimeError("document source is not stored")
+            article_platforms_vary = (
+                isinstance(source.collector_config, dict)
+                and source.collector_config.get("public_article_gate") is True
+            )
+            platforms_resolved = (
+                await session.get(DocumentVersionPlatformResolution, version_id)
+            ) is not None
             candidate_platforms = candidate.platforms
             if not candidate_platforms:
                 if existing_platforms:
                     candidate_platforms = existing_platforms
+                elif article_platforms_vary:
+                    if created_version:
+                        raise ValueError("document_platforms_required")
+                    stored_body = await session.scalar(
+                        select(DocumentVersion.body).where(DocumentVersion.id == version_id)
+                    )
+                    source_platforms = tuple(
+                        Platform(platform)
+                        for platform in (
+                            await session.scalars(
+                                select(SourcePlatform.platform)
+                                .where(SourcePlatform.source_id == candidate.source_id)
+                                .order_by(SourcePlatform.platform)
+                            )
+                        ).all()
+                    )
+                    candidate_platforms = (
+                        ()
+                        if platforms_resolved
+                        else matched_target_platforms(stored_body or "", source_platforms)
+                    )
                 else:
                     candidate_platforms = tuple(
                         Platform(platform)
@@ -402,6 +435,10 @@ class SqlAlchemyIngestionRepository:
                 )
             elif set(existing_platforms) != set(candidate_platforms):
                 raise ValueError("document_platforms_conflict")
+            if not platforms_resolved:
+                session.add(
+                    DocumentVersionPlatformResolution(document_version_id=version_id)
+                )
 
             if created_version:
                 now = datetime.now(UTC)

@@ -47,7 +47,9 @@ from commerce_agent.persistence.models import (
     AnalysisJob,
     DailyReport,
     DeliveryOutbox,
+    Document,
     DocumentAnalysis,
+    DocumentProvenance,
     DocumentVersion,
     DocumentVersionPlatform,
     SourceHealth,
@@ -162,6 +164,254 @@ async def test_claim_uses_version_platforms_instead_of_source_platforms(tmp_path
 
         assert claim is not None
         assert claim.platforms == (Platform.AMAZON,)
+    finally:
+        await database.dispose()
+
+
+async def _insert_legacy_direct_media_version(
+    database: Database,
+    *,
+    source_id: str,
+    canonical_url: str,
+    content_hash: str,
+    body: str,
+) -> int:
+    async with database.session.begin() as session:
+        document = Document(
+            source_id=source_id,
+            canonical_url=canonical_url,
+            first_seen_at=datetime(2026, 7, 20, 1, tzinfo=UTC),
+            last_seen_at=datetime(2026, 7, 20, 1, tzinfo=UTC),
+            content_group_hash=f"group-{content_hash[0]}",
+        )
+        session.add(document)
+        await session.flush()
+        version = DocumentVersion(
+            document_id=document.id,
+            title="Legacy direct-media article",
+            body=body,
+            language="en",
+            language_confidence=0.99,
+            author="Direct Media",
+            published_at=datetime(2026, 7, 19, 8, tzinfo=UTC),
+            content_hash=content_hash,
+            fetched_at=datetime(2026, 7, 20, 1, tzinfo=UTC),
+        )
+        session.add(version)
+        await session.flush()
+        document.current_version_id = version.id
+        session.add(
+            DocumentProvenance(
+                document_version_id=version.id,
+                publisher_key="media.example.com",
+                attribution="Direct Media",
+                content_scope=ContentScope.FULL_TEXT.value,
+            )
+        )
+        session.add(
+            AnalysisJob(
+                document_version_id=version.id,
+                status="pending",
+                attempt_count=0,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        return version.id
+
+
+async def test_legacy_article_varying_media_backfills_or_fails_closed(tmp_path) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'legacy-platforms.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    direct_media = replace(
+        _source(source_id="media-direct-cross-border"),
+        platforms=tuple(Platform),
+        trust_tier=TrustTier.MEDIA,
+        collector=CollectorKind.HTML,
+        collector_config={"item_limit": 10, "public_article_gate": True},
+    )
+    try:
+        await ingestion.sync_sources([direct_media])
+        recoverable_version_id = await _insert_legacy_direct_media_version(
+            database,
+            source_id=direct_media.source_id,
+            canonical_url="https://media.example.com/amazon-only",
+            content_hash="a" * 64,
+            body="Amazon announced a seller fee update.",
+        )
+        unknown_version_id = await _insert_legacy_direct_media_version(
+            database,
+            source_id=direct_media.source_id,
+            canonical_url="https://media.example.com/unknown",
+            content_hash="u" * 64,
+            body="",
+        )
+
+        recoverable = await repository.claim_next(now=NOW)
+        assert recoverable is not None
+        assert recoverable.document_version_id == recoverable_version_id
+        assert recoverable.platforms == (Platform.AMAZON,)
+        await repository.complete_analysis(
+            recoverable,
+            _valid_result(),
+            90,
+            "legacy-amazon",
+            now=NOW,
+            model_name="test-model",
+        )
+
+        unknown = await repository.claim_next(now=NOW)
+        assert unknown is not None
+        assert unknown.document_version_id == unknown_version_id
+        assert unknown.platforms == ()
+        await repository.complete_analysis(
+            unknown,
+            _valid_result(),
+            90,
+            "legacy-unknown",
+            now=NOW,
+            model_name="test-model",
+        )
+
+        report_rows = await repository.list_report_analyses(
+            window_start=datetime(2026, 7, 20, tzinfo=UTC),
+            window_end=datetime(2026, 7, 21, tzinfo=UTC),
+        )
+        alert_rows = await repository.list_unqueued_alert_candidates(
+            since=NOW - timedelta(minutes=1),
+            until=NOW + timedelta(minutes=1),
+        )
+        amazon_corpus = await repository.list_corpus_candidates(
+            since=datetime(2026, 7, 19, tzinfo=UTC),
+            until=datetime(2026, 7, 21, tzinfo=UTC),
+            platforms=(Platform.AMAZON,),
+            regions=(),
+            risk_levels=(),
+            limit=10,
+            before=None,
+        )
+        temu_corpus = await repository.list_corpus_candidates(
+            since=datetime(2026, 7, 19, tzinfo=UTC),
+            until=datetime(2026, 7, 21, tzinfo=UTC),
+            platforms=(Platform.TEMU,),
+            regions=(),
+            risk_levels=(),
+            limit=10,
+            before=None,
+        )
+
+        async with database.session() as session:
+            recovered_rows = tuple(
+                await session.scalars(
+                    select(DocumentVersionPlatform.platform).where(
+                        DocumentVersionPlatform.document_version_id
+                        == recoverable_version_id
+                    )
+                )
+            )
+            unknown_rows = tuple(
+                await session.scalars(
+                    select(DocumentVersionPlatform.platform).where(
+                        DocumentVersionPlatform.document_version_id == unknown_version_id
+                    )
+                )
+            )
+
+        assert [row.candidate.platforms for row in report_rows] == [(Platform.AMAZON,)]
+        assert [row.candidate.platforms for row in alert_rows] == [(Platform.AMAZON,)]
+        assert [row.document_version_id for row in amazon_corpus] == [
+            recoverable_version_id
+        ]
+        assert temu_corpus == ()
+        assert recovered_rows == (Platform.AMAZON.value,)
+        assert unknown_rows == ()
+    finally:
+        await database.dispose()
+
+
+async def test_legacy_intrinsically_fixed_source_keeps_source_platform_fallback(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'legacy-fixed-platforms.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    fixed_source = _source(source_id="fixed-official-source")
+    try:
+        await ingestion.sync_sources([fixed_source])
+        version_id = await _insert_legacy_direct_media_version(
+            database,
+            source_id=fixed_source.source_id,
+            canonical_url="https://example.com/fixed-source",
+            content_hash="f" * 64,
+            body="A fixed-source seller update.",
+        )
+
+        claimed = await repository.claim_next(now=NOW)
+
+        assert claimed is not None
+        assert claimed.document_version_id == version_id
+        assert claimed.platforms == (Platform.AMAZON, Platform.EBAY)
+    finally:
+        await database.dispose()
+
+
+async def test_concurrent_legacy_backfill_and_duplicate_persist_are_idempotent(
+    tmp_path,
+) -> None:
+    database = Database(f"sqlite+aiosqlite:///{tmp_path / 'concurrent-backfill.db'}")
+    await database.create_schema()
+    ingestion = SqlAlchemyIngestionRepository(database.session)
+    repository = SqlAlchemyIntelligenceRepository(database.session)
+    direct_media = replace(
+        _source(source_id="media-direct-concurrent"),
+        platforms=tuple(Platform),
+        trust_tier=TrustTier.MEDIA,
+        collector=CollectorKind.HTML,
+        collector_config={"item_limit": 10, "public_article_gate": True},
+    )
+    try:
+        await ingestion.sync_sources([direct_media])
+        version_id = await _insert_legacy_direct_media_version(
+            database,
+            source_id=direct_media.source_id,
+            canonical_url="https://media.example.com/concurrent-amazon",
+            content_hash="c" * 64,
+            body="Amazon announced a seller fee update.",
+        )
+        duplicate_candidate = replace(
+            _candidate(
+                source_id=direct_media.source_id,
+                canonical_url="https://media.example.com/concurrent-amazon",
+                content_hash="c" * 64,
+                body="Amazon announced a seller fee update.",
+                platforms=(Platform.AMAZON,),
+            ),
+            publisher_key="media.example.com",
+            attribution="Direct Media",
+            content_scope=ContentScope.FULL_TEXT.value,
+        )
+
+        persisted, claimed = await asyncio.gather(
+            ingestion.persist_version(duplicate_candidate),
+            repository.claim_next(now=NOW),
+        )
+
+        async with database.session() as session:
+            exact_rows = tuple(
+                await session.scalars(
+                    select(DocumentVersionPlatform.platform).where(
+                        DocumentVersionPlatform.document_version_id == version_id
+                    )
+                )
+            )
+        assert persisted.created_version is False
+        assert claimed is not None
+        assert claimed.document_version_id == version_id
+        assert claimed.platforms == (Platform.AMAZON,)
+        assert exact_rows == (Platform.AMAZON.value,)
     finally:
         await database.dispose()
 
@@ -1158,6 +1408,10 @@ async def test_production_registry_keeps_exact_article_platform_and_strict_basel
             Platform.COUPANG: 1,
             Platform.JOYBUY: 1,
         }
+        assert len(strict) == 3
+        assert len(coverage) == 10
+        assert sum(row.effective_source_count for row in coverage) == 3
+        assert sum(row.target_source_count for row in coverage) == 20
     finally:
         await database.dispose()
 

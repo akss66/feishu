@@ -240,6 +240,16 @@ class DocumentVersionPlatform(Base):
     __table_args__ = (Index("ix_document_version_platforms_platform", "platform"),)
 
 
+class DocumentVersionPlatformResolution(Base):
+    __tablename__ = "document_version_platform_resolutions"
+
+    document_version_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("document_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
 class AnalysisJob(Base):
     __tablename__ = "analysis_jobs"
 

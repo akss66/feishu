@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from commerce_agent.ingestion.article_gate import matched_target_platforms
 from commerce_agent.ingestion.models import ContentScope, Platform, TrustTier
 from commerce_agent.intelligence.models import (
     AnalysisCandidate,
@@ -40,6 +41,7 @@ from commerce_agent.persistence.models import (
     DocumentProvenance,
     DocumentVersion,
     DocumentVersionPlatform,
+    DocumentVersionPlatformResolution,
     Source,
     SourceAuditedPlatform,
     SourceHealth,
@@ -473,6 +475,9 @@ class SqlAlchemyIntelligenceRepository:
                     ),
                     and_(
                         ~has_version_platform,
+                        Source.collector_config["public_article_gate"]
+                        .as_boolean()
+                        .is_not(True),
                         exists(
                             select(literal(1)).where(
                                 SourcePlatform.source_id == Source.id,
@@ -513,7 +518,8 @@ class SqlAlchemyIntelligenceRepository:
             .limit(candidate_limit)
         )
 
-        async with self._session_factory() as session:
+        async with self._session_factory.begin() as session:
+            await _backfill_unresolved_article_platforms(session)
             rows = (await session.execute(statement)).all()
             if not rows:
                 return ()
@@ -578,7 +584,7 @@ class SqlAlchemyIntelligenceRepository:
             )
             .order_by(DocumentVersion.fetched_at.desc(), DocumentAnalysis.id.desc())
         )
-        async with self._session_factory() as session:
+        async with self._session_factory.begin() as session:
             rows = (await session.execute(statement)).all()
             if not rows:
                 return ()
@@ -597,7 +603,10 @@ class SqlAlchemyIntelligenceRepository:
                     platforms=platforms_by_version.get(version.id, ()),
                 )
                 for analysis, job, version, document, source, provenance in rows
+                if platforms_by_version.get(version.id, ())
             ]
+            if not scored:
+                return ()
             duplicate_rows = (
                 await session.execute(
                     select(
@@ -1141,7 +1150,7 @@ class SqlAlchemyIntelligenceRepository:
             )
             .order_by(DocumentAnalysis.analyzed_at, DocumentAnalysis.id)
         )
-        async with self._session_factory() as session:
+        async with self._session_factory.begin() as session:
             rows = (await session.execute(statement)).all()
             if not rows:
                 return ()
@@ -1161,6 +1170,7 @@ class SqlAlchemyIntelligenceRepository:
                     platforms=platforms_by_version.get(version.id, ()),
                 )
                 for analysis, job, version, document, source, provenance in rows
+                if platforms_by_version.get(version.id, ())
             )
 
     async def claim_delivery(
@@ -1493,7 +1503,7 @@ async def _platforms_by_version(
     session: AsyncSession,
     version_sources: dict[int, str],
 ) -> dict[int, tuple[Platform, ...]]:
-    """Return exact article platforms, with a migration-safe source fallback."""
+    """Resolve exact article platforms, failing closed for article-varying sources."""
     if not version_sources:
         return {}
     version_ids = tuple(version_sources)
@@ -1514,9 +1524,37 @@ async def _platforms_by_version(
     for version_id, platform in exact_rows:
         values.setdefault(version_id, []).append(Platform(platform))
 
-    missing_source_ids = {
-        source_id for version_id, source_id in version_sources.items() if version_id not in values
-    }
+    missing_version_ids = tuple(
+        version_id for version_id in version_sources if version_id not in values
+    )
+    if not missing_version_ids:
+        return {version_id: tuple(platforms) for version_id, platforms in values.items()}
+
+    resolved_ids = set(
+        (
+            await session.scalars(
+                select(DocumentVersionPlatformResolution.document_version_id).where(
+                    DocumentVersionPlatformResolution.document_version_id.in_(
+                        missing_version_ids
+                    )
+                )
+            )
+        ).all()
+    )
+    version_rows = (
+        await session.execute(
+            select(
+                DocumentVersion.id,
+                DocumentVersion.body,
+                Source.id,
+                Source.collector_config,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .where(DocumentVersion.id.in_(missing_version_ids))
+        )
+    ).all()
+    missing_source_ids = {source_id for _, _, source_id, _ in version_rows}
     source_values: dict[str, list[Platform]] = {}
     if missing_source_ids:
         source_rows = (
@@ -1529,10 +1567,68 @@ async def _platforms_by_version(
         for source_id, platform in source_rows:
             source_values.setdefault(source_id, []).append(Platform(platform))
 
+    for version_id, body, source_id, collector_config in version_rows:
+        source_platforms = tuple(source_values.get(source_id, ()))
+        article_platforms_vary = (
+            isinstance(collector_config, dict)
+            and collector_config.get("public_article_gate") is True
+        )
+        if not article_platforms_vary:
+            values[version_id] = list(source_platforms)
+            continue
+        recovered = (
+            ()
+            if version_id in resolved_ids
+            else matched_target_platforms(body or "", source_platforms)
+        )
+        if version_id not in resolved_ids:
+            if recovered:
+                await session.execute(
+                    sqlite_insert(DocumentVersionPlatform)
+                    .values(
+                        [
+                            {
+                                "document_version_id": version_id,
+                                "platform": platform.value,
+                            }
+                            for platform in recovered
+                        ]
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=["document_version_id", "platform"]
+                    )
+                )
+            await session.execute(
+                sqlite_insert(DocumentVersionPlatformResolution)
+                .values(document_version_id=version_id)
+                .on_conflict_do_nothing(index_elements=["document_version_id"])
+            )
+        values[version_id] = list(recovered)
+
     return {
-        version_id: tuple(values.get(version_id, source_values.get(source_id, ())))
-        for version_id, source_id in version_sources.items()
+        version_id: tuple(values.get(version_id, ())) for version_id in version_sources
     }
+
+
+async def _backfill_unresolved_article_platforms(session: AsyncSession) -> None:
+    unresolved = (
+        await session.execute(
+            select(DocumentVersion.id, Document.source_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .outerjoin(
+                DocumentVersionPlatformResolution,
+                DocumentVersionPlatformResolution.document_version_id
+                == DocumentVersion.id,
+            )
+            .where(
+                DocumentVersionPlatformResolution.document_version_id.is_(None),
+                Source.collector_config["public_article_gate"].as_boolean().is_(True),
+            )
+        )
+    ).all()
+    if unresolved:
+        await _platforms_by_version(session, dict(unresolved))
 
 
 def _evidence_quotes(payload: object) -> tuple[str, ...]:
