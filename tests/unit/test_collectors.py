@@ -298,6 +298,82 @@ async def test_feed_collector_applies_cap_after_removing_duplicates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_feed_collector_fetches_details_and_keeps_only_matching_terms() -> None:
+    feed_url = "https://feeds.example.com/feed.xml"
+    matching_url = "https://feeds.example.com/recalls/temu-item"
+    unrelated_url = "https://feeds.example.com/recalls/other-item"
+    feed = f"""
+    <rss version="2.0"><channel>
+      <item><title>Children's bracelet recalled</title><link>{matching_url}</link></item>
+      <item><title>Kitchen appliance recalled</title><link>{unrelated_url}</link></item>
+    </channel></rss>
+    """.encode()
+    matching_detail = b"<article>Sold online through Whaleco Canada Inc. (Temu).</article>"
+    unrelated_detail = b"<article>Sold by an unrelated Canadian retailer.</article>"
+    http = FakeHttpPort(
+        {
+            feed_url: feed,
+            matching_url: FetchResponse(
+                url=matching_url,
+                status_code=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=matching_detail,
+            ),
+            unrelated_url: FetchResponse(
+                url=unrelated_url,
+                status_code=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=unrelated_detail,
+            ),
+        }
+    )
+    definition = source(
+        CollectorKind.RSS,
+        entry_url=feed_url,
+        config={"item_limit": 10, "detail_match_terms": "temu|whaleco"},
+    )
+
+    items = await collected(FeedCollector(http), definition)
+
+    assert [item.url for item in items] == [matching_url]
+    assert items[0].body == matching_detail
+    assert items[0].artifact is not None
+    assert items[0].artifact.body == matching_detail
+    assert [request.url for request in http.requests] == [
+        feed_url,
+        matching_url,
+        unrelated_url,
+    ]
+    assert http.requests[1].etag is None
+    assert http.requests[1].last_modified is None
+
+
+@pytest.mark.asyncio
+async def test_feed_collector_filters_entries_without_fetching_details() -> None:
+    feed_url = "https://feeds.example.com/feed.xml"
+    matching_url = "https://feeds.example.com/news/temu"
+    feed = f"""
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry><title>Canada reviews Whaleco marketplace practices</title>
+        <link href="{matching_url}"/><summary>Competition update</summary></entry>
+      <entry><title>Unrelated merger review</title>
+        <link href="https://feeds.example.com/news/other"/></entry>
+    </feed>
+    """.encode()
+    http = FakeHttpPort({feed_url: feed})
+    definition = source(
+        CollectorKind.RSS,
+        entry_url=feed_url,
+        config={"item_limit": 10, "entry_match_terms": "temu|whaleco"},
+    )
+
+    items = await collected(FeedCollector(http), definition)
+
+    assert [item.url for item in items] == [matching_url]
+    assert len(http.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_feed_collector_records_a_not_modified_response_once() -> None:
     url = "https://feeds.example.com/feed.xml"
     http = FakeHttpPort(

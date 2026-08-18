@@ -6,6 +6,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
 from commerce_agent.ingestion.scheduler import IngestionScheduler
 from commerce_agent.runtime import RuntimeResources, _serve
@@ -459,6 +460,16 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
         def __init__(self, *args: object, **kwargs: object) -> None:
             del args, kwargs
 
+    class FirecrawlCollector:
+        def __init__(self, firecrawl: object, fallback: object) -> None:
+            self.firecrawl = firecrawl
+            self.fallback = fallback
+
+    class FirecrawlClient(Closer):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__("firecrawl")
+            captured["firecrawl_kwargs"] = kwargs
+
     class Extractor:
         def __init__(self, detector: object) -> None:
             del detector
@@ -489,6 +500,13 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
         ingestion_user_agent="test-agent",
         ingestion_interval_minutes=120,
         snapshot_dir=".",
+        firecrawl_api_key=SecretStr("fc-test-key"),
+        firecrawl_api_url="https://api.firecrawl.dev",
+        firecrawl_timeout_seconds=5.0,
+        firecrawl_max_age_ms=900_000,
+        firecrawl_max_concurrency=1,
+        firecrawl_max_attempts=3,
+        firecrawl_min_request_interval_seconds=6.5,
     )
     monkeypatch.setattr(bootstrap, "build_resolver_bundle", build_bundle)
     monkeypatch.setattr(ingestion_cli, "build_registry", lambda: SimpleNamespace())
@@ -502,6 +520,11 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
     )
     for name in collector_names:
         monkeypatch.setattr(collectors, name, Collector)
+    monkeypatch.setattr(collectors, "FirecrawlFirstCollector", FirecrawlCollector)
+    monkeypatch.setattr(
+        "commerce_agent.integrations.firecrawl.FirecrawlClient",
+        FirecrawlClient,
+    )
     monkeypatch.setattr(extract, "ContentExtractor", Extractor)
     monkeypatch.setattr(extract, "LinguaLanguageDetector", object)
     monkeypatch.setattr(service, "IngestionService", Service)
@@ -514,7 +537,7 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
     if fail_initialization:
         with pytest.raises(RuntimeError, match="initialization failed"):
             await runtime._build_ingestion(settings, SimpleNamespace(session=object()))
-        assert events == ["initialize", "http", "resolver"]
+        assert events == ["initialize", "firecrawl", "http", "resolver"]
         return
 
     built_scheduler, owned_resources = await runtime._build_ingestion(
@@ -525,5 +548,20 @@ async def test_runtime_ingestion_uses_shared_resolver_and_owns_its_lifecycle(
     assert isinstance(built_scheduler, IngestionScheduler)
     assert captured["mode"] == "cloudflare_doh"
     assert captured["http_kwargs"]["safety_policy"] is policy  # type: ignore[index]
-    assert owned_resources[0].name == "http"  # type: ignore[attr-defined]
-    assert owned_resources[1] is resolver
+    assert captured["firecrawl_kwargs"] == {
+        "api_key": settings.firecrawl_api_key,
+        "api_url": "https://api.firecrawl.dev",
+        "timeout_seconds": 5.0,
+        "max_age_ms": 900_000,
+        "max_concurrency": 1,
+        "max_attempts": 3,
+        "min_request_interval_seconds": 6.5,
+    }
+    service_collectors = captured["service_kwargs"]["collectors"]  # type: ignore[index]
+    assert all(
+        isinstance(candidate, FirecrawlCollector)
+        for candidate in service_collectors.values()
+    )
+    assert owned_resources[0].name == "firecrawl"  # type: ignore[attr-defined]
+    assert owned_resources[1].name == "http"  # type: ignore[attr-defined]
+    assert owned_resources[2] is resolver

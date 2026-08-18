@@ -26,6 +26,7 @@ async def test_answer_test_calls_the_configured_model() -> None:
     assert request["messages"][0]["role"] == "system"
     assert "AI测试不代表任何平台政策结论" in request["messages"][0]["content"]
     assert request["messages"][1] == {"role": "user", "content": "回复一句话"}
+    assert request["extra_body"] == {"thinking": {"type": "disabled"}}
     assert request["stream"] is False
 
 
@@ -70,6 +71,7 @@ async def test_complete_json_serializes_the_payload_without_ascii_escaping() -> 
         ],
         "response_format": {"type": "json_object"},
         "max_tokens": 4096,
+        "extra_body": {"thinking": {"type": "disabled"}},
         "stream": False,
     }
 

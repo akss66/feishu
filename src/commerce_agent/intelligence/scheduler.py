@@ -18,6 +18,7 @@ ANALYSIS_JOB_ID = "intelligence-analysis-drain"
 DELIVERY_JOB_ID = "intelligence-delivery-retry"
 DAILY_JOB_ID = "intelligence-daily-report"
 DAILY_PREPARE_JOB_ID = "intelligence-daily-prepare"
+DAILY_CATCHUP_JOB_ID = "intelligence-daily-catchup"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,6 +126,14 @@ class IntelligenceScheduler:
                 minute=0,
                 job_id=DAILY_JOB_ID,
             )
+            now = self._clock()
+            if now.astimezone(self._timezone).hour >= self._daily_hour:
+                self._add_job(
+                    self._run_daily_catchup,
+                    trigger="date",
+                    run_date=now,
+                    job_id=DAILY_CATCHUP_JOB_ID,
+                )
         self._scheduler.start()
         self._started = True
 
@@ -191,6 +200,28 @@ class IntelligenceScheduler:
         finally:
             self._untrack(task)
 
+    async def _run_daily_catchup(self) -> None:
+        task = self._track_current_task()
+        try:
+            group_id = await self._bindings.get_active_chat_id()
+            if group_id is None:
+                return
+            report_date = self._clock().astimezone(self._timezone).date()
+            if self._pre_report is not None:
+                await self._pre_report.prepare(group_id, report_date)
+            else:
+                await self._reports.preview(group_id, report_date)
+            await self._reports.queue_previewed(group_id, report_date)
+        except ReportAlreadySent:
+            _LOGGER.info("daily catchup report already sent; skipping")
+        except Exception as error:
+            _LOGGER.error(
+                "intelligence daily catchup failed (exception_type=%s)",
+                type(error).__name__,
+            )
+        finally:
+            self._untrack(task)
+
     async def _run_delivery(self) -> None:
         task = self._track_current_task()
         try:
@@ -235,6 +266,7 @@ class IntelligenceScheduler:
 
 __all__ = [
     "ANALYSIS_JOB_ID",
+    "DAILY_CATCHUP_JOB_ID",
     "DAILY_PREPARE_JOB_ID",
     "DAILY_JOB_ID",
     "DELIVERY_JOB_ID",

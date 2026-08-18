@@ -591,23 +591,26 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
     )
 
 
-def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled() -> None:
+def test_public_registry_media_sources_follow_reviewed_material_policy() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     media = tuple(source for source in registry.sources if source.trust_tier is TrustTier.MEDIA)
 
     assert media
     for source in media:
         assert source.adapter in {SourceAdapter.GENERIC, SourceAdapter.GDELT}
-        assert source.content_scope in {
-            ContentScope.METADATA_ONLY,
-            ContentScope.FEED_SUMMARY,
-        }
         assert source.attribution
         if source.adapter is SourceAdapter.GENERIC:
             assert source.publisher_key
         else:
             assert source.publisher_key is None
-        assert source.enabled is False
+        if source.enabled:
+            assert source.compliance is ComplianceStatus.ALLOWED
+            assert source.content_scope is ContentScope.FULL_TEXT
+        else:
+            assert source.content_scope in {
+                ContentScope.METADATA_ONLY,
+                ContentScope.FEED_SUMMARY,
+            }
 
 
 def test_requested_chinese_media_candidates_are_registered_but_disabled() -> None:
@@ -626,6 +629,112 @@ def test_requested_chinese_media_candidates_are_registered_but_disabled() -> Non
         assert source.trust_tier is TrustTier.MEDIA
         assert source.content_scope is ContentScope.METADATA_ONLY
         assert source.enabled is False
+
+
+def test_requested_temu_shein_and_aliexpress_urls_are_registered_exactly() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    expected = {
+        "temu-seller-center": "https://seller.temu.com/seller/login",
+        "temu-press-corner": "https://www.temu.com/press.html",
+        "media-ebrun-temu": "https://www.ebrun.com/information/cross-Temu",
+        "media-cifnews-temu": "https://m.cifnews.com/pinduoduocrossborder",
+        "media-amz123-temu": "https://m.amz123.com/temu/news",
+        "media-marketplace-pulse": "https://www.marketplacepulse.com/",
+        "media-reuters-home": "https://www.reuters.com/",
+        "us-cbp-ecommerce-policy": (
+            "https://www.cbp.gov/trade/basic-import-export/e-commerce"
+        ),
+        "eu-online-platforms-policy": (
+            "https://digital-strategy.ec.europa.eu/en/policies/online-platforms"
+        ),
+        "pdd-holdings-investor-relations": (
+            "https://investor.pddholdings.com/news-releases"
+        ),
+        "shein-group-newsroom": "https://www.sheingroup.com/newsroom",
+        "shein-marketplace-corporate": "https://www.sheincorp.com/",
+        "media-reuters-shein": "https://www.reuters.com/company/shein/",
+        "media-ebrun-shein": "https://www.ebrun.com/information/cross-SHEIN",
+        "media-cifnews-shein": "https://m.cifnews.com/shein",
+        "aliexpress-seller-portal": "https://login.aliexpress.com/seller.htm",
+        "aliexpress-new-seller-landing": (
+            "https://sell.aliexpress.com/zh/__pc/newsellerlanding.htm"
+        ),
+        "media-ebrun-aliexpress": (
+            "https://www.ebrun.com/information/cross-aliexpress"
+        ),
+        "media-cifnews-aliexpress": "https://m.cifnews.com/aliexpress",
+        "media-cifnews-aliexpress-platform-news": (
+            "https://m.cifnews.com/aliexpress/platformnews"
+        ),
+        "media-amz123-aliexpress": "https://m.amz123.com/aliexpress/news",
+        "media-reuters-aliexpress": "https://www.reuters.com/company/aliexpress/",
+        "alibaba-group-news": "https://www.alibabagroup.com/news-and-resource",
+    }
+
+    assert {
+        source_id: registry.require(source_id).entry_url for source_id in expected
+    } == expected
+
+
+def test_successfully_probed_focus_sources_are_enabled_for_full_text() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    enabled_sources = (
+        "media-cifnews-temu",
+        "media-amz123-temu",
+        "pdd-holdings-investor-relations",
+        "shein-marketplace-corporate",
+        "media-cifnews-shein",
+        "media-cifnews-aliexpress",
+        "media-cifnews-aliexpress-platform-news",
+        "media-amz123-aliexpress",
+        "alibaba-group-news",
+    )
+
+    for source_id in enabled_sources:
+        source = registry.require(source_id)
+        assert source.compliance is ComplianceStatus.ALLOWED
+        assert source.enabled is True
+        assert source.content_scope is ContentScope.FULL_TEXT
+
+    for source_id in (
+        "media-ebrun-temu",
+        "media-ebrun-shein",
+        "media-ebrun-aliexpress",
+    ):
+        source = registry.require(source_id)
+        assert source.enabled is False
+        assert source.content_scope is ContentScope.METADATA_ONLY
+
+
+def test_failed_focus_platform_gdelt_smokes_remain_disabled() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+
+    for source_id in (
+        "media-gdelt-temu",
+        "media-gdelt-shein",
+        "media-gdelt-aliexpress",
+    ):
+        source = registry.require(source_id)
+        assert source.compliance is ComplianceStatus.ALLOWED
+        assert source.enabled is False
+        assert source.content_scope is ContentScope.METADATA_ONLY
+
+
+def test_focus_platform_official_regulators_are_enabled_for_full_text() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    expected_platforms = {
+        Platform.TEMU,
+        Platform.SHEIN,
+        Platform.ALIEXPRESS,
+    }
+
+    for source_id in ("us-cbp-ecommerce-policy", "eu-online-platforms-policy"):
+        source = registry.require(source_id)
+        assert set(source.platforms) == expected_platforms
+        assert source.trust_tier is TrustTier.OFFICIAL
+        assert source.compliance is ComplianceStatus.ALLOWED
+        assert source.enabled is True
+        assert source.content_scope is ContentScope.FULL_TEXT
 
 
 def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() -> None:
@@ -661,3 +770,36 @@ def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() ->
     assert query["timespan"] == ["1d"]
     assert query["sort"] == ["datedesc"]
     assert "Amazon marketplace" in query["query"][0]
+
+
+def test_public_registry_includes_enabled_canadian_temu_official_feeds() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    expected = {
+        "canada-health-news-temu": "api.io.canada.ca",
+        "canada-competition-bureau-news-temu": "api.io.canada.ca",
+        "canada-cbsa-news-temu": "api.io.canada.ca",
+        "canada-citt-news-temu": "api.io.canada.ca",
+        "canada-national-news-temu": "api.io.canada.ca",
+        "canada-ised-news-temu": "api.io.canada.ca",
+        "canada-finance-news-temu": "api.io.canada.ca",
+    }
+
+    for source_id, host in expected.items():
+        source = registry.require(source_id)
+        assert source.platforms == (Platform.TEMU,)
+        assert source.regions == ("ca",)
+        assert source.trust_tier is TrustTier.OFFICIAL
+        assert source.compliance is ComplianceStatus.ALLOWED
+        assert source.enabled is True
+        assert urlsplit(source.entry_url).hostname == host
+
+    recalls = registry.require("canada-health-product-recalls-temu")
+    assert recalls.regions == ("ca",)
+    assert recalls.compliance is ComplianceStatus.PENDING_REVIEW
+    assert recalls.enabled is False
+    assert recalls.content_scope is ContentScope.FULL_TEXT
+    assert recalls.collector_config["detail_match_terms"] == "temu|whaleco"
+    for source_id in expected:
+        assert registry.require(source_id).collector_config["entry_match_terms"] == (
+            "temu|whaleco|pdd holdings"
+        )

@@ -27,6 +27,9 @@ def test_runner_enables_the_first_pass_runtime_without_secret_file_operations() 
     assert "data\\runtime" in text
     assert '$ErrorActionPreference = "Continue"' in text
     assert "$agentExitCode = $LASTEXITCODE" in text
+    assert "while ($true)" in text
+    assert "Start-Sleep -Seconds $restartDelaySeconds" in text
+    assert "exit $agentExitCode" not in text
 
 
 def test_installer_registers_a_non_elevated_single_instance_restartable_task() -> None:
@@ -34,12 +37,14 @@ def test_installer_registers_a_non_elevated_single_instance_restartable_task() -
 
     assert '"CrossBorderCommerceAgent"' in text
     assert "New-ScheduledTaskTrigger -AtLogOn" in text
+    assert 'New-ScheduledTaskTrigger -Daily -At "08:30"' in text
     assert "New-ScheduledTaskPrincipal" in text
     assert "-ExecutionPolicy RemoteSigned" in text
     assert '-RunLevel "Limited"' in text
     assert '-MultipleInstances "IgnoreNew"' in text
     assert "-RestartCount 10" in text
     assert "-RestartInterval (New-TimeSpan -Minutes 1)" in text
+    assert "-WakeToRun" in text
     assert "Register-ScheduledTask" in text
     assert "Start-ScheduledTask" in text
     assert "Unregister-ScheduledTask" not in text

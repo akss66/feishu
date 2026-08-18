@@ -22,6 +22,7 @@ class DeepSeekGateway:
                 },
                 {"role": "user", "content": prompt},
             ],
+            extra_body={"thinking": {"type": "disabled"}},
             stream=False,
         )
         content = response.choices[0].message.content
@@ -43,6 +44,7 @@ class DeepSeekGateway:
             ],
             response_format={"type": "json_object"},
             max_tokens=4096,
+            extra_body={"thinking": {"type": "disabled"}},
             stream=False,
         )
         content = response.choices[0].message.content

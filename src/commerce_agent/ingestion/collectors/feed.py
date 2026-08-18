@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -9,12 +10,20 @@ from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     HttpPort,
     candidate_url,
+    detail_failure,
     fetch_request,
     item_limit,
     require_success,
     response_artifact,
 )
-from commerce_agent.ingestion.models import CollectedItem, FetchContext, SourceDefinition
+from commerce_agent.ingestion.http import FetchError
+from commerce_agent.ingestion.models import (
+    CollectedFailure,
+    CollectedItem,
+    FetchContext,
+    SourceDefinition,
+)
+from commerce_agent.ingestion.security import UrlSafetyError
 
 
 class FeedCollector:
@@ -25,7 +34,7 @@ class FeedCollector:
         self,
         source: SourceDefinition,
         context: FetchContext,
-    ) -> AsyncIterator[CollectedItem]:
+    ) -> AsyncIterator[CollectedItem | CollectedFailure]:
         response = await self._http.get(fetch_request(source, context))
         if not require_success(response):
             return
@@ -47,12 +56,15 @@ class FeedCollector:
 
         seen: set[str] = set()
         limit = item_limit(source)
+        entry_match_terms = _match_terms(source, "entry_match_terms")
+        detail_match_terms = _match_terms(source, "detail_match_terms")
         for entry in entries:
             raw_link = _atom_link(entry) if atom else _child_text(entry, "link")
             url = candidate_url(response.url, raw_link)
             if url is None or url in seen:
                 continue
             seen.add(url)
+            reached_limit = len(seen) >= limit
             summary = _child_text(entry, "summary") or _child_text(entry, "description") or ""
             published = (
                 _child_text(entry, "published")
@@ -60,19 +72,78 @@ class FeedCollector:
                 or _child_text(entry, "pubDate")
             )
             author = _author(entry)
+            if entry_match_terms:
+                entry_text = " ".join(
+                    part
+                    for part in (
+                        _child_text(entry, "title"),
+                        summary,
+                        author,
+                        url,
+                    )
+                    if part
+                ).casefold()
+                if not any(term in entry_text for term in entry_match_terms):
+                    if reached_limit:
+                        return
+                    continue
+            body = summary.encode("utf-8")
+            content_type = "text/html" if summary else None
+            item_etag = response.etag
+            item_last_modified = response.last_modified
+            item_artifact = artifact
+            if detail_match_terms:
+                try:
+                    detail = await self._http.get(
+                        fetch_request(source, context, url=url, conditional=False)
+                    )
+                    if not require_success(detail):
+                        yield CollectedFailure("detail_fetch_failed")
+                        if reached_limit:
+                            return
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except (FetchError, CollectorError, UrlSafetyError) as error:
+                    yield detail_failure(error)
+                    if reached_limit:
+                        return
+                    continue
+                detail_text = detail.body.decode("utf-8", errors="replace").casefold()
+                if not any(term in detail_text for term in detail_match_terms):
+                    if reached_limit:
+                        return
+                    continue
+                body = detail.body
+                content_type = detail.headers.get("content-type")
+                item_etag = detail.etag
+                item_last_modified = detail.last_modified
+                item_artifact = response_artifact(detail)
             yield CollectedItem(
                 url=url,
-                body=summary.encode("utf-8"),
-                content_type="text/html" if summary else None,
+                body=body,
+                content_type=content_type,
                 title=_child_text(entry, "title"),
                 author=author,
                 published_at=_parse_datetime(published),
-                etag=response.etag,
-                last_modified=response.last_modified,
-                artifact=artifact,
+                etag=item_etag,
+                last_modified=item_last_modified,
+                artifact=item_artifact,
             )
-            if len(seen) >= limit:
+            if reached_limit:
                 return
+
+
+def _match_terms(source: SourceDefinition, name: str) -> tuple[str, ...]:
+    value = source.collector_config.get(name)
+    if value is None:
+        return ()
+    if not isinstance(value, str):
+        raise CollectorError("invalid_config")
+    terms = tuple(term.strip().casefold() for term in value.split("|") if term.strip())
+    if not terms:
+        raise CollectorError("invalid_config")
+    return terms
 
 
 def _local_name(tag: str) -> str:

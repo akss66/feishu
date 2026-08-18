@@ -27,6 +27,13 @@ def test_settings_apply_safe_ingestion_defaults(monkeypatch: pytest.MonkeyPatch)
     assert settings.ingestion_dns_mode == "system"
     assert settings.snapshot_dir == Path("data/snapshots")
     assert settings.ingestion_user_agent.strip()
+    assert settings.firecrawl_api_key is None
+    assert str(settings.firecrawl_api_url).rstrip("/") == "https://api.firecrawl.dev"
+    assert settings.firecrawl_timeout_seconds == 30.0
+    assert settings.firecrawl_max_age_ms == 900_000
+    assert settings.firecrawl_max_concurrency == 1
+    assert settings.firecrawl_max_attempts == 3
+    assert settings.firecrawl_min_request_interval_seconds == 6.5
     assert settings.ingestion_scheduler_enabled is False
 
 
@@ -159,12 +166,14 @@ def test_secret_values_are_redacted_in_settings_repr(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("LARK_APP_SECRET", "do-not-print-this")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "do-not-print-that")
     monkeypatch.setenv("BOT_BIND_CODE", "do-not-print-code")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-do-not-print-firecrawl")
 
     rendered = repr(Settings(_env_file=None))
 
     assert "do-not-print-this" not in rendered
     assert "do-not-print-that" not in rendered
     assert "do-not-print-code" not in rendered
+    assert "fc-do-not-print-firecrawl" not in rendered
 
 
 @pytest.mark.filterwarnings("ignore:pkg_resources is deprecated as an API:UserWarning")

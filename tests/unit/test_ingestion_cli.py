@@ -613,6 +613,37 @@ async def test_production_application_closes_http_resolver_then_database() -> No
     assert events == ["http", "resolver", "database"]
 
 
+async def test_production_application_closes_firecrawl_before_other_network_resources() -> None:
+    events: list[str] = []
+
+    class Service:
+        pass
+
+    class Closer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def aclose(self) -> None:
+            events.append(self.name)
+
+    class Database:
+        async def dispose(self) -> None:
+            events.append("database")
+
+    app = _ProductionApplication(
+        registry=SourceRegistry([]),
+        service=Service(),  # type: ignore[arg-type]
+        database=Database(),  # type: ignore[arg-type]
+        http_client=Closer("http"),  # type: ignore[arg-type]
+        resolver_resources=(Closer("resolver"),),
+        firecrawl_client=Closer("firecrawl"),
+    )
+
+    await app.aclose()
+
+    assert events == ["firecrawl", "http", "resolver", "database"]
+
+
 async def test_cli_partial_construction_closes_http_resolver_then_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

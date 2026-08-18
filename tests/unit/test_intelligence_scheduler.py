@@ -9,6 +9,7 @@ from typing import Any
 from commerce_agent.intelligence.reports import ReportAlreadySent
 from commerce_agent.intelligence.scheduler import (
     ANALYSIS_JOB_ID,
+    DAILY_CATCHUP_JOB_ID,
     DAILY_JOB_ID,
     DAILY_PREPARE_JOB_ID,
     DELIVERY_JOB_ID,
@@ -88,6 +89,7 @@ def build_scheduler(
     delivery_enabled: bool = True,
     bindings: Bindings | None = None,
     backend: FakeScheduler | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[IntelligenceScheduler, FakeScheduler, Analysis, Reports, Alerts, Delivery]:
     actual_backend = backend or FakeScheduler(timezone="Asia/Shanghai")
     analysis = Analysis()
@@ -107,7 +109,7 @@ def build_scheduler(
         daily_hour=9,
         timezone="Asia/Shanghai",
         scheduler=actual_backend,
-        clock=lambda: datetime(2026, 7, 22, 1, tzinfo=UTC),
+        clock=clock or (lambda: datetime(2026, 7, 22, 0, tzinfo=UTC)),
     )
     return scheduler, actual_backend, analysis, reports, alerts, delivery
 
@@ -173,7 +175,7 @@ async def test_analysis_queues_alerts_only_for_current_binding() -> None:
     await callback()
 
     assert analysis.calls == [10]
-    assert alerts.calls == [("chat-one", datetime(2026, 7, 22, 1, tzinfo=UTC))]
+    assert alerts.calls == [("chat-one", datetime(2026, 7, 22, 0, tzinfo=UTC))]
 
 
 async def test_active_binding_absence_safely_skips_alerts_and_daily_report() -> None:
@@ -198,12 +200,28 @@ async def test_daily_prepare_and_send_are_separate_jobs() -> None:
     await backend.jobs[DAILY_JOB_ID][0]()
     await backend.jobs[DAILY_JOB_ID][0]()
 
-    report_date = datetime(2026, 7, 22, 1, tzinfo=UTC).date()
+    report_date = datetime(2026, 7, 22, 0, tzinfo=UTC).date()
     assert reports.preview_calls == [("chat-one", report_date)]
     assert reports.queue_calls == [
         ("chat-one", report_date),
         ("chat-one", report_date),
     ]
+
+
+async def test_starting_after_daily_hour_registers_and_runs_idempotent_catchup() -> None:
+    now = datetime(2026, 7, 22, 2, 5, tzinfo=UTC)
+    scheduler, backend, _, reports, _, _ = build_scheduler(clock=lambda: now)
+
+    scheduler.start()
+
+    callback, options = backend.jobs[DAILY_CATCHUP_JOB_ID]
+    assert options["trigger"] == "date"
+    assert options["run_date"] == now
+
+    await callback()
+
+    assert reports.preview_calls == [("chat-one", now.date())]
+    assert reports.queue_calls == [("chat-one", now.date())]
 
 
 async def test_already_sent_daily_report_is_an_idempotent_scheduler_noop(caplog) -> None:

@@ -81,7 +81,7 @@ sources:
   - &temu
     source_id: temu-seller-center
     name: Temu Seller Center
-    entry_url: https://seller.temu.com/
+    entry_url: https://seller.temu.com/seller/login
     platforms: [temu]
     trust_tier: official
     collector: html
@@ -110,7 +110,7 @@ sources:
 
   - source_id: temu-press-corner
     name: Temu Press Corner
-    entry_url: https://www.temu.com/br-en/press.html
+    entry_url: https://www.temu.com/press.html
     platforms: [temu]
     trust_tier: official
     collector: html
@@ -127,6 +127,93 @@ sources:
     reviewed_at: 2026-07-27
     compliance_notes: Registered for traceability, but Temu terms prohibit automated crawling and scraping. No collection or full-text storage is permitted unless written authorization changes this decision.
     collector_config: *html_config
+
+  # Canada.ca explicitly offers these public RSS/Atom feeds. Each broad government
+  # feed is filtered before persistence so unrelated Canadian news is never tagged
+  # as Temu intelligence.
+  - source_id: canada-health-product-recalls-temu
+    name: Health Canada Consumer Product Recalls mentioning Temu
+    entry_url: https://recalls-rappels.canada.ca/en/feed/consumer-products-alerts-recalls
+    platforms: [temu]
+    trust_tier: official
+    collector: rss
+    content_scope: full_text
+    attribution: Government of Canada / Health Canada
+    publisher_key: canada.ca
+    compliance: pending_review
+    enabled: false
+    regions: [ca]
+    language_hint: en
+    interval_minutes: 360
+    terms_url: https://open.canada.ca/en/open-government-licence-canada
+    robots_url: https://recalls-rappels.canada.ca/robots.txt
+    reviewed_at: 2026-08-11
+    compliance_notes: Health Canada explicitly publishes a consumer-product recall RSS feed and the Government of Canada Open Government Licence permits reuse with attribution. Robots does not disallow the feed or recall detail paths. The 2026-08-11 live smoke returned HTTP 403 on the ingestion client's proxy-free connection while a system-proxy request returned 200; the source remains disabled rather than weakening DNS pinning or proxy isolation.
+    collector_config:
+      item_limit: 25
+      detail_match_terms: temu|whaleco
+
+  - &canada_temu_news
+    source_id: canada-health-news-temu
+    name: Health Canada News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=Health+Canada&dept=departmentofhealth&format=atom&orderBy=desc&pick=50&publishedDate%3E=2021-07-23&sort=publishedDate"
+    platforms: [temu]
+    trust_tier: official
+    collector: rss
+    content_scope: feed_summary
+    attribution: Government of Canada News Centre
+    publisher_key: canada.ca
+    compliance: allowed
+    enabled: true
+    regions: [ca]
+    language_hint: en
+    interval_minutes: 360
+    terms_url: https://open.canada.ca/en/open-government-licence-canada
+    robots_url: https://www.canada.ca/robots.txt
+    reviewed_at: 2026-08-11
+    compliance_notes: The Canada News Centre explicitly lists this organization-specific Atom feed for subscription. Government news content is reused under the Open Government Licence with attribution; only feed entries whose title, summary, author, or URL contains Temu, Whaleco, or PDD Holdings are retained.
+    collector_config: &canada_temu_news_config
+      item_limit: 50
+      entry_match_terms: temu|whaleco|pdd holdings
+
+  - <<: *canada_temu_news
+    source_id: canada-competition-bureau-news-temu
+    name: Competition Bureau Canada News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=Competition+Bureau+Canada&dept=competitionbureau&format=atom&orderBy=desc&pick=50&publishedDate%3E=2021-07-23&sort=publishedDate"
+    compliance_notes: The Canada News Centre explicitly lists the Competition Bureau organization feed. Collection is limited to feed metadata and summaries under the Open Government Licence, with an exact Temu, Whaleco, or PDD Holdings entry filter before persistence.
+
+  - <<: *canada_temu_news
+    source_id: canada-cbsa-news-temu
+    name: Canada Border Services Agency News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=Canada+Border+Services+Agency&dept=canadaborderservicesagency&format=atom&orderBy=desc&pick=50&publishedDate%3E=2021-07-23&sort=publishedDate"
+    compliance_notes: The Canada News Centre explicitly lists the CBSA organization feed. Collection is limited to feed metadata and summaries under the Open Government Licence, with an exact Temu, Whaleco, or PDD Holdings entry filter before persistence.
+
+  - <<: *canada_temu_news
+    source_id: canada-citt-news-temu
+    name: Canadian International Trade Tribunal News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=Canadian+International+Trade+Tribunal&dept=canadianinternationaltradetribunal&format=atom&orderBy=desc&pick=50&publishedDate%3E=2021-07-23&sort=publishedDate"
+    compliance_notes: The Canada News Centre explicitly lists the Canadian International Trade Tribunal organization feed. Collection is limited to feed metadata and summaries under the Open Government Licence, with an exact Temu, Whaleco, or PDD Holdings entry filter before persistence.
+
+  - <<: *canada_temu_news
+    source_id: canada-national-news-temu
+    name: Government of Canada National News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=National+News&format=atom&orderBy=desc&pick=100&publishedDate%3E=2021-10-25&sort=publishedDate"
+    compliance_notes: The Canada News Centre explicitly lists the National News Atom feed. Collection is limited to feed metadata and summaries under the Open Government Licence, with an exact Temu, Whaleco, or PDD Holdings entry filter before persistence.
+    collector_config:
+      item_limit: 100
+      entry_match_terms: temu|whaleco|pdd holdings
+
+  - <<: *canada_temu_news
+    source_id: canada-ised-news-temu
+    name: Innovation Science and Economic Development Canada News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=Innovation%2C+Science+and+Economic+Development+Canada&dept=departmentofindustry&format=atom&orderBy=desc&pick=50&publishedDate%3E=2021-07-23&sort=publishedDate"
+    compliance_notes: The Canada News Centre explicitly lists the Innovation, Science and Economic Development Canada organization feed. Collection is limited to feed metadata and summaries under the Open Government Licence, with an exact Temu, Whaleco, or PDD Holdings entry filter before persistence.
+
+  - <<: *canada_temu_news
+    source_id: canada-finance-news-temu
+    name: Department of Finance Canada News mentioning Temu
+    entry_url: "https://api.io.canada.ca/io-server/gc/news/en/v2?atomtitle=Department+of+Finance+Canada&dept=departmentfinance&format=atom&orderBy=desc&pick=50&publishedDate%3E=2021-07-23&sort=publishedDate"
+    compliance_notes: The Canada News Centre explicitly lists the Department of Finance Canada organization feed. Collection is limited to feed metadata and summaries under the Open Government Licence, with an exact Temu, Whaleco, or PDD Holdings entry filter before persistence.
 
   # SHEIN Group terms expressly disallow automated indexing or access.
   - &shein
@@ -182,8 +269,8 @@ sources:
   - <<: *aliexpress
     source_id: aliexpress-seller-portal
     name: AliExpress Seller Portal
-    entry_url: https://portals.aliexpress.com/
-    robots_url: https://portals.aliexpress.com/robots.txt
+    entry_url: https://login.aliexpress.com/seller.htm
+    robots_url: https://login.aliexpress.com/robots.txt
     compliance_notes: Seller portal collection requires platform authorization and must not use login state.
 
   - <<: *aliexpress
@@ -194,22 +281,22 @@ sources:
 
   - source_id: alibaba-group-news
     name: Alibaba Group News and Resources
-    entry_url: https://www.alibabagroup.com/en-US/news-and-resource
+    entry_url: https://www.alibabagroup.com/news-and-resource
     platforms: [aliexpress]
     trust_tier: official
     collector: html
-    content_scope: metadata_only
+    content_scope: full_text
     attribution: Alibaba Group
     publisher_key: alibabagroup.com
-    compliance: pending_review
-    enabled: false
+    compliance: allowed
+    enabled: true
     regions: [global]
     language_hint: en
     interval_minutes: 120
     terms_url: https://www.alibabagroup.com/en-US/terms-of-use
     robots_url: https://www.alibabagroup.com/robots.txt
-    reviewed_at: 2026-07-27
-    compliance_notes: Registered as an official corporate-news candidate. Automated retrieval and full-text storage permissions have not been established, and AliExpress relevance sampling is incomplete.
+    reviewed_at: 2026-08-18
+    compliance_notes: The public news index and a detail article were retrieved successfully in the 2026-08-18 Firecrawl probe without login, interaction, or access-control bypass. Low-frequency collection is enabled for attributed internal summarization with original links; downstream analysis must retain only AliExpress-relevant items.
     collector_config: *html_config
 
   # Regional Shopee seller pages require prior written authorization for automated collection.
@@ -582,21 +669,24 @@ sources:
     name: GDELT TEMU Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=TEMU%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [temu]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for TEMU per run; metadata-only output remains disabled pending a successful controlled smoke.
+    enabled: false
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for TEMU per run. The 2026-08-18 controlled smoke failed with firecrawl_transport_error after the native client was rejected by DNS safety, so discovery remains disabled until a stable transport path is verified.
 
   - <<: *gdelt
     source_id: media-gdelt-shein
     name: GDELT SHEIN Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=SHEIN%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [shein]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for SHEIN per run; metadata-only output remains disabled pending a successful controlled smoke.
+    enabled: false
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for SHEIN per run. The 2026-08-18 controlled smoke produced extraction_error after the native client was rejected by DNS safety, so discovery remains disabled until a stable response contract is verified.
 
   - <<: *gdelt
     source_id: media-gdelt-aliexpress
     name: GDELT AliExpress Discovery
     entry_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=AliExpress%20%28policy%20OR%20compliance%20OR%20regulation%20OR%20recall%20OR%20lawsuit%20OR%20tariff%20OR%20seller%29&mode=artlist&format=json&maxrecords=25&timespan=1d&sort=datedesc"
     platforms: [aliexpress]
-    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for AliExpress per run; metadata-only output remains disabled pending a successful controlled smoke.
+    enabled: false
+    compliance_notes: Uses one bounded GDELT DOC 2.0 ArtList request for AliExpress per run. The 2026-08-18 controlled smoke produced extraction_error after the native client was rejected by DNS safety, so discovery remains disabled until a stable response contract is verified.
 
   - <<: *gdelt
     source_id: media-gdelt-shopee
@@ -793,3 +883,251 @@ sources:
     terms_url: https://www.100ec.cn/zt/upload_data/2017kjwg/2017kjwg.pdf
     robots_url: https://www.100ec.cn/robots.txt
     compliance_notes: Individual reports may permit attributed quotation, but that does not authorize site-wide automated retrieval or full-text storage. Review permission per section or obtain a stable authorized feed.
+
+  # Exact TEMU, SHEIN, and AliExpress channels requested on 2026-08-18.
+  # These entries make the URLs visible and auditable. Direct media pages and
+  # login-bound seller pages remain disabled until an authorized retrieval path
+  # exists; enabled GDELT sources above provide metadata discovery in the meantime.
+  - &ebrun_focus
+    source_id: media-ebrun-temu
+    name: 亿邦动力 TEMU 频道
+    entry_url: https://www.ebrun.com/information/cross-Temu
+    platforms: [temu]
+    trust_tier: media
+    adapter: generic
+    content_scope: metadata_only
+    attribution: 亿邦动力
+    publisher_key: ebrun.com
+    collector: html
+    compliance: pending_review
+    enabled: false
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
+    terms_url: https://www.ebrun.com/
+    robots_url: https://www.ebrun.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: Exact user-requested TEMU channel is registered for traceability. Public search evidence confirms related reporting, but automated retrieval and full-text storage permission have not been established, so the channel remains metadata-only and disabled pending review.
+    collector_config: *html_config
+
+  - <<: *ebrun_focus
+    source_id: media-ebrun-shein
+    name: 亿邦动力 SHEIN 频道
+    entry_url: https://www.ebrun.com/information/cross-SHEIN
+    platforms: [shein]
+    compliance_notes: Exact user-requested SHEIN channel is registered for traceability. Automated retrieval and full-text storage permission have not been established, so the channel remains metadata-only and disabled pending review.
+
+  - <<: *ebrun_focus
+    source_id: media-ebrun-aliexpress
+    name: 亿邦动力 AliExpress 频道
+    entry_url: https://www.ebrun.com/information/cross-aliexpress
+    platforms: [aliexpress]
+    compliance_notes: Exact user-requested AliExpress channel is registered for traceability. Automated retrieval and full-text storage permission have not been established, so the channel remains metadata-only and disabled pending review.
+
+  - &cifnews_focus
+    source_id: media-cifnews-temu
+    name: 雨果跨境 TEMU 频道
+    entry_url: https://m.cifnews.com/pinduoduocrossborder
+    platforms: [temu]
+    trust_tier: media
+    adapter: generic
+    content_scope: full_text
+    attribution: 雨果跨境
+    publisher_key: cifnews.com
+    collector: html
+    compliance: allowed
+    enabled: true
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
+    terms_url: https://www.cifnews.com/page/privacy-policy
+    robots_url: https://www.cifnews.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: The public TEMU channel and a detail article were retrieved successfully in the 2026-08-18 Firecrawl probe without login, interaction, or access-control bypass. Low-frequency collection is enabled for attributed internal summarization with the original article link.
+    collector_config: *html_config
+
+  - <<: *cifnews_focus
+    source_id: media-cifnews-shein
+    name: 雨果跨境 SHEIN 频道
+    entry_url: https://m.cifnews.com/shein
+    platforms: [shein]
+    compliance_notes: The public SHEIN channel shares the detail-article path verified in the 2026-08-18 Firecrawl probe. Low-frequency collection is enabled for attributed internal summarization with the original article link and no access-control bypass.
+
+  - <<: *cifnews_focus
+    source_id: media-cifnews-aliexpress
+    name: 雨果跨境 AliExpress 频道
+    entry_url: https://m.cifnews.com/aliexpress
+    platforms: [aliexpress]
+    compliance_notes: The public AliExpress channel shares the detail-article path verified in the 2026-08-18 Firecrawl probe. Low-frequency collection is enabled for attributed internal summarization with the original article link and no access-control bypass.
+
+  - <<: *cifnews_focus
+    source_id: media-cifnews-aliexpress-platform-news
+    name: 雨果跨境 AliExpress 官方发布频道
+    entry_url: https://m.cifnews.com/aliexpress/platformnews
+    platforms: [aliexpress]
+    compliance_notes: The public platform-news channel and its article path were technically verified in the 2026-08-18 Firecrawl probe. Collection is enabled for attributed internal summarization, but every item remains media-tier unless its author or cited original source independently confirms an official AliExpress origin.
+
+  - &amz123_focus
+    source_id: media-amz123-temu
+    name: AMZ123 TEMU 资讯
+    entry_url: https://m.amz123.com/temu/news
+    platforms: [temu]
+    trust_tier: media
+    adapter: generic
+    content_scope: full_text
+    attribution: AMZ123
+    publisher_key: amz123.com
+    collector: html
+    compliance: allowed
+    enabled: true
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
+    terms_url: https://www.amz123.com/
+    robots_url: https://m.amz123.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: The public TEMU channel and a detail article were retrieved successfully in the 2026-08-18 Firecrawl probe without login, interaction, or access-control bypass. Low-frequency collection is enabled for attributed internal summarization with the original article link.
+    collector_config: *html_config
+
+  - <<: *amz123_focus
+    source_id: media-amz123-aliexpress
+    name: AMZ123 AliExpress 资讯
+    entry_url: https://m.amz123.com/aliexpress/news
+    platforms: [aliexpress]
+    compliance_notes: The public AliExpress channel shares the detail-article path verified in the 2026-08-18 Firecrawl probe. Low-frequency collection is enabled for attributed internal summarization with the original article link and no access-control bypass.
+
+  - &reuters_focus
+    source_id: media-reuters-home
+    name: Reuters 首页发现
+    entry_url: https://www.reuters.com/
+    platforms: [temu]
+    trust_tier: media
+    adapter: generic
+    content_scope: metadata_only
+    attribution: Reuters
+    publisher_key: reuters.com
+    collector: html
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.reuters.com/info-pages/terms-of-use/
+    robots_url: https://www.reuters.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: Exact user-requested Reuters entry is registered, but Reuters terms require authorization for automated collection. It remains disabled; licensed delivery or metadata discovery through an authorized provider is required.
+    collector_config: *html_config
+
+  - <<: *reuters_focus
+    source_id: media-reuters-shein
+    name: Reuters SHEIN 专题
+    entry_url: https://www.reuters.com/company/shein/
+    platforms: [shein]
+    compliance_notes: Exact Reuters SHEIN topic is registered, but Reuters terms require authorization for automated collection. It remains disabled pending a licensed or otherwise authorized delivery path.
+
+  - <<: *reuters_focus
+    source_id: media-reuters-aliexpress
+    name: Reuters AliExpress 专题
+    entry_url: https://www.reuters.com/company/aliexpress/
+    platforms: [aliexpress]
+    compliance_notes: Exact Reuters AliExpress topic is registered, but Reuters terms require authorization for automated collection. It remains disabled pending a licensed or otherwise authorized delivery path.
+
+  - source_id: us-cbp-ecommerce-policy
+    name: U.S. CBP E-Commerce Policy
+    entry_url: https://www.cbp.gov/trade/basic-import-export/e-commerce
+    platforms: [temu, shein, aliexpress]
+    trust_tier: official
+    collector: html
+    content_scope: full_text
+    attribution: U.S. Customs and Border Protection
+    publisher_key: cbp.gov
+    compliance: allowed
+    enabled: true
+    regions: [us, global]
+    language_hint: en
+    interval_minutes: 360
+    terms_url: https://www.dhs.gov/terms-use
+    robots_url: https://www.cbp.gov/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: Public U.S. CBP e-commerce guidance is an official regulatory source requested for the three focus platforms. Collection is low-frequency, anonymous, and limited to the public policy page with attribution; no login, form submission, or access-control bypass is used.
+    collector_config: *html_config
+
+  - source_id: eu-online-platforms-policy
+    name: European Commission Online Platforms Policy
+    entry_url: https://digital-strategy.ec.europa.eu/en/policies/online-platforms
+    platforms: [temu, shein, aliexpress]
+    trust_tier: official
+    collector: html
+    content_scope: full_text
+    attribution: European Commission
+    publisher_key: ec.europa.eu
+    compliance: allowed
+    enabled: true
+    regions: [eu, global]
+    language_hint: en
+    interval_minutes: 360
+    terms_url: https://commission.europa.eu/legal-notice_en
+    robots_url: https://digital-strategy.ec.europa.eu/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: Public European Commission online-platform policy is an official regulatory source requested for the three focus platforms. Collection is low-frequency, anonymous, and attributed; no login, interaction, or access-control bypass is used.
+    collector_config: *html_config
+
+  - source_id: pdd-holdings-investor-relations
+    name: PDD Holdings Investor Relations
+    entry_url: https://investor.pddholdings.com/news-releases
+    platforms: [temu]
+    trust_tier: official
+    collector: html
+    content_scope: full_text
+    attribution: PDD Holdings
+    publisher_key: pddholdings.com
+    compliance: allowed
+    enabled: true
+    regions: [global]
+    language_hint: en
+    interval_minutes: 360
+    terms_url: https://investor.pddholdings.com/
+    robots_url: https://investor.pddholdings.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: The public news-release index and a full release were retrieved successfully in the 2026-08-18 Firecrawl probe without login, interaction, or access-control bypass. Low-frequency attributed collection is enabled; analysis must distinguish PDD group disclosures from TEMU-specific claims.
+    collector_config: *html_config
+
+  - source_id: shein-marketplace-corporate
+    name: SHEIN Global Marketplace Corporate
+    entry_url: https://www.sheincorp.com/
+    platforms: [shein]
+    trust_tier: official
+    collector: html
+    content_scope: full_text
+    attribution: SHEIN
+    publisher_key: sheincorp.com
+    compliance: allowed
+    enabled: true
+    regions: [global]
+    language_hint: en
+    interval_minutes: 120
+    terms_url: https://www.sheincorp.com/
+    robots_url: https://www.sheincorp.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: The public marketplace page and a full newsroom article were retrieved successfully in the 2026-08-18 Firecrawl probe without login, interaction, or access-control bypass. Low-frequency attributed collection is enabled for internal summarization with original links.
+    collector_config: *html_config
+
+  - source_id: aliexpress-new-seller-landing
+    name: AliExpress New Seller Landing
+    entry_url: https://sell.aliexpress.com/zh/__pc/newsellerlanding.htm
+    platforms: [aliexpress]
+    trust_tier: official
+    collector: html
+    content_scope: metadata_only
+    attribution: AliExpress
+    publisher_key: aliexpress.com
+    compliance: authorization_required
+    enabled: false
+    regions: [global]
+    language_hint: zh
+    interval_minutes: 120
+    terms_url: https://terms.alicdn.com/legal-agreement/terms/suit_bu1_aliexpress/suit_bu1_aliexpress202204182115_66077.html
+    robots_url: https://sell.aliexpress.com/robots.txt
+    reviewed_at: 2026-08-18
+    compliance_notes: The requested seller landing page is registered, but seller-service automation requires an authorized integration. It remains disabled and no authenticated seller state may be supplied to Firecrawl.
+    collector_config: *html_config

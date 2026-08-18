@@ -72,6 +72,7 @@ def test_catalog_access_decisions_match_the_compliance_review() -> None:
         "dsb.cn": ArticleAccess.METADATA_ONLY,
         "100ec.cn": ArticleAccess.METADATA_ONLY,
         "ebrun.com": ArticleAccess.METADATA_ONLY,
+        "amz123.com": ArticleAccess.METADATA_ONLY,
         "baijing.cn": ArticleAccess.METADATA_ONLY,
         "36kr.com": ArticleAccess.METADATA_ONLY,
     }

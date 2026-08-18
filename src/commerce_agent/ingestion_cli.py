@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, TextIO
 
-from pydantic import Field
+from pydantic import Field, HttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import select
 
@@ -21,6 +21,7 @@ from commerce_agent.ingestion.collectors import (
     ApiCollector,
     BrowserCollector,
     FeedCollector,
+    FirecrawlFirstCollector,
     HtmlCollector,
     SitemapCollector,
 )
@@ -38,6 +39,7 @@ from commerce_agent.ingestion.models import (
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.service import IngestionService
 from commerce_agent.ingestion.snapshots import SnapshotStore
+from commerce_agent.integrations.firecrawl import FirecrawlClient
 from commerce_agent.persistence.database import Database
 from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
 from commerce_agent.persistence.models import SourceHealth
@@ -64,6 +66,13 @@ class _IngestionSettings(BaseSettings):
     ingestion_dns_mode: Literal["system", "cloudflare_doh"] = "system"
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
+    firecrawl_api_key: SecretStr | None = None
+    firecrawl_api_url: HttpUrl = HttpUrl("https://api.firecrawl.dev")
+    firecrawl_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    firecrawl_max_age_ms: int = Field(default=900_000, ge=0, le=86_400_000)
+    firecrawl_max_concurrency: int = Field(default=1, ge=1, le=8)
+    firecrawl_max_attempts: int = Field(default=3, ge=1, le=5)
+    firecrawl_min_request_interval_seconds: float = Field(default=6.5, ge=0, le=60)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,12 +113,14 @@ class _ProductionApplication:
         database: Database,
         http_client: IngestionHttpClient,
         resolver_resources: tuple[AsyncCloser, ...],
+        firecrawl_client: AsyncCloser | None = None,
     ) -> None:
         self.registry = registry
         self._service = service
         self._database = database
         self._http_client = http_client
         self._resolver_resources = resolver_resources
+        self._firecrawl_client = firecrawl_client
 
     async def run_all(self) -> tuple[RunSummary, ...]:
         return await self._service.run_all(Trigger.MANUAL)
@@ -132,8 +143,14 @@ class _ProductionApplication:
         )
 
     async def aclose(self) -> None:
+        resources: tuple[AsyncCloser, ...] = (
+            self._http_client,
+            *self._resolver_resources,
+        )
+        if self._firecrawl_client is not None:
+            resources = (self._firecrawl_client, *resources)
         await _close_application_resources(
-            (self._http_client, *self._resolver_resources),
+            resources,
             self._database,
         )
 
@@ -156,6 +173,7 @@ async def build_application() -> CliApplication:
     registry = build_registry()
     database = Database(settings.database_url)
     http_client: IngestionHttpClient | None = None
+    firecrawl_client: FirecrawlClient | None = None
     resolver_resources: tuple[AsyncCloser, ...] = ()
     try:
         await database.create_schema()
@@ -183,6 +201,22 @@ async def build_application() -> CliApplication:
                 timeout_seconds=settings.ingestion_http_timeout_seconds,
             ),
         }
+        if settings.firecrawl_api_key is not None:
+            firecrawl_client = FirecrawlClient(
+                api_key=settings.firecrawl_api_key,
+                api_url=str(settings.firecrawl_api_url).rstrip("/"),
+                timeout_seconds=settings.firecrawl_timeout_seconds,
+                max_age_ms=settings.firecrawl_max_age_ms,
+                max_concurrency=settings.firecrawl_max_concurrency,
+                max_attempts=settings.firecrawl_max_attempts,
+                min_request_interval_seconds=(
+                    settings.firecrawl_min_request_interval_seconds
+                ),
+            )
+            collectors = {
+                kind: FirecrawlFirstCollector(firecrawl_client, collector)
+                for kind, collector in collectors.items()
+            }
         service = IngestionService(
             registry=registry,
             compliance=CompliancePolicy(),
@@ -198,12 +232,15 @@ async def build_application() -> CliApplication:
             database=database,
             http_client=http_client,
             resolver_resources=resolver_resources,
+            firecrawl_client=firecrawl_client,
         )
     except BaseException:
         try:
             resources: tuple[AsyncCloser, ...] = resolver_resources
             if http_client is not None:
                 resources = (http_client, *resources)
+            if firecrawl_client is not None:
+                resources = (firecrawl_client, *resources)
             await _close_application_resources(resources, database)
         except BaseException:
             pass

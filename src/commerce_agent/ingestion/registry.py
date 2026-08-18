@@ -73,7 +73,9 @@ _REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {
     "publisher_key",
 }
 _CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
-    CollectorKind.RSS: frozenset({"item_limit"}),
+    CollectorKind.RSS: frozenset(
+        {"item_limit", "entry_match_terms", "detail_match_terms"}
+    ),
     CollectorKind.SITEMAP: frozenset({"item_limit"}),
     CollectorKind.HTML: frozenset({"link_selector", "article_selector", "item_limit"}),
     CollectorKind.API: frozenset(
