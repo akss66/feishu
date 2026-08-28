@@ -331,6 +331,7 @@ async def _build_ingestion(
         ApiCollector,
         BrowserCollector,
         FeedCollector,
+        FirecrawlFirstCollector,
         HtmlCollector,
         SitemapCollector,
     )
@@ -342,12 +343,14 @@ async def _build_ingestion(
     from commerce_agent.ingestion.service import IngestionService
     from commerce_agent.ingestion.snapshots import SnapshotStore
     from commerce_agent.ingestion_cli import build_registry
+    from commerce_agent.integrations.firecrawl import FirecrawlClient
     from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
 
     registry = build_registry()
     repository = SqlAlchemyIngestionRepository(database.session)
     resolver_bundle = build_resolver_bundle(settings.ingestion_dns_mode)
     http_client: IngestionHttpClient | None = None
+    firecrawl_client: FirecrawlClient | None = None
     try:
         http_client = IngestionHttpClient(
             safety_policy=resolver_bundle.safety_policy,
@@ -373,6 +376,23 @@ async def _build_ingestion(
                 timeout_seconds=settings.ingestion_http_timeout_seconds,
             ),
         }
+        firecrawl_key = getattr(settings, "firecrawl_api_key", None)
+        if firecrawl_key is not None:
+            firecrawl_client = FirecrawlClient(
+                api_key=firecrawl_key,
+                api_url=str(settings.firecrawl_api_url).rstrip("/"),
+                timeout_seconds=settings.firecrawl_timeout_seconds,
+                max_age_ms=settings.firecrawl_max_age_ms,
+                max_concurrency=settings.firecrawl_max_concurrency,
+                max_attempts=settings.firecrawl_max_attempts,
+                min_request_interval_seconds=(
+                    settings.firecrawl_min_request_interval_seconds
+                ),
+            )
+            collectors = {
+                kind: FirecrawlFirstCollector(firecrawl_client, collector)
+                for kind, collector in collectors.items()
+            }
         service = IngestionService(
             registry=registry,
             compliance=CompliancePolicy(),
@@ -392,11 +412,16 @@ async def _build_ingestion(
             ),
             timezone="UTC",
         )
-        return scheduler, (http_client, *resolver_bundle.resources)
+        owned_resources: tuple[Any, ...] = (http_client, *resolver_bundle.resources)
+        if firecrawl_client is not None:
+            owned_resources = (firecrawl_client, *owned_resources)
+        return scheduler, owned_resources
     except BaseException:
         resources: tuple[Any, ...] = resolver_bundle.resources
         if http_client is not None:
             resources = (http_client, *resources)
+        if firecrawl_client is not None:
+            resources = (firecrawl_client, *resources)
         for resource in resources:
             try:
                 await resource.aclose()

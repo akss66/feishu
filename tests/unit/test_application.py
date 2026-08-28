@@ -126,6 +126,26 @@ async def test_bound_group_changes_profile_and_reports_old_to_new() -> None:
     assert preferences.values["chat-one"] is RiskProfile.AGGRESSIVE
 
 
+async def test_bound_group_accepts_bracketed_or_standalone_profile_choice() -> None:
+    bindings = FakeBindingStore()
+    bindings.active_chat_id = "chat-one"
+    preferences = FakePreferences()
+    service = BotService(
+        bindings,
+        FakeLLM(),
+        bind_code="correct-code",
+        risk_profiles=preferences,
+        clock=lambda: datetime(2026, 7, 22, tzinfo=UTC),
+    )
+
+    bracketed = await service.handle(message("策略 [激进]"))
+    standalone = await service.handle(message("保守"))
+
+    assert "默认 → 激进" in bracketed
+    assert "激进 → 保守" in standalone
+    assert preferences.values["chat-one"] is RiskProfile.CONSERVATIVE
+
+
 async def test_unbound_group_cannot_query_or_change_profile() -> None:
     bindings = FakeBindingStore()
     bindings.active_chat_id = "chat-one"

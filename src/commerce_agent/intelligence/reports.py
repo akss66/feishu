@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     )
 
 _RISK_ORDER = {RiskLevel.LOW: 1, RiskLevel.MEDIUM: 2, RiskLevel.HIGH: 3}
+_PLATFORM_PRIORITY = {
+    Platform.TEMU: 3,
+    Platform.SHEIN: 2,
+    Platform.ALIEXPRESS: 1,
+}
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _PLATFORM_LABELS = {
     Platform.AMAZON: "Amazon",
@@ -108,9 +113,13 @@ def report_window(report_date: date, timezone: ZoneInfo) -> tuple[datetime, date
     return start_local.astimezone(UTC), end_local.astimezone(UTC)
 
 
-def rank_key(item: ScoredAnalysis) -> tuple[int, int, int, datetime, int]:
+def rank_key(item: ScoredAnalysis) -> tuple[int, int, int, int, datetime, int]:
     return (
         _RISK_ORDER[item.resolution.risk_level],
+        max(
+            (_PLATFORM_PRIORITY.get(platform, 0) for platform in item.candidate.platforms),
+            default=0,
+        ),
         item.evidence_confidence,
         int(item.candidate.trust_tier is TrustTier.OFFICIAL),
         item.candidate.fetched_at,

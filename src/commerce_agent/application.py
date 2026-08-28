@@ -116,7 +116,7 @@ class BotService:
         if command.kind is CommandKind.HELP:
             help_text = "可用命令：\n- 帮助\n- 状态\n- 绑定本群 <绑定码>\n- AI测试 <问题>"
             if self._risk_profiles is not None:
-                help_text += "\n- 策略 [保守|默认|激进]"
+                help_text += "\n- 策略 保守 / 策略 默认 / 策略 激进"
             return help_text
         if command.kind is CommandKind.STATUS:
             if await self._bindings.is_active(message.chat_id):

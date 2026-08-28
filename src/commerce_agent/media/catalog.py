@@ -98,6 +98,7 @@ _PUBLISHERS = (
         ("100ec.cn",),
     ),
     PublisherProfile("ebrun.com", "亿邦动力", _CHINESE, _METADATA_ONLY, ("ebrun.com",)),
+    PublisherProfile("amz123.com", "AMZ123", _CHINESE, _METADATA_ONLY, ("amz123.com",)),
     PublisherProfile("baijing.cn", "白鲸出海", _CHINESE, _METADATA_ONLY, ("baijing.cn",)),
     PublisherProfile("36kr.com", "36氪", _CHINESE, _METADATA_ONLY, ("36kr.com",)),
     PublisherProfile(

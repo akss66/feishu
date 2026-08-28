@@ -994,6 +994,32 @@ async def test_untrusted_detail_failure_code_is_replaced_with_controlled_fallbac
     assert snapshots.saved == []
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "firecrawl_auth_failed",
+        "firecrawl_failed",
+        "firecrawl_invalid_response",
+        "firecrawl_rate_limited",
+        "firecrawl_request_failed",
+        "firecrawl_service_error",
+        "firecrawl_transport_error",
+    ],
+)
+async def test_firecrawl_failure_codes_remain_visible(error_code: str) -> None:
+    collector = FakeCollector([CollectedFailure(error_code), item(b"good", suffix="good")])
+    ingestion, _, _ = service(
+        [source()],
+        {CollectorKind.RSS: collector},
+    )
+
+    summary = await ingestion.run_source("amazon-news", Trigger.MANUAL)
+
+    assert summary.status is RunStatus.PARTIAL
+    assert summary.error_code == error_code
+    assert summary.error_summary == error_code
+
+
 async def test_run_summary_stably_classifies_create_update_and_duplicate() -> None:
     repository = FakeRepository(
         outcomes=[

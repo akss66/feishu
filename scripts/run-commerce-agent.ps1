@@ -38,11 +38,14 @@ if (-not $PythonPath -or -not (Test-Path -LiteralPath $PythonPath -PathType Leaf
 
 $runtimeDirectory = Join-Path $projectRoot "data\runtime"
 New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd"
-$standardLog = Join-Path $runtimeDirectory "bot-$stamp.stdout.log"
-$errorLog = Join-Path $runtimeDirectory "bot-$stamp.stderr.log"
-
+$restartDelaySeconds = 10
 $ErrorActionPreference = "Continue"
-& $PythonPath -m commerce_agent 1>> $standardLog 2>> $errorLog
-$agentExitCode = $LASTEXITCODE
-exit $agentExitCode
+while ($true) {
+    $stamp = Get-Date -Format "yyyyMMdd"
+    $standardLog = Join-Path $runtimeDirectory "bot-$stamp.stdout.log"
+    $errorLog = Join-Path $runtimeDirectory "bot-$stamp.stderr.log"
+
+    & $PythonPath -m commerce_agent 1>> $standardLog 2>> $errorLog
+    $agentExitCode = $LASTEXITCODE
+    Start-Sleep -Seconds $restartDelaySeconds
+}

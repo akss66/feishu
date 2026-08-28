@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     ingestion_dns_mode: Literal["system", "cloudflare_doh"] = "system"
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
+    firecrawl_api_key: SecretStr | None = None
+    firecrawl_api_url: HttpUrl = HttpUrl("https://api.firecrawl.dev")
+    firecrawl_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    firecrawl_max_age_ms: int = Field(default=900_000, ge=0, le=86_400_000)
+    firecrawl_max_concurrency: int = Field(default=1, ge=1, le=8)
+    firecrawl_max_attempts: int = Field(default=3, ge=1, le=5)
+    firecrawl_min_request_interval_seconds: float = Field(default=6.5, ge=0, le=60)
     ingestion_scheduler_enabled: bool = False
     gdelt_original_fetch_enabled: bool = False
     gdelt_original_fetch_max_per_source: int = Field(default=5, ge=1, le=25)
@@ -88,6 +95,13 @@ class Settings(BaseSettings):
     def reject_blank_ingestion_user_agent(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("ingestion user agent must not be blank")
+        return value
+
+    @field_validator("firecrawl_api_key")
+    @classmethod
+    def reject_blank_optional_firecrawl_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("firecrawl api key must not be blank")
         return value
 
     @model_validator(mode="after")

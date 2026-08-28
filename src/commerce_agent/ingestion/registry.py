@@ -76,7 +76,9 @@ _REQUIRED_SOURCE_FIELDS = _SOURCE_FIELDS - {
     "strict_coverage_platforms",
 }
 _CONFIG_FIELDS: dict[CollectorKind, frozenset[str]] = {
-    CollectorKind.RSS: frozenset({"item_limit"}),
+    CollectorKind.RSS: frozenset(
+        {"item_limit", "entry_match_terms", "detail_match_terms"}
+    ),
     CollectorKind.SITEMAP: frozenset({"item_limit"}),
     CollectorKind.HTML: frozenset(
         {

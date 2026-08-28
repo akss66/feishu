@@ -16,7 +16,9 @@ $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $powerShellPath = Join-Path $PSHOME "powershell.exe"
 $arguments = '-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "{0}"' -f $runnerPath
 $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments -WorkingDirectory (Split-Path -Parent $PSScriptRoot)
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+$dailyTrigger = New-ScheduledTaskTrigger -Daily -At "08:30"
+$triggers = @($logonTrigger, $dailyTrigger)
 $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType "Interactive" -RunLevel "Limited"
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -25,6 +27,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances "IgnoreNew" `
     -RestartCount 10 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
+    -WakeToRun `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -38,7 +41,7 @@ if ($null -ne $existing) {
     Set-ScheduledTask `
         -TaskName $TaskName `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger $triggers `
         -Principal $principal `
         -Settings $settings | Out-Null
 }
@@ -47,7 +50,7 @@ else {
         -TaskName $TaskName `
         -Description "Runs the local cross-border commerce Feishu intelligence agent." `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger $triggers `
         -Principal $principal `
         -Settings $settings | Out-Null
 }

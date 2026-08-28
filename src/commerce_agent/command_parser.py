@@ -1,5 +1,15 @@
 from commerce_agent.domain import Command, CommandKind
 
+_PROFILE_CHOICES = frozenset({"保守", "默认", "激进"})
+_PROFILE_BRACKETS = {"[": "]", "【": "】", "(": ")", "（": "）"}
+
+
+def _profile_argument(value: str) -> str:
+    argument = value.strip()
+    if len(argument) >= 2 and _PROFILE_BRACKETS.get(argument[0]) == argument[-1]:
+        argument = argument[1:-1].strip()
+    return argument
+
 
 def parse_command(text: str) -> Command:
     submission = text.replace("\r\n", "\n").strip()
@@ -21,5 +31,10 @@ def parse_command(text: str) -> Command:
     if normalized == "策略":
         return Command(CommandKind.RISK_PROFILE)
     if normalized.startswith("策略 "):
-        return Command(CommandKind.RISK_PROFILE, normalized.removeprefix("策略 "))
+        return Command(
+            CommandKind.RISK_PROFILE,
+            _profile_argument(normalized.removeprefix("策略 ")),
+        )
+    if normalized in _PROFILE_CHOICES:
+        return Command(CommandKind.RISK_PROFILE, normalized)
     return Command(CommandKind.UNKNOWN, normalized)

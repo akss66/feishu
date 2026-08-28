@@ -37,6 +37,7 @@ def _analysis(
     trust_tier: TrustTier = TrustTier.MEDIA,
     fetched_at: datetime | None = None,
     model_action: str | None = None,
+    platform: Platform = Platform.EBAY,
 ) -> ScoredAnalysis:
     action = model_action or f"模型建议 {analysis_id}"
     candidate = AnalysisCandidate(
@@ -55,7 +56,7 @@ def _analysis(
         author=None,
         published_at=None,
         fetched_at=fetched_at or datetime(2026, 7, 20, 12, tzinfo=UTC),
-        platforms=(Platform.EBAY,),
+        platforms=(platform,),
         regions=("global",),
         publisher_key=f"publisher-{analysis_id}.example" if trust_tier is TrustTier.MEDIA else None,
         attribution=f"媒体署名 {analysis_id}" if trust_tier is TrustTier.MEDIA else None,
@@ -69,7 +70,7 @@ def _analysis(
             "同时将结论同步给负责人持续跟进。"
         ),
         event_type=EventType.FEES,
-        platforms=(Platform.EBAY,),
+        platforms=(platform,),
         regions=("global",),
         affected_seller_types=("all",),
         effective_at=None,
@@ -179,6 +180,21 @@ def test_report_ranks_by_risk_then_confidence_then_recency() -> None:
     draft = DailyReportComposer().compose(report_date=date(2026, 7, 21), analyses=analyses)
 
     assert draft.selected_analysis_ids == (2, 4, 3, 1)
+
+
+def test_report_prioritizes_temu_then_shein_and_aliexpress_on_risk_ties() -> None:
+    analyses = (
+        _analysis(4, confidence=90, platform=Platform.EBAY),
+        _analysis(3, confidence=90, platform=Platform.ALIEXPRESS),
+        _analysis(2, confidence=90, platform=Platform.SHEIN),
+        _analysis(1, confidence=90, platform=Platform.TEMU),
+    )
+
+    draft = DailyReportComposer().compose(
+        report_date=date(2026, 7, 21), analyses=analyses
+    )
+
+    assert draft.selected_analysis_ids == (1, 2, 3, 4)
 
 
 def test_report_uses_official_source_before_recency_for_tied_events() -> None:
