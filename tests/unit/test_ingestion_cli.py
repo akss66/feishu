@@ -605,6 +605,7 @@ async def test_ingestion_cli_wires_overridden_gdelt_controls(
         gdelt_original_fetch_enabled = True
         gdelt_original_fetch_max_per_source = 7
         gdelt_media_body_retention_days = 7
+        firecrawl_api_key = None
 
     class Database:
         session = object()

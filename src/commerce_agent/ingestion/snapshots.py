@@ -224,7 +224,7 @@ class SnapshotStore:
         compressed = gzip.compress(body, compresslevel=9, mtime=0)
         file_descriptor, temporary_name = tempfile.mkstemp(
             dir=target.parent,
-            prefix=f".{target.stem}-",
+            prefix=".snapshot-",
             suffix=".tmp",
         )
         temporary = Path(temporary_name)

@@ -88,9 +88,9 @@ OUT_OF_SCOPE_STATUS = {
     ),
     "media-ecommercebytes-feed": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
     "media-gdelt-amazon": (ComplianceStatus.ALLOWED, True),
-    "media-gdelt-temu": (ComplianceStatus.ALLOWED, True),
-    "media-gdelt-shein": (ComplianceStatus.ALLOWED, True),
-    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-temu": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-shein": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, False),
     "media-gdelt-shopee": (ComplianceStatus.ALLOWED, True),
     "media-gdelt-ebay": (ComplianceStatus.ALLOWED, True),
     "media-gdelt-coupang": (ComplianceStatus.ALLOWED, True),
@@ -511,10 +511,14 @@ def test_public_registry_has_one_bounded_gdelt_query_per_platform() -> None:
 
     assert len(gdelt) == len(Platform)
     assert {source.platforms[0] for source in gdelt} == set(Platform)
+    assert {source.source_id for source in gdelt if not source.enabled} == {
+        "media-gdelt-temu",
+        "media-gdelt-shein",
+        "media-gdelt-aliexpress",
+    }
     for source in gdelt:
         assert len(source.platforms) == 1
         assert source.content_scope is ContentScope.METADATA_ONLY
-        assert source.enabled is True
         assert source.collector_config["item_limit"] == 25
         query = parse_qs(urlsplit(source.entry_url).query)
         assert query["mode"] == ["artlist"]
@@ -614,14 +618,8 @@ def test_public_registry_media_sources_follow_reviewed_material_policy() -> None
         assert source.attribution
         if source.adapter is SourceAdapter.GENERIC:
             assert source.publisher_key
-            assert source.enabled == (
-                source.source_id
-                in {
-                    "media-cifnews-cross-border",
-                    "media-100ec-cross-border",
-                }
-            )
             if source.enabled:
+                assert source.compliance is ComplianceStatus.ALLOWED
                 assert source.content_scope is ContentScope.FULL_TEXT
             else:
                 assert source.content_scope in {
