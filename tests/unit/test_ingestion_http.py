@@ -16,6 +16,7 @@ from commerce_agent.ingestion.http import (
     FetchError,
     FetchRequest,
     IngestionHttpClient,
+    RunDomainCircuit,
     _PinnedAsyncTransport,
 )
 from commerce_agent.ingestion.models import FetchMetrics
@@ -231,6 +232,31 @@ async def test_redirect_to_private_resolution_is_rejected_without_following() ->
     assert calls == 1
 
 
+async def test_default_redirect_budget_rejects_the_fourth_hop() -> None:
+    seen_urls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        hop = len(seen_urls)
+        return httpx.Response(302, headers={"Location": f"/hop-{hop}"})
+
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        domain_rps=100_000,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(FetchError) as caught:
+            await client.get(fetch("https://news.example.com/start"))
+
+    assert caught.value.code == "too_many_redirects"
+    assert seen_urls == [
+        "https://news.example.com/start",
+        "https://news.example.com/hop-1",
+        "https://news.example.com/hop-2",
+        "https://news.example.com/hop-3",
+    ]
+
+
 async def test_conditional_headers_and_not_modified_response() -> None:
     seen_headers: httpx.Headers | None = None
 
@@ -357,6 +383,80 @@ async def test_exhausted_429_is_reported_as_rate_limited() -> None:
     assert caught.value.status_code == 429
     assert caught.value.retryable is True
     assert metrics == FetchMetrics(http_requests=1)
+
+
+async def test_403_opens_source_circuit_without_a_second_network_call() -> None:
+    calls = 0
+    circuit = RunDomainCircuit()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(403)
+
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(FetchError, match="compliance_review_required"):
+            await client.get(
+                FetchRequest(
+                    "https://news.example.com/one",
+                    ("news.example.com",),
+                    source_id="source-a",
+                    circuit=circuit,
+                )
+            )
+        with pytest.raises(FetchError) as caught:
+            await client.get(
+                FetchRequest(
+                    "https://other.example.com/two",
+                    ("other.example.com",),
+                    source_id="source-a",
+                    circuit=circuit,
+                )
+            )
+
+    assert caught.value.code == "compliance_review_required"
+    assert calls == 1
+
+
+async def test_exhausted_429_opens_host_circuit_across_source_ids() -> None:
+    calls = 0
+    circuit = RunDomainCircuit()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429)
+
+    async with IngestionHttpClient(
+        safety_policy=policy(),
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(FetchError, match="rate_limited"):
+            await client.get(
+                FetchRequest(
+                    "https://api.example.com/one",
+                    ("api.example.com",),
+                    source_id="gdelt-amazon",
+                    circuit=circuit,
+                )
+            )
+        with pytest.raises(FetchError) as caught:
+            await client.get(
+                FetchRequest(
+                    "https://api.example.com/two",
+                    ("api.example.com",),
+                    source_id="gdelt-temu",
+                    circuit=circuit,
+                )
+            )
+
+    assert caught.value.code == "rate_limited"
+    assert calls == 1
 
 
 async def test_retry_after_delta_is_clamped_to_sixty_seconds() -> None:
@@ -595,8 +695,7 @@ async def test_logs_never_include_query_secrets_or_response_body(
 class FakeNetworkStream(httpcore.AsyncNetworkStream):
     def __init__(self, response_count: int = 1) -> None:
         self._responses = [
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
-            for _ in range(response_count)
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" for _ in range(response_count)
         ]
         self.server_hostname: str | None = None
 

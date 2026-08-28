@@ -5,6 +5,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from commerce_agent.ingestion.models import (
     CollectedItem,
     CollectorKind,
     ComplianceStatus,
+    ContentScope,
     ExtractedDocument,
     FetchContext,
     Platform,
@@ -29,7 +31,7 @@ from commerce_agent.ingestion.models import (
 )
 from commerce_agent.ingestion.registry import SourceRegistry
 from commerce_agent.ingestion.service import IngestionService
-from commerce_agent.ingestion.snapshots import SnapshotRef
+from commerce_agent.ingestion.snapshots import SnapshotRef, SnapshotStore
 from commerce_agent.persistence.ingestion import PersistableDocument, PersistOutcome
 
 NOW = datetime(2026, 7, 20, 10, tzinfo=UTC)
@@ -68,6 +70,7 @@ def item(
     suffix: str = "one",
     raw_body: bytes | None = None,
     with_artifact: bool = True,
+    content_scope: ContentScope | None = None,
 ) -> CollectedItem:
     url = f"https://amazon-news.example.com/{suffix}?token=never-log-me"
     return CollectedItem(
@@ -90,6 +93,7 @@ def item(
             if with_artifact
             else None
         ),
+        content_scope=content_scope,
     )
 
 
@@ -138,19 +142,52 @@ class FakeExtractor:
 
 
 class FakeSnapshotStore:
-    def __init__(self, events: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        events: list[str] | None = None,
+        *,
+        prune_error: Exception | None = None,
+    ) -> None:
         self.events = events
+        self.prune_error = prune_error
         self.saved: list[tuple[str, bytes]] = []
-        self.pruned: list[tuple[str, datetime]] = []
+        self.saved_temporary: list[bool] = []
+        self.pruned: list[datetime] = []
+        self.legacy_source_ids: list[tuple[str, ...]] = []
+        self.legacy_paths: list[tuple[str, ...]] = []
 
     async def prune_source_before(self, source_id: str, cutoff: datetime) -> int:
-        self.pruned.append((source_id, cutoff))
+        del source_id
+        self.pruned.append(cutoff)
+        if self.prune_error is not None:
+            raise self.prune_error
         return 0
 
-    async def save(self, source_id: str, response) -> SnapshotRef:
+    async def prune_before(
+        self,
+        cutoff: datetime,
+        *,
+        legacy_temporary_source_ids: Sequence[str] = (),
+        legacy_temporary_paths: Sequence[str] = (),
+    ) -> int:
+        self.pruned.append(cutoff)
+        self.legacy_source_ids.append(tuple(legacy_temporary_source_ids))
+        self.legacy_paths.append(tuple(legacy_temporary_paths))
+        if self.prune_error is not None:
+            raise self.prune_error
+        return 0
+
+    async def save(
+        self,
+        source_id: str,
+        response,
+        *,
+        temporary: bool = False,
+    ) -> SnapshotRef:
         if self.events is not None:
             self.events.append("snapshot")
         self.saved.append((source_id, response.body))
+        self.saved_temporary.append(temporary)
         return SnapshotRef(
             relative_path=f"2026/07/20/{source_id}/candidate.bin.gz",
             sha256="a" * 64,
@@ -159,20 +196,163 @@ class FakeSnapshotStore:
         )
 
 
-async def test_gdelt_run_prunes_raw_snapshots_older_than_thirty_days() -> None:
+async def test_startup_runs_retention_for_gdelt_metadata_media() -> None:
     gdelt = replace(
         source("media-gdelt-cross-border", collector=CollectorKind.API),
         trust_tier=TrustTier.MEDIA,
         adapter=SourceAdapter.GDELT,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index",
     )
-    ingestion, _, snapshots = service(
+    ingestion, repository, snapshots = service(
         [gdelt],
         {CollectorKind.API: FakeCollector()},
     )
 
-    await ingestion.run_source(gdelt.source_id)
+    await ingestion.initialize()
 
-    assert snapshots.pruned == [(gdelt.source_id, NOW - timedelta(days=30))]
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [cutoff]
+    assert snapshots.legacy_source_ids == [()]
+    assert repository.media_redactions == [cutoff]
+
+
+async def test_retention_job_expires_direct_full_text_media_after_seven_days() -> None:
+    direct_media = replace(
+        source("media-cifnews-cross-border", collector=CollectorKind.HTML),
+        trust_tier=TrustTier.MEDIA,
+        content_scope=ContentScope.FULL_TEXT,
+        publisher_key="cifnews.com",
+        attribution="雨果跨境",
+    )
+    ingestion, repository, snapshots = service(
+        [direct_media],
+        {CollectorKind.HTML: FakeCollector()},
+    )
+
+    await ingestion.run_retention()
+
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [cutoff]
+    assert snapshots.legacy_source_ids == [
+        ("media-cifnews-cross-border",),
+    ]
+    assert repository.media_redactions == [cutoff]
+
+
+async def test_retention_prunes_removed_and_disabled_media_without_source_run() -> None:
+    ingestion, repository, snapshots = service([], {})
+    repository.temporary_media_source_ids = ("removed-media", "disabled-media")
+    repository.temporary_media_snapshot_paths = (
+        f"2026/07/12/removed-media/{'a' * 64}.bin.gz",
+        f"2026/07/12/disabled-media/{'b' * 64}.bin.gz",
+    )
+
+    await ingestion.run_retention()
+
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [cutoff]
+    assert snapshots.legacy_source_ids == [()]
+    assert snapshots.legacy_paths == [
+        (
+            f"2026/07/12/disabled-media/{'b' * 64}.bin.gz",
+            f"2026/07/12/removed-media/{'a' * 64}.bin.gz",
+        )
+    ]
+    assert repository.media_redactions == [cutoff]
+
+
+async def test_database_redaction_runs_when_snapshot_pruning_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = FakeRepository()
+    repository.temporary_media_source_ids = ("media-orphan",)
+    snapshots = FakeSnapshotStore(
+        prune_error=RuntimeError("snapshot path secret must not be logged")
+    )
+    ingestion, _, _ = service(
+        [],
+        {},
+        repository=repository,
+        snapshot_store=snapshots,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = await ingestion.run_retention()
+
+    cutoff = NOW - timedelta(days=7)
+    assert repository.media_redactions == [cutoff]
+    assert repository.redaction_clear_snapshot_paths == [False]
+    assert result.snapshots_pruned == 0
+    assert result.bodies_redacted == 0
+    assert result.error_codes == ("snapshot_prune_failed",)
+    assert "component=snapshot_store" in caplog.text
+    assert "snapshot path secret" not in caplog.text
+
+
+async def test_snapshot_pruning_runs_when_database_redaction_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = FakeRepository(
+        redaction_error=RuntimeError("database secret must not be logged")
+    )
+    snapshots = FakeSnapshotStore()
+    ingestion, _, _ = service(
+        [],
+        {},
+        repository=repository,
+        snapshot_store=snapshots,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = await ingestion.run_retention()
+
+    cutoff = NOW - timedelta(days=7)
+    assert snapshots.pruned == [cutoff]
+    assert repository.redaction_clear_snapshot_paths == [True]
+    assert result.snapshots_pruned == 0
+    assert result.bodies_redacted == 0
+    assert result.error_codes == ("database_redaction_failed",)
+    assert "component=repository" in caplog.text
+    assert "database secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("source_definition", "collector"),
+    [
+        (
+            replace(
+                source("official-full-text", collector=CollectorKind.HTML),
+                content_scope=ContentScope.FULL_TEXT,
+            ),
+            CollectorKind.HTML,
+        ),
+        (
+            replace(
+                source("media-metadata-only", collector=CollectorKind.HTML),
+                trust_tier=TrustTier.MEDIA,
+                content_scope=ContentScope.METADATA_ONLY,
+                publisher_key="metadata.example.com",
+                attribution="Metadata Media",
+            ),
+            CollectorKind.HTML,
+        ),
+    ],
+    ids=("official-full-text", "media-metadata-only"),
+)
+async def test_non_temporary_media_bodies_are_not_expired(
+    source_definition: SourceDefinition,
+    collector: CollectorKind,
+) -> None:
+    ingestion, repository, snapshots = service(
+        [source_definition],
+        {collector: FakeCollector()},
+    )
+
+    await ingestion.initialize()
+
+    assert snapshots.pruned == [NOW - timedelta(days=7)]
+    assert repository.media_redactions == [NOW - timedelta(days=7)]
 
 
 class FakeRepository:
@@ -182,14 +362,20 @@ class FakeRepository:
         *,
         events: list[str] | None = None,
         persist_error: Exception | None = None,
+        redaction_error: Exception | None = None,
     ) -> None:
         self._outcomes = list(outcomes)
         self.events = events
         self.persist_error = persist_error
+        self.redaction_error = redaction_error
         self.synced: list[tuple[SourceDefinition, ...]] = []
         self.started: list[tuple[int, str, Trigger, datetime | None]] = []
         self.persisted: list[PersistableDocument] = []
         self.finished: list[tuple[int, RunSummary]] = []
+        self.media_redactions: list[datetime] = []
+        self.redaction_clear_snapshot_paths: list[bool] = []
+        self.temporary_media_source_ids: tuple[str, ...] = ()
+        self.temporary_media_snapshot_paths: tuple[str, ...] = ()
         self.lease_tokens: dict[str, str] = {}
         self.suspended_source_ids: set[str] = set()
 
@@ -249,6 +435,29 @@ class FakeRepository:
 
     async def finish_run(self, run_id: int, summary: RunSummary) -> None:
         self.finished.append((run_id, summary))
+
+    async def redact_expired_media_bodies(
+        self,
+        *,
+        before: datetime,
+        clear_snapshot_paths: bool = True,
+    ) -> int:
+        self.media_redactions.append(before)
+        self.redaction_clear_snapshot_paths.append(clear_snapshot_paths)
+        if self.redaction_error is not None:
+            raise self.redaction_error
+        return 0
+
+    async def list_temporary_media_source_ids(self) -> tuple[str, ...]:
+        return self.temporary_media_source_ids
+
+    async def list_expired_media_snapshot_paths(
+        self,
+        *,
+        before: datetime,
+    ) -> tuple[str, ...]:
+        del before
+        return self.temporary_media_snapshot_paths
 
 
 class RecordingCompliance:
@@ -356,6 +565,7 @@ async def test_explicit_probe_collects_a_disabled_but_allowed_source_once() -> N
 
     assert summary.status is RunStatus.SUCCESS
     assert len(collector.calls) == 1
+    assert collector.calls[0][1].allow_original_fetch is False
     assert repository.persisted
     assert repository.synced[0][0].enabled is False
 
@@ -501,8 +711,14 @@ async def test_item_ingestion_cancellation_finishes_failed_then_propagates() -> 
     never = asyncio.Event()
 
     class BlockingSnapshotStore(FakeSnapshotStore):
-        async def save(self, source_id: str, response) -> SnapshotRef:
-            del source_id, response
+        async def save(
+            self,
+            source_id: str,
+            response,
+            *,
+            temporary: bool = False,
+        ) -> SnapshotRef:
+            del source_id, response, temporary
             entered.set()
             await never.wait()
             raise AssertionError("unreachable")
@@ -605,6 +821,48 @@ async def test_saves_candidate_snapshot_before_persisting_a_version() -> None:
     assert summary.created == 1
 
 
+async def test_media_metadata_snapshot_is_archived_not_temporary() -> None:
+    media = replace(
+        source("media-metadata", collector=CollectorKind.HTML),
+        trust_tier=TrustTier.MEDIA,
+        content_scope=ContentScope.METADATA_ONLY,
+        publisher_key="media.example.com",
+        attribution="Media Example",
+    )
+    ingestion, _, snapshots = service(
+        [media],
+        {CollectorKind.HTML: FakeCollector([item(b"metadata")])},
+    )
+
+    summary = await ingestion.run_source(media.source_id)
+
+    assert summary.status is RunStatus.SUCCESS
+    assert snapshots.saved_temporary == [False]
+
+
+async def test_gdelt_full_text_item_is_temporary_under_metadata_source() -> None:
+    media = replace(
+        source("media-gdelt-mixed", collector=CollectorKind.API),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GDELT,
+        content_scope=ContentScope.METADATA_ONLY,
+        attribution="GDELT index",
+    )
+    ingestion, _, snapshots = service(
+        [media],
+        {
+            CollectorKind.API: FakeCollector(
+                [item(b"full article", content_scope=ContentScope.FULL_TEXT)]
+            )
+        },
+    )
+
+    summary = await ingestion.run_source(media.source_id)
+
+    assert summary.status is RunStatus.SUCCESS
+    assert snapshots.saved_temporary == [True]
+
+
 async def test_missing_response_artifact_fails_item_without_snapshot_or_persist() -> None:
     ingestion, repository, snapshots = service(
         [source()],
@@ -642,10 +900,70 @@ async def test_item_extraction_failure_is_counted_while_other_items_continue() -
     ]
 
 
-async def test_detail_failure_event_is_counted_without_snapshot_and_later_item_continues() -> None:
-    collector = FakeCollector(
-        [CollectedFailure("fetch_failed"), item(b"good", suffix="good")]
+async def test_retention_deletes_orphan_snapshot_after_extraction_failure(
+    tmp_path: Path,
+) -> None:
+    media = replace(
+        source("media-orphan-extraction", collector=CollectorKind.HTML),
+        trust_tier=TrustTier.MEDIA,
+        content_scope=ContentScope.FULL_TEXT,
+        publisher_key="media.example.com",
+        attribution="Media Example",
     )
+    snapshots = SnapshotStore(
+        tmp_path,
+        clock=lambda: NOW - timedelta(days=7, seconds=1),
+    )
+    ingestion, repository, _ = service(
+        [media],
+        {CollectorKind.HTML: FakeCollector([item(b"bad")])},
+        snapshot_store=snapshots,
+    )
+
+    summary = await ingestion.run_source(media.source_id)
+    assert summary.status is RunStatus.FAILED
+    assert repository.persisted == []
+    assert len(tuple(tmp_path.rglob("*.bin.gz"))) == 1  # noqa: ASYNC240
+
+    await ingestion.run_retention()
+
+    assert tuple(tmp_path.rglob("*.bin.gz")) == ()  # noqa: ASYNC240
+
+
+async def test_retention_deletes_orphan_snapshot_after_persistence_failure(
+    tmp_path: Path,
+) -> None:
+    media = replace(
+        source("media-orphan-persistence", collector=CollectorKind.HTML),
+        trust_tier=TrustTier.MEDIA,
+        content_scope=ContentScope.FULL_TEXT,
+        publisher_key="media.example.com",
+        attribution="Media Example",
+    )
+    repository = FakeRepository(persist_error=RuntimeError("database unavailable"))
+    snapshots = SnapshotStore(
+        tmp_path,
+        clock=lambda: NOW - timedelta(days=7, seconds=1),
+    )
+    ingestion, _, _ = service(
+        [media],
+        {CollectorKind.HTML: FakeCollector([item(b"good")])},
+        repository=repository,
+        snapshot_store=snapshots,
+    )
+
+    summary = await ingestion.run_source(media.source_id)
+    assert summary.status is RunStatus.FAILED
+    assert repository.persisted == []
+    assert len(tuple(tmp_path.rglob("*.bin.gz"))) == 1  # noqa: ASYNC240
+
+    await ingestion.run_retention()
+
+    assert tuple(tmp_path.rglob("*.bin.gz")) == ()  # noqa: ASYNC240
+
+
+async def test_detail_failure_event_is_counted_without_snapshot_and_later_item_continues() -> None:
+    collector = FakeCollector([CollectedFailure("fetch_failed"), item(b"good", suffix="good")])
     ingestion, repository, snapshots = service(
         [source()],
         {CollectorKind.RSS: collector},
@@ -684,9 +1002,7 @@ async def test_run_summary_stably_classifies_create_update_and_duplicate() -> No
             PersistOutcome(1, 2, created_document=False, created_version=False),
         ]
     )
-    collector = FakeCollector(
-        [item(suffix="new"), item(suffix="changed"), item(suffix="same")]
-    )
+    collector = FakeCollector([item(suffix="new"), item(suffix="changed"), item(suffix="same")])
     ingestion, _, _ = service(
         [source()],
         {CollectorKind.RSS: collector},

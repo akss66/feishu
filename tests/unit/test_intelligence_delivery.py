@@ -233,6 +233,17 @@ def test_media_alert_explains_source_type_and_content_basis(
     assert expected in rendered
 
 
+def test_public_authority_alert_uses_distinct_source_label() -> None:
+    item = _alert_item()
+    item["media_category"] = "public_authority"
+    item["content_basis"] = "full_text"
+
+    rendered = alert_markdown(item)
+
+    assert "来源类型：监管/公共机构信息" in rendered
+    assert "全球权威媒体" not in rendered
+
+
 def test_official_alert_omits_empty_media_labels() -> None:
     rendered = alert_markdown(_alert_item())
 
@@ -338,9 +349,7 @@ def test_daily_card_sanitizes_untrusted_controls_and_preserves_unicode() -> None
 
     rendered = FeishuMessageRenderer().render(claim)
 
-    assert rendered["card"]["header"]["title"]["content"] == (
-        "跨境 电商每日情报🙂 · 策略：默认"
-    )
+    assert rendered["card"]["header"]["title"]["content"] == ("跨境 电商每日情报🙂 · 策略：默认")
     assert rendered["card"]["elements"][0]["text"]["content"] == (
         "**AI 今日提炼🚀**\n- 中文 内容 继续🙂"
     )

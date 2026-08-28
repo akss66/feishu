@@ -64,6 +64,9 @@ class _IngestionSettings(BaseSettings):
     ingestion_dns_mode: Literal["system", "cloudflare_doh"] = "system"
     snapshot_dir: Path = Path("./data/snapshots")
     ingestion_user_agent: str = Field(default="CrossBorderCommerceAgent/0.1", min_length=1)
+    gdelt_original_fetch_enabled: bool = False
+    gdelt_original_fetch_max_per_source: int = Field(default=5, ge=1, le=25)
+    gdelt_media_body_retention_days: Literal[7] = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,8 +163,6 @@ async def build_application() -> CliApplication:
     try:
         await database.create_schema()
         repository = SqlAlchemyIngestionRepository(database.session)
-        await repository.sync_sources(registry.sources)
-
         resolver_bundle = build_resolver_bundle(settings.ingestion_dns_mode)
         resolver_resources = resolver_bundle.resources
         http_client = IngestionHttpClient(
@@ -171,12 +172,17 @@ async def build_application() -> CliApplication:
             timeout_seconds=settings.ingestion_http_timeout_seconds,
             max_response_bytes=settings.ingestion_max_response_bytes,
             user_agent=settings.ingestion_user_agent,
+            max_redirects=3,
         )
         collectors = {
             CollectorKind.RSS: FeedCollector(http_client),
             CollectorKind.SITEMAP: SitemapCollector(http_client),
             CollectorKind.HTML: HtmlCollector(http_client),
-            CollectorKind.API: ApiCollector(http_client),
+            CollectorKind.API: ApiCollector(
+                http_client,
+                fetch_gdelt_originals=settings.gdelt_original_fetch_enabled,
+                gdelt_original_fetch_limit=settings.gdelt_original_fetch_max_per_source,
+            ),
             CollectorKind.BROWSER: BrowserCollector(
                 enabled=False,
                 browser_port=None,
@@ -191,7 +197,9 @@ async def build_application() -> CliApplication:
             snapshot_store=SnapshotStore(settings.snapshot_dir),
             repository=repository,
             max_concurrency=settings.ingestion_global_concurrency,
+            gdelt_media_body_retention_days=settings.gdelt_media_body_retention_days,
         )
+        await service.initialize()
         return _ProductionApplication(
             registry=registry,
             service=service,
@@ -322,8 +330,7 @@ async def run_cli(
                 summaries = (await application.run_source(arguments.source),)
             _write_runs(summaries, output)
             if any(
-                item.status in _FAILED_RUN_STATUSES
-                or item.error_code == "source_already_running"
+                item.status in _FAILED_RUN_STATUSES or item.error_code == "source_already_running"
                 for item in summaries
             ):
                 exit_code = 3
@@ -376,19 +383,12 @@ def _write_coverage(registry: SourceRegistry, output: TextIO) -> None:
     coverage = registry.platform_coverage()
     rows: list[tuple[str, ...]] = []
     for platform in Platform:
-        sources = tuple(
-            source for source in registry.sources if platform in source.platforms
-        )
+        sources = tuple(source for source in registry.sources if platform in source.platforms)
         rows.append(
             (
                 platform.value,
                 str(sum(source.enabled for source in sources)),
-                str(
-                    sum(
-                        source.compliance is ComplianceStatus.ALLOWED
-                        for source in sources
-                    )
-                ),
+                str(sum(source.compliance is ComplianceStatus.ALLOWED for source in sources)),
                 str(
                     sum(
                         source.compliance is ComplianceStatus.AUTHORIZATION_REQUIRED
@@ -396,17 +396,9 @@ def _write_coverage(registry: SourceRegistry, output: TextIO) -> None:
                     )
                 ),
                 str(
-                    sum(
-                        source.compliance is ComplianceStatus.PENDING_REVIEW
-                        for source in sources
-                    )
+                    sum(source.compliance is ComplianceStatus.PENDING_REVIEW for source in sources)
                 ),
-                str(
-                    sum(
-                        source.compliance is ComplianceStatus.DENIED
-                        for source in sources
-                    )
-                ),
+                str(sum(source.compliance is ComplianceStatus.DENIED for source in sources)),
                 str(len(sources)),
                 coverage[platform].value,
             )

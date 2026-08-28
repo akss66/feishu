@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
+from commerce_agent.ingestion.article_gate import (
+    ArticleGateError,
+    mentions_target_platform,
+    validate_public_article,
+)
 from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     HttpPort,
+    allowed_hosts,
     candidate_url,
     detail_failure,
     fetch_request,
@@ -23,7 +30,7 @@ from commerce_agent.ingestion.models import (
     FetchContext,
     SourceDefinition,
 )
-from commerce_agent.ingestion.security import UrlSafetyError
+from commerce_agent.ingestion.security import UrlSafetyError, canonical_hostname
 
 _SELECTOR_PART = re.compile(r"^(?P<tag>[a-zA-Z][\w-]*|\*)?(?P<suffix>(?:[.#][\w-]+)*)$")
 _SELECTOR_SUFFIX = re.compile(r"([.#])([\w-]+)")
@@ -100,11 +107,28 @@ class HtmlCollector:
         selector = source.collector_config.get("link_selector")
         if not isinstance(selector, str):
             raise CollectorError("invalid_config")
+        hosts = frozenset(allowed_hosts(source))
+        path_prefixes = _configured_path_prefixes(source)
+        use_public_article_gate = _public_article_gate(source)
+
+        def candidate_filter(candidate: CollectedItem) -> bool:
+            host = canonical_hostname(urlsplit(candidate.url).hostname, required=False)
+            return (
+                host is not None
+                and host in hosts
+                and _matches_path_prefix(candidate, path_prefixes)
+                and (
+                    not use_public_article_gate
+                    or mentions_target_platform(candidate.title or "", source.platforms)
+                )
+            )
+
         for candidate in links_from_html(
             response.body,
             base_url=response.url,
             selector=selector,
             limit=item_limit(source),
+            candidate_filter=candidate_filter,
         ):
             try:
                 detail = await self._http.get(
@@ -117,7 +141,22 @@ class HtmlCollector:
                 raise
             except (FetchError, CollectorError, UrlSafetyError) as error:
                 yield detail_failure(error)
+                if getattr(error, "code", None) in {
+                    "compliance_review_required",
+                    "rate_limited",
+                }:
+                    return
                 continue
+            if use_public_article_gate:
+                try:
+                    matched_platforms = validate_public_article(
+                        body=detail.body,
+                        content_type=detail.headers.get("content-type"),
+                        platforms=source.platforms,
+                    )
+                except ArticleGateError as error:
+                    yield CollectedFailure(error.code)
+                    continue
             artifact = response_artifact(detail)
             yield CollectedItem(
                 url=detail.url,
@@ -127,6 +166,7 @@ class HtmlCollector:
                 etag=detail.etag,
                 last_modified=detail.last_modified,
                 artifact=artifact,
+                platforms=matched_platforms if use_public_article_gate else None,
             )
 
 
@@ -136,6 +176,7 @@ def links_from_html(
     base_url: str,
     selector: str,
     limit: int,
+    candidate_filter: Callable[[CollectedItem], bool] | None = None,
 ) -> list[CollectedItem]:
     selector_parts = _parse_selector(selector)
     try:
@@ -154,12 +195,43 @@ def links_from_html(
         url = candidate_url(base_url, node.attrs.get("href"))
         if url is None or url in seen:
             continue
-        seen.add(url)
         title = " ".join(_node_text(node).split()) or None
-        items.append(CollectedItem(url=url, body=b"", title=title))
+        candidate = CollectedItem(url=url, body=b"", title=title)
+        if candidate_filter is not None and not candidate_filter(candidate):
+            continue
+        seen.add(url)
+        items.append(candidate)
         if len(items) >= limit:
             break
     return items
+
+
+def _configured_path_prefixes(source: SourceDefinition) -> tuple[str, ...]:
+    configured = source.collector_config.get("link_path_prefixes")
+    if configured is None:
+        return ()
+    if not isinstance(configured, str):
+        raise CollectorError("invalid_config")
+    prefixes = tuple(
+        dict.fromkeys(token.strip() for token in configured.split(",") if token.strip())
+    )
+    if not prefixes:
+        raise CollectorError("invalid_config")
+    return prefixes
+
+
+def _matches_path_prefix(
+    candidate: CollectedItem,
+    prefixes: tuple[str, ...],
+) -> bool:
+    return not prefixes or urlsplit(candidate.url).path.startswith(prefixes)
+
+
+def _public_article_gate(source: SourceDefinition) -> bool:
+    configured = source.collector_config.get("public_article_gate", False)
+    if not isinstance(configured, bool):
+        raise CollectorError("invalid_config")
+    return configured
 
 
 def _parse_selector(selector: str) -> tuple[tuple[str | None, str | None, frozenset[str]], ...]:

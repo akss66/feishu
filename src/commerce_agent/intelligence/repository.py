@@ -8,11 +8,12 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
 
-from sqlalchemy import case, exists, func, literal, or_, select, update
+from sqlalchemy import and_, case, exists, func, literal, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from commerce_agent.ingestion.article_gate import matched_target_platforms
 from commerce_agent.ingestion.models import ContentScope, Platform, TrustTier
 from commerce_agent.intelligence.models import (
     AnalysisCandidate,
@@ -39,7 +40,10 @@ from commerce_agent.persistence.models import (
     DocumentAnalysis,
     DocumentProvenance,
     DocumentVersion,
+    DocumentVersionPlatform,
+    DocumentVersionPlatformResolution,
     Source,
+    SourceAuditedPlatform,
     SourceHealth,
     SourceMaterialPolicy,
     SourcePlatform,
@@ -123,8 +127,7 @@ class SqlAlchemyIntelligenceRepository:
         earlier_provenance = aliased(DocumentProvenance)
         earlier_relevant = or_(
             earlier_job.status == "pending",
-            (earlier_job.status == "retry_wait")
-            & (earlier_job.next_attempt_at <= now),
+            (earlier_job.status == "retry_wait") & (earlier_job.next_attempt_at <= now),
             earlier_job.status == "running",
             earlier_job.status == "completed",
         )
@@ -285,9 +288,7 @@ class SqlAlchemyIntelligenceRepository:
                     duplicate_document_version_id=version_id,
                     canonical_analysis_id=canonical_analysis_id,
                 )
-                .on_conflict_do_nothing(
-                    index_elements=["duplicate_document_version_id"]
-                )
+                .on_conflict_do_nothing(index_elements=["duplicate_document_version_id"])
             )
 
     async def complete_analysis(
@@ -417,9 +418,7 @@ class SqlAlchemyIntelligenceRepository:
         async with self._session_factory() as session:
             return list(
                 (
-                    await session.scalars(
-                        select(DocumentAnalysis).order_by(DocumentAnalysis.id)
-                    )
+                    await session.scalars(select(DocumentAnalysis).order_by(DocumentAnalysis.id))
                 ).all()
             )
 
@@ -451,7 +450,6 @@ class SqlAlchemyIntelligenceRepository:
             .join(Document, Document.id == DocumentVersion.document_id)
             .join(Source, Source.id == Document.source_id)
             .join(AnalysisJob, AnalysisJob.document_version_id == DocumentVersion.id)
-            .join(SourcePlatform, SourcePlatform.source_id == Source.id)
             .where(
                 Document.current_version_id == DocumentVersion.id,
                 Source.compliance == "allowed",
@@ -461,8 +459,33 @@ class SqlAlchemyIntelligenceRepository:
             )
         )
         if platforms:
+            requested = tuple(platform.value for platform in platforms)
+            has_version_platform = exists(
+                select(literal(1)).where(
+                    DocumentVersionPlatform.document_version_id == DocumentVersion.id
+                )
+            )
             statement = statement.where(
-                SourcePlatform.platform.in_(platform.value for platform in platforms)
+                or_(
+                    exists(
+                        select(literal(1)).where(
+                            DocumentVersionPlatform.document_version_id == DocumentVersion.id,
+                            DocumentVersionPlatform.platform.in_(requested),
+                        )
+                    ),
+                    and_(
+                        ~has_version_platform,
+                        Source.collector_config["public_article_gate"]
+                        .as_boolean()
+                        .is_not(True),
+                        exists(
+                            select(literal(1)).where(
+                                SourcePlatform.source_id == Source.id,
+                                SourcePlatform.platform.in_(requested),
+                            )
+                        ),
+                    ),
+                )
             )
         if regions:
             source_region = func.json_each(Source.regions).table_valued("key", "value")
@@ -495,21 +518,15 @@ class SqlAlchemyIntelligenceRepository:
             .limit(candidate_limit)
         )
 
-        async with self._session_factory() as session:
+        async with self._session_factory.begin() as session:
+            await _backfill_unresolved_article_platforms(session)
             rows = (await session.execute(statement)).all()
             if not rows:
                 return ()
-            source_ids = {source.id for _, _, _, source in rows}
-            platform_rows = (
-                await session.execute(
-                    select(SourcePlatform.source_id, SourcePlatform.platform)
-                    .where(SourcePlatform.source_id.in_(source_ids))
-                    .order_by(SourcePlatform.source_id, SourcePlatform.platform)
-                )
-            ).all()
-            platforms_by_source: dict[str, list[Platform]] = {}
-            for source_id, platform in platform_rows:
-                platforms_by_source.setdefault(source_id, []).append(Platform(platform))
+            platforms_by_version = await _platforms_by_version(
+                session,
+                {version.id: source.id for _, version, _, source in rows},
+            )
 
             return tuple(
                 CorpusCandidate(
@@ -523,7 +540,7 @@ class SqlAlchemyIntelligenceRepository:
                     canonical_url=document.canonical_url,
                     published_at=version.published_at,
                     fetched_at=version.fetched_at,
-                    platforms=tuple(platforms_by_source.get(source.id, ())),
+                    platforms=platforms_by_version.get(version.id, ()),
                     regions=tuple(region for region in source.regions if isinstance(region, str)),
                     risk_level=RiskLevel(analysis.risk_level),
                     evidence_confidence=analysis.evidence_confidence,
@@ -567,24 +584,14 @@ class SqlAlchemyIntelligenceRepository:
             )
             .order_by(DocumentVersion.fetched_at.desc(), DocumentAnalysis.id.desc())
         )
-        async with self._session_factory() as session:
+        async with self._session_factory.begin() as session:
             rows = (await session.execute(statement)).all()
             if not rows:
                 return ()
-            platform_rows = (
-                await session.execute(
-                    select(SourcePlatform.source_id, SourcePlatform.platform)
-                    .where(
-                        SourcePlatform.source_id.in_(
-                            {source.id for _, _, _, _, source, _ in rows}
-                        )
-                    )
-                    .order_by(SourcePlatform.source_id, SourcePlatform.platform)
-                )
-            ).all()
-            platforms_by_source: dict[str, list[Platform]] = {}
-            for source_id, platform in platform_rows:
-                platforms_by_source.setdefault(source_id, []).append(Platform(platform))
+            platforms_by_version = await _platforms_by_version(
+                session,
+                {version.id: source.id for _, _, version, _, source, _ in rows},
+            )
             scored = [
                 _scored_analysis(
                     analysis,
@@ -593,27 +600,32 @@ class SqlAlchemyIntelligenceRepository:
                     document,
                     source,
                     provenance,
-                    platforms=tuple(platforms_by_source.get(source.id, ())),
+                    platforms=platforms_by_version.get(version.id, ()),
                 )
                 for analysis, job, version, document, source, provenance in rows
+                if platforms_by_version.get(version.id, ())
             ]
+            if not scored:
+                return ()
             duplicate_rows = (
                 await session.execute(
                     select(
                         AnalysisDuplicate.canonical_analysis_id,
                         Source.name,
                         Document.canonical_url,
-                        SourcePlatform.platform,
+                        DocumentVersionPlatform.platform,
                     )
                     .select_from(AnalysisDuplicate)
                     .join(
                         DocumentVersion,
-                        DocumentVersion.id
-                        == AnalysisDuplicate.duplicate_document_version_id,
+                        DocumentVersion.id == AnalysisDuplicate.duplicate_document_version_id,
                     )
                     .join(Document, Document.id == DocumentVersion.document_id)
                     .join(Source, Source.id == Document.source_id)
-                    .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                    .join(
+                        DocumentVersionPlatform,
+                        DocumentVersionPlatform.document_version_id == DocumentVersion.id,
+                    )
                     .where(
                         AnalysisDuplicate.canonical_analysis_id.in_(
                             [item.analysis_id for item in scored]
@@ -624,9 +636,7 @@ class SqlAlchemyIntelligenceRepository:
             duplicate_platforms: dict[int, set[Platform]] = {}
             duplicate_references: dict[int, set[tuple[str, str]]] = {}
             for analysis_id, source_name, canonical_url, platform in duplicate_rows:
-                duplicate_platforms.setdefault(analysis_id, set()).add(
-                    Platform(platform)
-                )
+                duplicate_platforms.setdefault(analysis_id, set()).add(Platform(platform))
                 duplicate_references.setdefault(analysis_id, set()).add(
                     (source_name, canonical_url)
                 )
@@ -640,9 +650,7 @@ class SqlAlchemyIntelligenceRepository:
                         item.candidate.canonical_url,
                     )
                 }
-                references.update(
-                    duplicate_references.get(item.analysis_id, set())
-                )
+                references.update(duplicate_references.get(item.analysis_id, set()))
                 enriched.append(
                     replace(
                         item,
@@ -668,10 +676,10 @@ class SqlAlchemyIntelligenceRepository:
                 (
                     await session.execute(
                         select(
-                            SourcePlatform.platform,
+                            SourceAuditedPlatform.platform,
                             func.count(SourceMaterialPolicy.publisher_key.distinct()),
                         )
-                        .join(Source, Source.id == SourcePlatform.source_id)
+                        .join(Source, Source.id == SourceAuditedPlatform.source_id)
                         .join(
                             SourceMaterialPolicy,
                             SourceMaterialPolicy.source_id == Source.id,
@@ -680,14 +688,13 @@ class SqlAlchemyIntelligenceRepository:
                         .where(
                             Source.compliance == "allowed",
                             Source.enabled.is_(True),
-                            SourceMaterialPolicy.content_scope
-                            == ContentScope.FULL_TEXT.value,
+                            SourceMaterialPolicy.content_scope == ContentScope.FULL_TEXT.value,
                             or_(
                                 SourceHealth.source_id.is_(None),
                                 SourceHealth.health_status != "suspended",
                             ),
                         )
-                        .group_by(SourcePlatform.platform)
+                        .group_by(SourceAuditedPlatform.platform)
                     )
                 ).all()
             )
@@ -695,7 +702,7 @@ class SqlAlchemyIntelligenceRepository:
                 (
                     await session.execute(
                         select(
-                            SourcePlatform.platform,
+                            DocumentVersionPlatform.platform,
                             func.count(DocumentAnalysis.event_fingerprint.distinct()),
                         )
                         .select_from(DocumentAnalysis)
@@ -709,38 +716,42 @@ class SqlAlchemyIntelligenceRepository:
                         )
                         .join(Document, Document.id == DocumentVersion.document_id)
                         .join(Source, Source.id == Document.source_id)
-                        .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                        .join(
+                            DocumentVersionPlatform,
+                            DocumentVersionPlatform.document_version_id == DocumentVersion.id,
+                        )
                         .join(
                             DocumentProvenance,
-                            DocumentProvenance.document_version_id
-                            == DocumentVersion.id,
+                            DocumentProvenance.document_version_id == DocumentVersion.id,
                         )
                         .where(
                             Document.current_version_id == DocumentVersion.id,
                             Source.compliance == "allowed",
                             Source.enabled.is_(True),
-                            DocumentProvenance.content_scope
-                            == ContentScope.FULL_TEXT.value,
+                            DocumentProvenance.content_scope == ContentScope.FULL_TEXT.value,
                             AnalysisJob.status == "completed",
                             DocumentAnalysis.evidence_confidence >= 75,
                             DocumentVersion.fetched_at >= window_start,
                             DocumentVersion.fetched_at < window_end,
                         )
-                        .group_by(SourcePlatform.platform)
+                        .group_by(DocumentVersionPlatform.platform)
                     )
                 ).all()
             )
             scope_rows = (
                 await session.execute(
                     select(
-                        SourcePlatform.platform,
+                        DocumentVersionPlatform.platform,
                         DocumentProvenance.content_scope,
                         func.count(Document.content_group_hash.distinct()),
                     )
                     .select_from(DocumentVersion)
                     .join(Document, Document.id == DocumentVersion.document_id)
                     .join(Source, Source.id == Document.source_id)
-                    .join(SourcePlatform, SourcePlatform.source_id == Source.id)
+                    .join(
+                        DocumentVersionPlatform,
+                        DocumentVersionPlatform.document_version_id == DocumentVersion.id,
+                    )
                     .join(
                         DocumentProvenance,
                         DocumentProvenance.document_version_id == DocumentVersion.id,
@@ -752,14 +763,13 @@ class SqlAlchemyIntelligenceRepository:
                         DocumentVersion.fetched_at < window_end,
                     )
                     .group_by(
-                        SourcePlatform.platform,
+                        DocumentVersionPlatform.platform,
                         DocumentProvenance.content_scope,
                     )
                 )
             ).all()
             scope_counts = {
-                (platform, content_scope): count
-                for platform, content_scope, count in scope_rows
+                (platform, content_scope): count for platform, content_scope, count in scope_rows
             }
             anomaly_rows = (
                 await session.execute(
@@ -805,9 +815,7 @@ class SqlAlchemyIntelligenceRepository:
             for platform in Platform
         )
 
-    async def save_report(
-        self, group_id: str, draft: DailyReportDraft, *, now: datetime
-    ) -> int:
+    async def save_report(self, group_id: str, draft: DailyReportDraft, *, now: datetime) -> int:
         values = {
             "group_id": group_id,
             "report_date": draft.report_date,
@@ -846,8 +854,7 @@ class SqlAlchemyIntelligenceRepository:
                 if (
                     report.window_start == draft.window_start
                     and report.window_end == draft.window_end
-                    and report.selected_analysis_ids
-                    == list(draft.selected_analysis_ids)
+                    and report.selected_analysis_ids == list(draft.selected_analysis_ids)
                     and report.report_payload == draft.payload
                 ):
                     return report.id
@@ -883,9 +890,7 @@ class SqlAlchemyIntelligenceRepository:
     async def find_delivery_id(self, idempotency_key: str) -> int | None:
         async with self._session_factory() as session:
             return await session.scalar(
-                select(DeliveryOutbox.id).where(
-                    DeliveryOutbox.idempotency_key == idempotency_key
-                )
+                select(DeliveryOutbox.id).where(DeliveryOutbox.idempotency_key == idempotency_key)
             )
 
     async def queue_delivery(self, message: DeliveryMessage, *, now: datetime) -> int:
@@ -933,23 +938,19 @@ class SqlAlchemyIntelligenceRepository:
             if report is None:
                 raise KeyError(f"daily report {report_id} does not exist")
             if report.status == "sent":
-                raise ReportAlreadySent(
-                    f"daily report {report_id} has already been sent"
-                )
+                raise ReportAlreadySent(f"daily report {report_id} has already been sent")
             if report.status not in {"previewed", "queued"}:
                 raise RuntimeError("daily report must be previewed before it can be queued")
 
             idempotency_key = f"daily:{report.group_id}:{report.report_date.isoformat()}"
             existing = await session.scalar(
-                select(DeliveryOutbox).where(
-                    DeliveryOutbox.idempotency_key == idempotency_key
-                )
+                select(DeliveryOutbox).where(DeliveryOutbox.idempotency_key == idempotency_key)
             )
             if existing is not None:
-                if (
-                    existing.message_kind == MessageKind.DAILY_REPORT.value
-                    and existing.status in {"skipped", "failed"}
-                ):
+                if existing.message_kind == MessageKind.DAILY_REPORT.value and existing.status in {
+                    "skipped",
+                    "failed",
+                }:
                     existing.payload = report.report_payload
                     existing.status = "pending"
                     existing.attempt_count = 0
@@ -1020,9 +1021,7 @@ class SqlAlchemyIntelligenceRepository:
             separators=(",", ":"),
         )
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
-        idempotency_key = (
-            f"daily-{variant}:{group_id}:{draft.report_date.isoformat()}:{digest}"
-        )
+        idempotency_key = f"daily-{variant}:{group_id}:{draft.report_date.isoformat()}:{digest}"
         async with self._session_factory.begin() as session:
             outbox_id = (
                 await session.execute(
@@ -1075,9 +1074,7 @@ class SqlAlchemyIntelligenceRepository:
             for queued_message in deduplicated:
                 queued_message = replace(
                     queued_message,
-                    idempotency_key=await _next_alert_idempotency_key(
-                        session, queued_message
-                    ),
+                    idempotency_key=await _next_alert_idempotency_key(session, queued_message),
                 )
                 inserted_id = (
                     await session.execute(
@@ -1153,24 +1150,14 @@ class SqlAlchemyIntelligenceRepository:
             )
             .order_by(DocumentAnalysis.analyzed_at, DocumentAnalysis.id)
         )
-        async with self._session_factory() as session:
+        async with self._session_factory.begin() as session:
             rows = (await session.execute(statement)).all()
             if not rows:
                 return ()
-            platform_rows = (
-                await session.execute(
-                    select(SourcePlatform.source_id, SourcePlatform.platform)
-                    .where(
-                        SourcePlatform.source_id.in_(
-                            {source.id for _, _, _, _, source, _ in rows}
-                        )
-                    )
-                    .order_by(SourcePlatform.source_id, SourcePlatform.platform)
-                )
-            ).all()
-            platforms_by_source: dict[str, list[Platform]] = {}
-            for source_id, platform in platform_rows:
-                platforms_by_source.setdefault(source_id, []).append(Platform(platform))
+            platforms_by_version = await _platforms_by_version(
+                session,
+                {version.id: source.id for _, _, version, _, source, _ in rows},
+            )
 
             return tuple(
                 _scored_analysis(
@@ -1180,9 +1167,10 @@ class SqlAlchemyIntelligenceRepository:
                     document,
                     source,
                     provenance,
-                    platforms=tuple(platforms_by_source.get(source.id, ())),
+                    platforms=platforms_by_version.get(version.id, ()),
                 )
                 for analysis, job, version, document, source, provenance in rows
+                if platforms_by_version.get(version.id, ())
             )
 
     async def claim_delivery(
@@ -1215,8 +1203,7 @@ class SqlAlchemyIntelligenceRepository:
         lease_token = uuid4().hex
         due = or_(
             DeliveryOutbox.status == "pending",
-            (DeliveryOutbox.status == "retry_wait")
-            & (DeliveryOutbox.next_attempt_at <= now),
+            (DeliveryOutbox.status == "retry_wait") & (DeliveryOutbox.next_attempt_at <= now),
             (DeliveryOutbox.status == "sending")
             & (DeliveryOutbox.lease_expires_at <= now)
             & (DeliveryOutbox.attempt_count < 4),
@@ -1312,9 +1299,7 @@ class SqlAlchemyIntelligenceRepository:
                 if report_id is None:
                     raise RuntimeError("linked daily report is not queued")
 
-    async def fail_delivery(
-        self, claim: DeliveryClaim, code: str, *, now: datetime
-    ) -> None:
+    async def fail_delivery(self, claim: DeliveryClaim, code: str, *, now: datetime) -> None:
         retry_index = claim.attempt_count - 1
         if retry_index < len(RETRY_DELAYS):
             status = "retry_wait"
@@ -1372,18 +1357,14 @@ class SqlAlchemyIntelligenceRepository:
             return ()
         async with self._session_factory() as session:
             rows = await session.scalars(
-                select(DeliveryOutbox)
-                .where(DeliveryOutbox.id.in_(ids))
-                .order_by(DeliveryOutbox.id)
+                select(DeliveryOutbox).where(DeliveryOutbox.id.in_(ids)).order_by(DeliveryOutbox.id)
             )
             return tuple(rows.all())
 
     async def next_delivery_time(self, outbox_id: int) -> datetime | None:
         async with self._session_factory() as session:
             return await session.scalar(
-                select(DeliveryOutbox.next_attempt_at).where(
-                    DeliveryOutbox.id == outbox_id
-                )
+                select(DeliveryOutbox.next_attempt_at).where(DeliveryOutbox.id == outbox_id)
             )
 
     async def fail_analysis(
@@ -1458,9 +1439,7 @@ class SqlAlchemyIntelligenceRepository:
             inserted_ids = (await session.scalars(statement)).all()
             return len(inserted_ids)
 
-    async def _load_candidate(
-        self, session: AsyncSession, job_id: int
-    ) -> AnalysisCandidate:
+    async def _load_candidate(self, session: AsyncSession, job_id: int) -> AnalysisCandidate:
         row = (
             await session.execute(
                 select(
@@ -1484,16 +1463,12 @@ class SqlAlchemyIntelligenceRepository:
             )
         ).one()
         job, version, document, source, provenance = row
-        platforms = tuple(
-            Platform(platform)
-            for platform in (
-                await session.scalars(
-                    select(SourcePlatform.platform)
-                    .where(SourcePlatform.source_id == source.id)
-                    .order_by(SourcePlatform.platform)
-                )
-            ).all()
-        )
+        platforms = (
+            await _platforms_by_version(
+                session,
+                {version.id: source.id},
+            )
+        ).get(version.id, ())
         return AnalysisCandidate(
             job_id=job.id,
             lease_token=job.lease_token,
@@ -1522,6 +1497,138 @@ def _require_lease_token(claim: AnalysisCandidate) -> str:
     if claim.lease_token is None:
         raise StaleLeaseError("analysis claim has no lease token")
     return claim.lease_token
+
+
+async def _platforms_by_version(
+    session: AsyncSession,
+    version_sources: dict[int, str],
+) -> dict[int, tuple[Platform, ...]]:
+    """Resolve exact article platforms, failing closed for article-varying sources."""
+    if not version_sources:
+        return {}
+    version_ids = tuple(version_sources)
+    exact_rows = (
+        await session.execute(
+            select(
+                DocumentVersionPlatform.document_version_id,
+                DocumentVersionPlatform.platform,
+            )
+            .where(DocumentVersionPlatform.document_version_id.in_(version_ids))
+            .order_by(
+                DocumentVersionPlatform.document_version_id,
+                DocumentVersionPlatform.platform,
+            )
+        )
+    ).all()
+    values: dict[int, list[Platform]] = {}
+    for version_id, platform in exact_rows:
+        values.setdefault(version_id, []).append(Platform(platform))
+
+    missing_version_ids = tuple(
+        version_id for version_id in version_sources if version_id not in values
+    )
+    if not missing_version_ids:
+        return {version_id: tuple(platforms) for version_id, platforms in values.items()}
+
+    resolved_ids = set(
+        (
+            await session.scalars(
+                select(DocumentVersionPlatformResolution.document_version_id).where(
+                    DocumentVersionPlatformResolution.document_version_id.in_(
+                        missing_version_ids
+                    )
+                )
+            )
+        ).all()
+    )
+    version_rows = (
+        await session.execute(
+            select(
+                DocumentVersion.id,
+                DocumentVersion.body,
+                Source.id,
+                Source.collector_config,
+            )
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .where(DocumentVersion.id.in_(missing_version_ids))
+        )
+    ).all()
+    missing_source_ids = {source_id for _, _, source_id, _ in version_rows}
+    source_values: dict[str, list[Platform]] = {}
+    if missing_source_ids:
+        source_rows = (
+            await session.execute(
+                select(SourcePlatform.source_id, SourcePlatform.platform)
+                .where(SourcePlatform.source_id.in_(tuple(missing_source_ids)))
+                .order_by(SourcePlatform.source_id, SourcePlatform.platform)
+            )
+        ).all()
+        for source_id, platform in source_rows:
+            source_values.setdefault(source_id, []).append(Platform(platform))
+
+    for version_id, body, source_id, collector_config in version_rows:
+        source_platforms = tuple(source_values.get(source_id, ()))
+        article_platforms_vary = (
+            isinstance(collector_config, dict)
+            and collector_config.get("public_article_gate") is True
+        )
+        if not article_platforms_vary:
+            values[version_id] = list(source_platforms)
+            continue
+        recovered = (
+            ()
+            if version_id in resolved_ids
+            else matched_target_platforms(body or "", source_platforms)
+        )
+        if version_id not in resolved_ids:
+            if recovered:
+                await session.execute(
+                    sqlite_insert(DocumentVersionPlatform)
+                    .values(
+                        [
+                            {
+                                "document_version_id": version_id,
+                                "platform": platform.value,
+                            }
+                            for platform in recovered
+                        ]
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=["document_version_id", "platform"]
+                    )
+                )
+            await session.execute(
+                sqlite_insert(DocumentVersionPlatformResolution)
+                .values(document_version_id=version_id)
+                .on_conflict_do_nothing(index_elements=["document_version_id"])
+            )
+        values[version_id] = list(recovered)
+
+    return {
+        version_id: tuple(values.get(version_id, ())) for version_id in version_sources
+    }
+
+
+async def _backfill_unresolved_article_platforms(session: AsyncSession) -> None:
+    unresolved = (
+        await session.execute(
+            select(DocumentVersion.id, Document.source_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .join(Source, Source.id == Document.source_id)
+            .outerjoin(
+                DocumentVersionPlatformResolution,
+                DocumentVersionPlatformResolution.document_version_id
+                == DocumentVersion.id,
+            )
+            .where(
+                DocumentVersionPlatformResolution.document_version_id.is_(None),
+                Source.collector_config["public_article_gate"].as_boolean().is_(True),
+            )
+        )
+    ).all()
+    if unresolved:
+        await _platforms_by_version(session, dict(unresolved))
 
 
 def _evidence_quotes(payload: object) -> tuple[str, ...]:
@@ -1569,17 +1676,13 @@ async def _deduplicate_alert_messages(
     )
     recent_items_by_group: dict[str, list[dict[str, object]]] = {}
     for row in recent_rows:
-        recent_items_by_group.setdefault(row.group_id, []).extend(
-            _payload_items(row.payload)
-        )
+        recent_items_by_group.setdefault(row.group_id, []).extend(_payload_items(row.payload))
 
     deduplicated: list[DeliveryMessage] = []
     for message in messages:
         recent_items = recent_items_by_group.setdefault(message.group_id, [])
         original_items = _payload_items(message.payload)
-        new_items = [
-            item for item in original_items if _alert_item_allowed(item, recent_items)
-        ]
+        new_items = [item for item in original_items if _alert_item_allowed(item, recent_items)]
         if original_items and not new_items:
             continue
         deduplicated.append(_with_alert_items(message, new_items))
@@ -1587,9 +1690,7 @@ async def _deduplicate_alert_messages(
     return tuple(deduplicated)
 
 
-def _alert_item_allowed(
-    item: dict[str, object], recent_items: list[dict[str, object]]
-) -> bool:
+def _alert_item_allowed(item: dict[str, object], recent_items: list[dict[str, object]]) -> bool:
     fingerprint = item.get("event_fingerprint")
     if not isinstance(fingerprint, str):
         return True
@@ -1617,9 +1718,7 @@ def _alert_item_allowed(
     )
 
 
-def _with_alert_items(
-    message: DeliveryMessage, items: list[dict[str, object]]
-) -> DeliveryMessage:
+def _with_alert_items(message: DeliveryMessage, items: list[dict[str, object]]) -> DeliveryMessage:
     original_items = _payload_items(message.payload)
     if items == original_items:
         return message
@@ -1650,9 +1749,7 @@ def _with_alert_items(
     )
 
 
-async def _next_alert_idempotency_key(
-    session: AsyncSession, message: DeliveryMessage
-) -> str:
+async def _next_alert_idempotency_key(session: AsyncSession, message: DeliveryMessage) -> str:
     terminal_rows = list(
         (
             await session.scalars(
@@ -1668,11 +1765,7 @@ async def _next_alert_idempotency_key(
     )
     identity = _alert_message_identity(message.payload)
     terminal = next(
-        (
-            row
-            for row in terminal_rows
-            if _alert_message_identity(row.payload) == identity
-        ),
+        (row for row in terminal_rows if _alert_message_identity(row.payload) == identity),
         None,
     )
     if terminal is None:

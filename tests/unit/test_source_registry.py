@@ -87,16 +87,16 @@ OUT_OF_SCOPE_STATUS = {
         False,
     ),
     "media-ecommercebytes-feed": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
-    "media-gdelt-amazon": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-temu": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-shein": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-shopee": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-ebay": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-coupang": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-ozon": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-joybuy": (ComplianceStatus.ALLOWED, False),
-    "media-gdelt-tiktok-shop": (ComplianceStatus.ALLOWED, False),
+    "media-gdelt-amazon": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-temu": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-shein": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-aliexpress": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-shopee": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-ebay": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-coupang": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-ozon": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-joybuy": (ComplianceStatus.ALLOWED, True),
+    "media-gdelt-tiktok-shop": (ComplianceStatus.ALLOWED, True),
     "media-marketplace-pulse": (ComplianceStatus.DENIED, False),
     "media-reuters-retail": (ComplianceStatus.AUTHORIZATION_REQUIRED, False),
 }
@@ -355,6 +355,32 @@ def test_validates_collector_specific_fields(
         SourceRegistry.from_yaml(_write_registry(tmp_path, document))
 
 
+@pytest.mark.parametrize("allowed_hosts", ["*", "localhost", "https://host", "host:443"])
+def test_rejects_unsafe_html_allowed_hosts(
+    tmp_path: Path,
+    allowed_hosts: str,
+) -> None:
+    document = _valid_document()
+    source = document["sources"][0]  # type: ignore[index]
+    source["collector_config"]["allowed_hosts"] = allowed_hosts
+
+    with pytest.raises(SourceRegistryError, match=r"zeta-html.*allowed_hosts"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
+@pytest.mark.parametrize("link_path_prefixes", ["/", "detail--", "/detail--?p=1"])
+def test_rejects_unsafe_html_link_path_prefixes(
+    tmp_path: Path,
+    link_path_prefixes: str,
+) -> None:
+    document = _valid_document()
+    source = document["sources"][0]  # type: ignore[index]
+    source["collector_config"]["link_path_prefixes"] = link_path_prefixes
+
+    with pytest.raises(SourceRegistryError, match=r"zeta-html.*link_path_prefixes"):
+        SourceRegistry.from_yaml(_write_registry(tmp_path, document))
+
+
 def test_rejects_unknown_keys_with_source_id(tmp_path: Path) -> None:
     document = _valid_document()
     document["sources"][0]["secret_header"] = "do-not-accept"  # type: ignore[index]
@@ -481,18 +507,14 @@ def test_each_platform_has_two_registered_candidate_publishers() -> None:
 
 def test_public_registry_has_one_bounded_gdelt_query_per_platform() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
-    gdelt = tuple(
-        source
-        for source in registry.sources
-        if source.adapter is SourceAdapter.GDELT
-    )
+    gdelt = tuple(source for source in registry.sources if source.adapter is SourceAdapter.GDELT)
 
     assert len(gdelt) == len(Platform)
     assert {source.platforms[0] for source in gdelt} == set(Platform)
     for source in gdelt:
         assert len(source.platforms) == 1
         assert source.content_scope is ContentScope.METADATA_ONLY
-        assert source.enabled is False
+        assert source.enabled is True
         assert source.collector_config["item_limit"] == 25
         query = parse_qs(urlsplit(source.entry_url).query)
         assert query["mode"] == ["artlist"]
@@ -528,9 +550,7 @@ def test_source_acceptance_register_covers_new_candidate_sources() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     acceptance = SOURCE_ACCEPTANCE.read_text(encoding="utf-8")
     candidate_ids = {
-        source.source_id
-        for source in registry.sources
-        if source.reviewed_at == date(2026, 7, 27)
+        source.source_id for source in registry.sources if source.reviewed_at == date(2026, 7, 27)
     }
 
     assert candidate_ids
@@ -555,15 +575,11 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
     reviewed = tuple(registry.require(source_id) for source_id in BALANCED_REVIEW_SOURCE_IDS)
 
     assert set(BALANCED_REVIEW_STATUS) == BALANCED_REVIEW_SOURCE_IDS
-    assert {
-        source.source_id: source.compliance
-        for source in reviewed
-    } == BALANCED_REVIEW_STATUS
+    assert {source.source_id: source.compliance for source in reviewed} == BALANCED_REVIEW_STATUS
     assert all(source.reviewed_at == date(2026, 7, 22) for source in reviewed)
     assert all(len(source.compliance_notes) >= 80 for source in reviewed)
     assert all(
-        source.enabled == (source.compliance is ComplianceStatus.ALLOWED)
-        for source in reviewed
+        source.enabled == (source.compliance is ComplianceStatus.ALLOWED) for source in reviewed
     )
     assert all(
         source.collector_config.get("item_limit", 20) <= 20
@@ -578,10 +594,7 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
         for source_id in OUT_OF_SCOPE_STATUS
     } == OUT_OF_SCOPE_STATUS
     assert {
-        source_id: {
-            field: getattr(registry.require(source_id), field)
-            for field in evidence
-        }
+        source_id: {field: getattr(registry.require(source_id), field) for field in evidence}
         for source_id, evidence in BALANCED_REVIEW_SOURCE_EVIDENCE.items()
     } == BALANCED_REVIEW_SOURCE_EVIDENCE
     assert set(BALANCED_REVIEW_NOTE_MARKERS) == BALANCED_REVIEW_SOURCE_IDS
@@ -591,33 +604,42 @@ def test_public_registry_applies_balanced_review_decisions_without_scope_drift()
     )
 
 
-def test_public_registry_media_candidates_are_fully_annotated_but_stay_disabled() -> None:
+def test_public_registry_media_sources_are_fully_annotated_and_safely_enabled() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     media = tuple(source for source in registry.sources if source.trust_tier is TrustTier.MEDIA)
 
     assert media
     for source in media:
         assert source.adapter in {SourceAdapter.GENERIC, SourceAdapter.GDELT}
-        assert source.content_scope in {
-            ContentScope.METADATA_ONLY,
-            ContentScope.FEED_SUMMARY,
-        }
         assert source.attribution
         if source.adapter is SourceAdapter.GENERIC:
             assert source.publisher_key
+            assert source.enabled == (
+                source.source_id
+                in {
+                    "media-cifnews-cross-border",
+                    "media-100ec-cross-border",
+                }
+            )
+            if source.enabled:
+                assert source.content_scope is ContentScope.FULL_TEXT
+            else:
+                assert source.content_scope in {
+                    ContentScope.METADATA_ONLY,
+                    ContentScope.FEED_SUMMARY,
+                }
         else:
             assert source.publisher_key is None
-        assert source.enabled is False
+            assert source.enabled is True
+            assert source.content_scope is ContentScope.METADATA_ONLY
 
 
 def test_requested_chinese_media_candidates_are_registered_but_disabled() -> None:
     registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
     expected = {
-        "media-cifnews-cross-border": "cifnews.com",
         "media-ennews-cross-border": "ennews.com",
         "media-chwang-cross-border": "chwang.com",
         "media-dsb-cross-border": "dsb.cn",
-        "media-100ec-cross-border": "100ec.cn",
     }
 
     for source_id, publisher_key in expected.items():
@@ -626,6 +648,72 @@ def test_requested_chinese_media_candidates_are_registered_but_disabled() -> Non
         assert source.trust_tier is TrustTier.MEDIA
         assert source.content_scope is ContentScope.METADATA_ONLY
         assert source.enabled is False
+
+
+def test_public_registry_enables_scoped_chinese_media_sources() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    cifnews = registry.require("media-cifnews-cross-border")
+    ec100 = registry.require("media-100ec-cross-border")
+
+    assert (
+        cifnews.compliance,
+        cifnews.enabled,
+        cifnews.collector,
+        cifnews.content_scope,
+        cifnews.publisher_key,
+    ) == (
+        ComplianceStatus.ALLOWED,
+        True,
+        CollectorKind.HTML,
+        ContentScope.FULL_TEXT,
+        "cifnews.com",
+    )
+    assert cifnews.collector_config == {
+        "link_selector": "a",
+        "link_path_prefixes": "/article/",
+        "allowed_hosts": "www.cifnews.com",
+        "public_article_gate": True,
+        "item_limit": 10,
+    }
+
+    assert (
+        ec100.compliance,
+        ec100.enabled,
+        ec100.collector,
+        ec100.content_scope,
+        ec100.publisher_key,
+    ) == (
+        ComplianceStatus.ALLOWED,
+        True,
+        CollectorKind.HTML,
+        ContentScope.FULL_TEXT,
+        "100ec.cn",
+    )
+    assert ec100.entry_url == "https://imgs-b2b.100ec.cn/list--3--1.html"
+    assert ec100.collector_config == {
+        "link_selector": "a",
+        "link_path_prefixes": "/detail--",
+        "allowed_hosts": "imgs-b2b.100ec.cn",
+        "public_article_gate": True,
+        "item_limit": 5,
+    }
+    assert cifnews.strict_coverage_platforms == ()
+    assert ec100.strict_coverage_platforms == ()
+
+
+def test_public_registry_records_only_three_audited_strict_coverage_pairs() -> None:
+    registry = SourceRegistry.from_yaml(PUBLIC_SOURCES)
+    pairs = {
+        (source.publisher_key, platform)
+        for source in registry.sources
+        for platform in source.strict_coverage_platforms
+    }
+
+    assert pairs == {
+        ("ebayinc.com", Platform.EBAY),
+        ("coupang.com", Platform.COUPANG),
+        ("joybuy.com", Platform.JOYBUY),
+    }
 
 
 def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() -> None:
@@ -645,7 +733,7 @@ def test_first_live_source_definitions_match_reviewed_endpoints_and_budgets() ->
     assert gdelt.content_scope is ContentScope.METADATA_ONLY
     assert gdelt.publisher_key is None
     assert gdelt.platforms == (Platform.AMAZON,)
-    assert gdelt.enabled is False
+    assert gdelt.enabled is True
     assert gdelt.collector_config == {
         "items_path": "$.articles",
         "url_field": "$.url",

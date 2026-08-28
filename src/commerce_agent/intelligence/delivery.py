@@ -45,6 +45,7 @@ _MEDIA_CATEGORY_LABELS = {
     "global_authority": "全球权威媒体",
     "specialist": "电商与零售专业媒体",
     "chinese_industry": "中文跨境行业媒体",
+    "public_authority": "监管/公共机构信息",
 }
 _CONTENT_BASIS_LABELS = {
     "full_text": "已读取公开原文",
@@ -118,9 +119,7 @@ class FeishuDeliveryPort:
                     fallback_options,
                 )
                 if not getattr(result, "success", False):
-                    raise DeliverySendError(
-                        safe_feishu_error_code(getattr(result, "error", None))
-                    )
+                    raise DeliverySendError(safe_feishu_error_code(getattr(result, "error", None)))
             message_id = getattr(result, "message_id", None)
             if not isinstance(message_id, str) or not message_id:
                 raise DeliverySendError("unknown_feishu_error")
@@ -247,9 +246,7 @@ def _media_context_line(item: dict[str, object]) -> str:
         return ""
     parts: list[str] = []
     if category is not None:
-        parts.append(
-            f"来源类型：{_MEDIA_CATEGORY_LABELS.get(str(category), '未识别')}"
-        )
+        parts.append(f"来源类型：{_MEDIA_CATEGORY_LABELS.get(str(category), '未识别')}")
     if basis is not None:
         parts.append(f"分析依据：{_CONTENT_BASIS_LABELS.get(str(basis), '未识别')}")
     return "｜".join(parts) + "\n"
@@ -262,12 +259,15 @@ def alert_markdown(item: dict[str, object], *, compact: bool = False) -> str:
         f"（原文依据：{_plain(row['quote'], limit=field_limit)}）"
         for row in item["rationale"]
     )
-    actions = "\n".join(
-        f"{index}. {_plain(row['action'], limit=field_limit)}"
-        f"（负责人：{_plain(row['owner_type'], limit=field_limit)}；"
-        f"建议完成：{_friendly_deadline(row.get('deadline'))}）"
-        for index, row in enumerate(item["actions"], start=1)
-    ) or "暂时不用立即调整，先保存原文并关注后续公告。"
+    actions = (
+        "\n".join(
+            f"{index}. {_plain(row['action'], limit=field_limit)}"
+            f"（负责人：{_plain(row['owner_type'], limit=field_limit)}；"
+            f"建议完成：{_friendly_deadline(row.get('deadline'))}）"
+            for index, row in enumerate(item["actions"], start=1)
+        )
+        or "暂时不用立即调整，先保存原文并关注后续公告。"
+    )
     uncertainties = (
         "；".join(_plain(value, limit=field_limit) for value in item["uncertainties"]) or "无"
     )

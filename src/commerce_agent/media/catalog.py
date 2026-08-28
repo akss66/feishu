@@ -10,6 +10,7 @@ class MediaCategory(StrEnum):
     GLOBAL_AUTHORITY = "global_authority"
     SPECIALIST = "specialist"
     CHINESE_INDUSTRY = "chinese_industry"
+    PUBLIC_AUTHORITY = "public_authority"
 
 
 class ArticleAccess(StrEnum):
@@ -32,8 +33,10 @@ class PublisherProfile:
 _AUTHORITY = MediaCategory.GLOBAL_AUTHORITY
 _SPECIALIST = MediaCategory.SPECIALIST
 _CHINESE = MediaCategory.CHINESE_INDUSTRY
+_PUBLIC_AUTHORITY = MediaCategory.PUBLIC_AUTHORITY
 _AUTHORIZATION = ArticleAccess.AUTHORIZATION_REQUIRED
 _METADATA_ONLY = ArticleAccess.METADATA_ONLY
+_ALLOWED_PUBLIC = ArticleAccess.ALLOWED_PUBLIC
 
 _PUBLISHERS = (
     PublisherProfile("reuters.com", "Reuters", _AUTHORITY, _AUTHORIZATION, ("reuters.com",)),
@@ -97,6 +100,27 @@ _PUBLISHERS = (
     PublisherProfile("ebrun.com", "亿邦动力", _CHINESE, _METADATA_ONLY, ("ebrun.com",)),
     PublisherProfile("baijing.cn", "白鲸出海", _CHINESE, _METADATA_ONLY, ("baijing.cn",)),
     PublisherProfile("36kr.com", "36氪", _CHINESE, _METADATA_ONLY, ("36kr.com",)),
+    PublisherProfile(
+        "ftc.gov",
+        "Federal Trade Commission",
+        _PUBLIC_AUTHORITY,
+        _ALLOWED_PUBLIC,
+        ("ftc.gov", "www.ftc.gov"),
+    ),
+    PublisherProfile(
+        "gov.uk",
+        "UK Government",
+        _PUBLIC_AUTHORITY,
+        _ALLOWED_PUBLIC,
+        ("gov.uk", "www.gov.uk"),
+    ),
+    PublisherProfile(
+        "european-union.europa.eu",
+        "European Union",
+        _PUBLIC_AUTHORITY,
+        _ALLOWED_PUBLIC,
+        ("european-union.europa.eu",),
+    ),
 )
 _BY_KEY = {profile.publisher_key: profile for profile in _PUBLISHERS}
 
@@ -115,8 +139,7 @@ def publisher_profile(hostname: str) -> PublisherProfile | None:
         return None
     for profile in _PUBLISHERS:
         if any(
-            normalized == host or normalized.endswith(f".{host}")
-            for host in profile.allowed_hosts
+            normalized == host or normalized.endswith(f".{host}") for host in profile.allowed_hosts
         ):
             return profile
     return None

@@ -124,15 +124,17 @@ def test_automatic_article_extraction_does_not_repeat_the_complete_body_sequence
 
 
 def test_source_article_selector_overrides_automatic_extraction() -> None:
-    html = b"""
+    html = (
+        b"""
     <html><head><title>Selector fixture</title></head><body>
-      <article><p>This long decoy article is repeated to attract automatic extraction. """ + (
-        b"decoy text " * 80
-    ) + b"""</p></article>
+      <article><p>This long decoy article is repeated to attract automatic extraction. """
+        + (b"decoy text " * 80)
+        + b"""</p></article>
       <section id="policy"><h1>Required notice</h1>
         <p>Only this seller policy text may be extracted.</p></section>
     </body></html>
     """
+    )
     item = CollectedItem(
         url="https://example.com/selector",
         body=html,
@@ -280,6 +282,39 @@ def test_gdelt_media_prefers_item_level_full_text_scope() -> None:
     assert document.metadata["content_scope"] == "full_text"
 
 
+def test_public_media_persists_only_platforms_matched_in_extracted_body() -> None:
+    media_source = replace(
+        source(),
+        platforms=(Platform.AMAZON, Platform.TEMU),
+        trust_tier=TrustTier.MEDIA,
+        adapter=SourceAdapter.GENERIC,
+        content_scope=ContentScope.FULL_TEXT,
+        attribution="Fixture Media",
+        publisher_key="media.example.com",
+        collector_config={
+            "link_selector": "a",
+            "public_article_gate": True,
+        },
+    )
+    item = CollectedItem(
+        url="https://media.example.com/amazon",
+        body=(
+            b"<html><body><article>"
+            + b"<p>Amazon seller compliance requirements changed this week.</p>" * 20
+            + b"</article></body></html>"
+        ),
+        content_type="text/html",
+    )
+
+    document = ContentExtractor(FixedLanguageDetector()).extract(
+        media_source,
+        item,
+        fetched_at=FETCHED_AT,
+    )
+
+    assert document.platforms == (Platform.AMAZON,)
+
+
 def test_media_without_final_publisher_identity_fails_with_safe_code() -> None:
     media_source = replace(
         source(),
@@ -315,9 +350,7 @@ def test_blank_content_is_rejected() -> None:
     )
 
     with pytest.raises(ExtractionError, match="blank_content"):
-        ContentExtractor(FixedLanguageDetector()).extract(
-            source(), item, fetched_at=FETCHED_AT
-        )
+        ContentExtractor(FixedLanguageDetector()).extract(source(), item, fetched_at=FETCHED_AT)
 
 
 def test_rss_title_is_retained_when_feed_omits_summary() -> None:
@@ -349,9 +382,7 @@ def test_bad_published_time_does_not_crash_extraction() -> None:
     </article></body>
     </html>
     """
-    item = CollectedItem(
-        url="https://example.com/bad-date", body=html, content_type="text/html"
-    )
+    item = CollectedItem(url="https://example.com/bad-date", body=html, content_type="text/html")
 
     document = ContentExtractor(FixedLanguageDetector()).extract(
         source(), item, fetched_at=FETCHED_AT

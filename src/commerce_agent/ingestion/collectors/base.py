@@ -16,6 +16,7 @@ from commerce_agent.ingestion.models import (
     ResponseArtifact,
     SourceDefinition,
 )
+from commerce_agent.ingestion.security import canonical_hostname
 
 DEFAULT_ITEM_LIMIT = 100
 _METADATA_HOSTS = frozenset(
@@ -40,6 +41,7 @@ _CONTROLLED_DETAIL_ERROR_CODES = frozenset(
         "invalid_url",
         "network_retry_exhausted",
         "port_not_allowed",
+        "rate_limited",
         "redirect_missing_location",
         "redirect_status_not_supported",
         "renderer_failed",
@@ -108,10 +110,22 @@ class Collector(Protocol):
 
 
 def allowed_hosts(source: SourceDefinition) -> tuple[str, ...]:
+    configured = source.collector_config.get("allowed_hosts")
+    if isinstance(configured, str):
+        normalized_hosts: list[str] = []
+        for token in configured.split(","):
+            if not token.strip():
+                continue
+            normalized = canonical_hostname(token.strip(), required=False)
+            if normalized is None:
+                raise CollectorError("invalid_config")
+            normalized_hosts.append(normalized)
+        return tuple(dict.fromkeys(normalized_hosts))
     host = urlsplit(source.entry_url).hostname
-    if host is None:
+    normalized = canonical_hostname(host, required=False)
+    if normalized is None:
         raise CollectorError("invalid_config")
-    return (host.rstrip(".").lower(),)
+    return (normalized,)
 
 
 def item_limit(source: SourceDefinition) -> int:
@@ -170,6 +184,8 @@ def fetch_request(
         etag=context.etag if conditional else None,
         last_modified=context.last_modified if conditional else None,
         metrics=context.metrics,
+        source_id=source.source_id,
+        circuit=context.circuit,
     )
 
 

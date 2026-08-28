@@ -71,11 +71,10 @@ async def _run_configured(settings: Settings) -> None:
     try:
         resources.database = Database(settings.database_url)
         await resources.database.create_schema()
-        if scheduler_enabled:
-            resources.scheduler, resources.ingestion_resources = await _build_ingestion(
-                settings,
-                resources.database,
-            )
+        resources.scheduler, resources.ingestion_resources = await _build_ingestion(
+            settings,
+            resources.database,
+        )
 
         bindings = SqlAlchemyGroupBindingStore(resources.database.session)
         manual_submissions = _build_manual_submissions(resources.database)
@@ -114,7 +113,7 @@ async def _run_configured(settings: Settings) -> None:
                 bindings,
                 ingestion=(
                     resources.scheduler.service
-                    if resources.scheduler is not None
+                    if scheduler_enabled and resources.scheduler is not None
                     else None
                 ),
             )
@@ -154,9 +153,7 @@ def _build_manual_submissions(database: Any) -> Any:
     from commerce_agent.ingestion.official_notices import OfficialAccountRegistry
     from commerce_agent.persistence.ingestion import SqlAlchemyIngestionRepository
 
-    accounts_path = (
-        Path(__file__).parent / "sources" / "official_accounts.yaml"
-    )
+    accounts_path = Path(__file__).parent / "sources" / "official_accounts.yaml"
     accounts = OfficialAccountRegistry.from_yaml(accounts_path)
     return ManualSubmissionService(
         accounts,
@@ -187,15 +184,14 @@ def _build_email_notice_scheduler(settings: Any, sink: Any) -> Any:
     provider = ImapOfficialNoticeProvider(
         client,
         accounts=accounts,
-        allowed_senders=parse_allowed_senders(
-            settings.official_notice_email_allowed_senders
-        ),
+        allowed_senders=parse_allowed_senders(settings.official_notice_email_allowed_senders),
         max_message_bytes=settings.official_notice_email_max_message_bytes,
         max_attachment_bytes=settings.official_notice_email_max_attachment_bytes,
     )
     return IngestionScheduler(
         EmailNoticeIngestionService(provider, sink),
         interval_minutes=settings.ingestion_interval_minutes,
+        retention_enabled=False,
         timezone="UTC",
     )
 
@@ -360,12 +356,17 @@ async def _build_ingestion(
             timeout_seconds=settings.ingestion_http_timeout_seconds,
             max_response_bytes=settings.ingestion_max_response_bytes,
             user_agent=settings.ingestion_user_agent,
+            max_redirects=3,
         )
         collectors = {
             CollectorKind.RSS: FeedCollector(http_client),
             CollectorKind.SITEMAP: SitemapCollector(http_client),
             CollectorKind.HTML: HtmlCollector(http_client),
-            CollectorKind.API: ApiCollector(http_client),
+            CollectorKind.API: ApiCollector(
+                http_client,
+                fetch_gdelt_originals=settings.gdelt_original_fetch_enabled,
+                gdelt_original_fetch_limit=settings.gdelt_original_fetch_max_per_source,
+            ),
             CollectorKind.BROWSER: BrowserCollector(
                 enabled=False,
                 browser_port=None,
@@ -380,11 +381,15 @@ async def _build_ingestion(
             snapshot_store=SnapshotStore(settings.snapshot_dir),
             repository=repository,
             max_concurrency=settings.ingestion_global_concurrency,
+            gdelt_media_body_retention_days=settings.gdelt_media_body_retention_days,
         )
         await service.initialize()
         scheduler = IngestionScheduler(
             service,
             interval_minutes=settings.ingestion_interval_minutes,
+            collection_enabled=bool(
+                getattr(settings, "ingestion_scheduler_enabled", True)
+            ),
             timezone="UTC",
         )
         return scheduler, (http_client, *resolver_bundle.resources)
@@ -406,7 +411,7 @@ async def _serve(resources: RuntimeResources, *, scheduler_enabled: bool) -> Non
             resources.intelligence_scheduler.start()
         if resources.email_notice_scheduler is not None:
             resources.email_notice_scheduler.start()
-        if scheduler_enabled and resources.scheduler is not None:
+        if resources.scheduler is not None:
             resources.scheduler.start()
         if resources.adapter is not None:
             await resources.adapter.connect()
@@ -433,7 +438,7 @@ async def _close_resources(
         await close(resources.intelligence_scheduler.aclose)
     if resources.email_notice_scheduler is not None:
         await close(resources.email_notice_scheduler.aclose)
-    if scheduler_enabled and resources.scheduler is not None:
+    if resources.scheduler is not None:
         await close(resources.scheduler.aclose)
     if resources.adapter is not None:
         await close(resources.adapter.close)

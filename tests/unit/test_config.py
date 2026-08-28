@@ -6,6 +6,24 @@ from pydantic import SecretStr, ValidationError
 from commerce_agent.config import Settings
 
 
+class _NoopIngestionScheduler:
+    service = object()
+
+    def start(self) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+async def _build_noop_ingestion(
+    settings: object,
+    database: object,
+) -> tuple[_NoopIngestionScheduler, tuple[()]]:
+    del settings, database
+    return _NoopIngestionScheduler(), ()
+
+
 def configure_required_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LARK_APP_ID", "cli_test")
     monkeypatch.setenv("LARK_APP_SECRET", "local-test-secret")
@@ -28,6 +46,9 @@ def test_settings_apply_safe_ingestion_defaults(monkeypatch: pytest.MonkeyPatch)
     assert settings.snapshot_dir == Path("data/snapshots")
     assert settings.ingestion_user_agent.strip()
     assert settings.ingestion_scheduler_enabled is False
+    assert settings.gdelt_original_fetch_enabled is False
+    assert settings.gdelt_original_fetch_max_per_source == 5
+    assert settings.gdelt_media_body_retention_days == 7
 
 
 def test_settings_accept_cloudflare_doh_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,6 +137,8 @@ def test_legacy_evidence_threshold_only_accepts_75(
         ("INGESTION_HTTP_TIMEOUT_SECONDS", "0"),
         ("INGESTION_MAX_RESPONSE_BYTES", "0"),
         ("INGESTION_USER_AGENT", "   "),
+        ("GDELT_ORIGINAL_FETCH_MAX_PER_SOURCE", "0"),
+        ("GDELT_ORIGINAL_FETCH_MAX_PER_SOURCE", "26"),
     ],
 )
 def test_settings_reject_invalid_ingestion_limits(
@@ -255,6 +278,7 @@ async def test_runtime_composes_audited_websocket_and_releases_resources(
     monkeypatch.setattr(runtime, "BotService", FakeService)
     monkeypatch.setattr(runtime, "FeishuChannel", FakeChannel)
     monkeypatch.setattr(runtime, "FeishuAdapter", FakeAdapter)
+    monkeypatch.setattr(runtime, "_build_ingestion", _build_noop_ingestion)
 
     await runtime.run()
 
@@ -345,6 +369,7 @@ async def test_runtime_releases_created_resources_when_adapter_initialization_fa
     )
     monkeypatch.setattr(runtime, "FeishuChannel", FakeChannel)
     monkeypatch.setattr(runtime, "FeishuAdapter", FailingAdapter)
+    monkeypatch.setattr(runtime, "_build_ingestion", _build_noop_ingestion)
 
     with pytest.raises(RuntimeError, match="adapter setup failed"):
         await runtime.run()

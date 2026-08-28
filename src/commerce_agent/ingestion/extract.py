@@ -11,6 +11,10 @@ import trafilatura
 from lingua import Language, LanguageDetectorBuilder
 from lxml import html as lxml_html
 
+from commerce_agent.ingestion.article_gate import (
+    extract_public_article_text,
+    validate_extracted_article,
+)
 from commerce_agent.ingestion.dedupe import canonicalize_url, normalize_text
 from commerce_agent.ingestion.models import (
     CollectedItem,
@@ -98,7 +102,7 @@ class ContentExtractor:
             if isinstance(selector, str):
                 body = _selected_text(item.body, selector)
             else:
-                body = _trafilatura_text(item.body)
+                body = extract_public_article_text(item.body)
         else:
             body = _decode_text(item.body, item.content_type)
         body = normalize_text(body)
@@ -106,6 +110,9 @@ class ContentExtractor:
             body = normalize_text(item.title or "")
         if not body:
             raise ExtractionError("blank_content")
+        platforms = item.platforms or source.platforms
+        if source.collector_config.get("public_article_gate") is True:
+            platforms = validate_extracted_article(body, source.platforms)
 
         detection = self._language_detector.detect(body)
         title = normalize_text(item.title or metadata.title or "")
@@ -124,6 +131,7 @@ class ContentExtractor:
             fetched_at=fetched_at,
             author=author,
             published_at=published_at,
+            platforms=platforms,
             metadata=provenance,
         )
 
@@ -140,9 +148,7 @@ def _material_policy(
     item: CollectedItem,
 ) -> dict[str, str]:
     publisher_key = (
-        item.publisher_key
-        if source.adapter is SourceAdapter.GDELT
-        else source.publisher_key
+        item.publisher_key if source.adapter is SourceAdapter.GDELT else source.publisher_key
     )
     if not publisher_key and source.trust_tier is TrustTier.MEDIA:
         raise ExtractionError("missing_publisher_identity")
@@ -222,8 +228,7 @@ def _selector_xpath(selector: str) -> str:
                 predicates.append(f"@id={value!r}")
             else:
                 predicates.append(
-                    "contains(concat(' ', normalize-space(@class), ' '), "
-                    f"' {value} ')"
+                    f"contains(concat(' ', normalize-space(@class), ' '), ' {value} ')"
                 )
         suffix = f"[{' and '.join(predicates)}]" if predicates else ""
         xpath_parts.append(f"{tag}{suffix}")

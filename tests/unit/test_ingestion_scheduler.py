@@ -8,7 +8,11 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from commerce_agent.ingestion.models import Trigger
-from commerce_agent.ingestion.scheduler import INGESTION_JOB_ID, IngestionScheduler
+from commerce_agent.ingestion.scheduler import (
+    INGESTION_JOB_ID,
+    RETENTION_JOB_ID,
+    IngestionScheduler,
+)
 
 
 class FakeAsyncIOScheduler:
@@ -32,13 +36,18 @@ class FakeAsyncIOScheduler:
 class RecordingService:
     def __init__(self) -> None:
         self.triggers: list[Trigger] = []
+        self.retention_runs = 0
 
     async def run_all(self, trigger: Trigger) -> tuple[object, ...]:
         self.triggers.append(trigger)
         return ()
 
+    async def run_retention(self) -> int:
+        self.retention_runs += 1
+        return 0
 
-async def test_registers_one_120_minute_job_in_configured_timezone() -> None:
+
+async def test_registers_ingestion_and_dedicated_retention_jobs() -> None:
     backend = FakeAsyncIOScheduler(timezone="Asia/Shanghai")
     scheduler = IngestionScheduler(
         RecordingService(),
@@ -52,13 +61,19 @@ async def test_registers_one_120_minute_job_in_configured_timezone() -> None:
 
     assert backend.timezone == "Asia/Shanghai"
     assert backend.start_calls == 1
-    assert list(backend.jobs) == [INGESTION_JOB_ID]
+    assert list(backend.jobs) == [RETENTION_JOB_ID, INGESTION_JOB_ID]
     _, options = backend.jobs[INGESTION_JOB_ID]
     assert options["trigger"] == "interval"
     assert options["minutes"] == 120
     assert options["max_instances"] == 1
     assert options["replace_existing"] is True
     assert "next_run_time" not in options
+    _, retention_options = backend.jobs[RETENTION_JOB_ID]
+    assert retention_options["trigger"] == "interval"
+    assert retention_options["minutes"] == 60
+    assert retention_options["max_instances"] == 1
+    assert retention_options["replace_existing"] is True
+    assert "next_run_time" not in retention_options
 
 
 async def test_registered_job_awaits_ingestion_with_scheduled_trigger() -> None:
@@ -71,6 +86,37 @@ async def test_registered_job_awaits_ingestion_with_scheduled_trigger() -> None:
     await callback()
 
     assert service.triggers == [Trigger.SCHEDULED]
+
+
+async def test_registered_retention_job_runs_without_source_ingestion() -> None:
+    backend = FakeAsyncIOScheduler(timezone="UTC")
+    service = RecordingService()
+    scheduler = IngestionScheduler(service, scheduler=backend)
+    scheduler.start()
+    callback, _ = backend.jobs[RETENTION_JOB_ID]
+
+    await callback()
+
+    assert service.retention_runs == 1
+    assert service.triggers == []
+
+
+async def test_collection_disabled_still_registers_dedicated_retention_only() -> None:
+    backend = FakeAsyncIOScheduler(timezone="UTC")
+    service = RecordingService()
+    scheduler = IngestionScheduler(
+        service,
+        collection_enabled=False,
+        scheduler=backend,
+    )
+
+    scheduler.start()
+
+    assert list(backend.jobs) == [RETENTION_JOB_ID]
+    callback, _ = backend.jobs[RETENTION_JOB_ID]
+    await callback()
+    assert service.retention_runs == 1
+    assert service.triggers == []
 
 
 async def test_ingestion_exception_is_contained_for_future_schedules() -> None:

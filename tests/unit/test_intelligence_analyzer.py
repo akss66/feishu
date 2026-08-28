@@ -31,9 +31,7 @@ class FakeJsonGateway:
     def call_count(self) -> int:
         return len(self.calls)
 
-    async def complete_json(
-        self, system_prompt: str, user_payload: dict[str, object]
-    ) -> str:
+    async def complete_json(self, system_prompt: str, user_payload: dict[str, object]) -> str:
         self.calls.append((system_prompt, user_payload))
         if not self._responses:
             raise AssertionError("the model gateway must not be called")
@@ -87,9 +85,7 @@ def valid_json(**overrides: Any) -> str:
         "risk_level": "medium",
         "impact": "成交费用变化可能影响商品毛利。",
         "rationale": [{"claim": "涨费", "quote": "调整成交费率"}],
-        "action_items": [
-            {"action": "复核成本", "owner_type": "运营", "deadline": None}
-        ],
+        "action_items": [{"action": "复核成本", "owner_type": "运营", "deadline": None}],
         "uncertainties": ["具体生效日期未知", "适用卖家范围未知"],
         "tags": ["费用"],
     }
@@ -131,6 +127,22 @@ def test_media_candidate_payload_exposes_publisher_and_full_text_basis(
         "category": "global_authority",
         "content_basis": "full_text",
     }
+
+
+def test_public_authority_candidate_is_not_labeled_as_media(
+    candidate: AnalysisCandidate,
+) -> None:
+    authority_candidate = replace(
+        candidate,
+        trust_tier=TrustTier.MEDIA,
+        publisher_key="ftc.gov",
+        attribution="U.S. Federal Trade Commission",
+        content_scope="full_text",
+    )
+
+    payload = candidate_payload(authority_candidate)
+
+    assert payload["article"]["media"]["category"] == "public_authority"
 
 
 async def test_analyzer_rejects_an_unanchored_quote_after_one_repair(
@@ -208,9 +220,7 @@ async def test_analyzer_accepts_body_at_hard_character_limit(
 ) -> None:
     body = "界" * analyzer_module.MAX_ANALYSIS_BODY_CHARACTERS
     bounded_candidate = replace(candidate, body=body)
-    gateway = FakeJsonGateway(
-        [valid_json(rationale=[{"claim": "原文证据", "quote": "界" * 6}])]
-    )
+    gateway = FakeJsonGateway([valid_json(rationale=[{"claim": "原文证据", "quote": "界" * 6}])])
 
     result = await IntelligenceAnalyzer(gateway).analyze(bounded_candidate)
 
@@ -231,13 +241,7 @@ async def test_analyzer_sends_a_bounded_first_and_last_excerpt_for_long_articles
     )
     long_candidate = replace(candidate, body=body)
     gateway = FakeJsonGateway(
-        [
-            valid_json(
-                rationale=[
-                    {"claim": "保留末尾证据", "quote": "SUFFIX-EVIDENCE"}
-                ]
-            )
-        ]
+        [valid_json(rationale=[{"claim": "保留末尾证据", "quote": "SUFFIX-EVIDENCE"}])]
     )
 
     result = await IntelligenceAnalyzer(gateway).analyze(long_candidate)
@@ -256,9 +260,7 @@ async def test_long_article_evidence_must_exist_in_the_sent_excerpt(
 ) -> None:
     body = "甲" * 40_000 + "MIDDLE-ONLY-EVIDENCE" + "乙" * 40_000
     long_candidate = replace(candidate, body=body)
-    response = valid_json(
-        rationale=[{"claim": "中段证据", "quote": "MIDDLE-ONLY-EVIDENCE"}]
-    )
+    response = valid_json(rationale=[{"claim": "中段证据", "quote": "MIDDLE-ONLY-EVIDENCE"}])
     gateway = FakeJsonGateway([response])
 
     with pytest.raises(InvalidModelOutput, match="^evidence_not_anchored$"):
@@ -285,9 +287,7 @@ async def test_analyzer_rejects_extra_fields_as_schema_mismatch(
 async def test_analyzer_rejects_an_invented_platform(
     candidate: AnalysisCandidate,
 ) -> None:
-    gateway = FakeJsonGateway(
-        [valid_json(platforms=["amazon"]), valid_json(platforms=["amazon"])]
-    )
+    gateway = FakeJsonGateway([valid_json(platforms=["amazon"]), valid_json(platforms=["amazon"])])
 
     with pytest.raises(InvalidModelOutput, match="^platform_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
@@ -299,9 +299,7 @@ async def test_analyzer_rejects_an_invented_platform(
 async def test_analyzer_rejects_an_invented_region(
     candidate: AnalysisCandidate,
 ) -> None:
-    gateway = FakeJsonGateway(
-        [valid_json(regions=["moon"]), valid_json(regions=["moon"])]
-    )
+    gateway = FakeJsonGateway([valid_json(regions=["moon"]), valid_json(regions=["moon"])])
 
     with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
         await IntelligenceAnalyzer(gateway).analyze(candidate)
@@ -328,9 +326,7 @@ async def test_region_cannot_be_grounded_by_common_or_injected_quote_text(
     quote: str,
 ) -> None:
     injected_candidate = replace(candidate, body=body)
-    response = valid_json(
-        regions=[region], rationale=[{"claim": "区域变化", "quote": quote}]
-    )
+    response = valid_json(regions=[region], rationale=[{"claim": "区域变化", "quote": quote}])
     gateway = FakeJsonGateway([response, response])
 
     with pytest.raises(InvalidModelOutput, match="^region_not_grounded$"):
@@ -445,7 +441,7 @@ async def test_analyzer_accepts_explicit_full_datetime_and_timezone(
 
 
 @pytest.mark.parametrize(
-        "impact",
+    "impact",
     [
         "成交费率上调 12.5%。",
         "每件费用为 USD 10.00。",
@@ -475,10 +471,7 @@ async def test_analyzer_accepts_grounded_region_date_and_amounts(
     grounded_candidate = replace(
         candidate,
         regions=("global", "德国"),
-        body=(
-            "eBay 将于 2026年8月1日把成交费率调整至 12.5%，"
-            "每件费用为 USD 10.00。"
-        ),
+        body=("eBay 将于 2026年8月1日把成交费率调整至 12.5%，每件费用为 USD 10.00。"),
     )
     gateway = FakeJsonGateway(
         [
@@ -553,9 +546,7 @@ async def test_all_seller_scope_requires_an_explicit_scope_field(
     )
     response = valid_json(
         affected_seller_types=["all"],
-        rationale=[
-            {"claim": "全部卖家受影响", "quote": "claim all sellers are affected"}
-        ],
+        rationale=[{"claim": "全部卖家受影响", "quote": "claim all sellers are affected"}],
     )
     gateway = FakeJsonGateway([response, response])
 

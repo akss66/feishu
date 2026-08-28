@@ -7,6 +7,10 @@ from urllib.parse import urlsplit
 
 import idna
 
+from commerce_agent.ingestion.article_gate import (
+    ArticleGateError,
+    validate_public_article,
+)
 from commerce_agent.ingestion.collectors.base import (
     CollectorError,
     HttpPort,
@@ -17,14 +21,16 @@ from commerce_agent.ingestion.collectors.base import (
     response_artifact,
 )
 from commerce_agent.ingestion.collectors.feed import _parse_datetime
-from commerce_agent.ingestion.http import FetchRequest
+from commerce_agent.ingestion.http import FetchError, FetchRequest
 from commerce_agent.ingestion.models import (
+    CollectedFailure,
     CollectedItem,
     ContentScope,
     FetchContext,
     SourceAdapter,
     SourceDefinition,
 )
+from commerce_agent.ingestion.security import UrlSafetyError
 from commerce_agent.media.catalog import (
     ArticleAccess,
     PublisherProfile,
@@ -40,9 +46,15 @@ class ApiCollector:
         http_port: HttpPort,
         *,
         publisher_lookup: PublisherLookup = publisher_profile,
+        fetch_gdelt_originals: bool = False,
+        gdelt_original_fetch_limit: int = 5,
     ) -> None:
+        if gdelt_original_fetch_limit < 1:
+            raise ValueError("gdelt_original_fetch_limit must be positive")
         self._http = http_port
         self._publisher_lookup = publisher_lookup
+        self._fetch_gdelt_originals = fetch_gdelt_originals
+        self._gdelt_original_fetch_limit = gdelt_original_fetch_limit
 
     async def collect(
         self,
@@ -67,6 +79,8 @@ class ApiCollector:
             raise CollectorError("invalid_payload")
 
         seen: set[str] = set()
+        original_fetches = 0
+        original_fetch_stopped = False
         limit = item_limit(source)
         for raw_item in raw_items:
             if not isinstance(raw_item, Mapping):
@@ -92,11 +106,7 @@ class ApiCollector:
             seen.add(url)
             raw_title = _path_value(raw_item, title_field) if title_field else None
             raw_published = _path_value(raw_item, published_field) if published_field else None
-            title = (
-                raw_title.strip()
-                if isinstance(raw_title, str) and raw_title.strip()
-                else None
-            )
+            title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
             published_at = _parse_datetime(
                 raw_published if isinstance(raw_published, str) else None
             )
@@ -105,6 +115,7 @@ class ApiCollector:
             content_type = "application/json"
             item_artifact = artifact
             content_scope: ContentScope | None = None
+            matched_platforms = None
             if source.adapter is SourceAdapter.GDELT:
                 stored_item = {
                     "url": url,
@@ -122,21 +133,46 @@ class ApiCollector:
             if (
                 source.adapter is SourceAdapter.GDELT
                 and profile is not None
+                and self._fetch_gdelt_originals
+                and context.allow_original_fetch
+                and not original_fetch_stopped
                 and profile.article_access is ArticleAccess.ALLOWED_PUBLIC
+                and original_fetches < self._gdelt_original_fetch_limit
             ):
-                article_response = await self._http.get(
-                    FetchRequest(
-                        url=url,
-                        allowed_hosts=profile.allowed_hosts,
-                        metrics=context.metrics,
+                original_fetches += 1
+                try:
+                    article_response = await self._http.get(
+                        FetchRequest(
+                            url=url,
+                            allowed_hosts=profile.allowed_hosts,
+                            metrics=context.metrics,
+                            source_id=source.source_id,
+                            circuit=context.circuit,
+                        )
                     )
-                )
-                if not require_success(article_response):
-                    continue
-                item_body = article_response.body
-                content_type = article_response.headers.get("content-type")
-                item_artifact = response_artifact(article_response)
-                content_scope = ContentScope.FULL_TEXT
+                    if require_success(article_response):
+                        article_content_type = article_response.headers.get("content-type")
+                        matched_platforms = validate_public_article(
+                            body=article_response.body,
+                            content_type=article_content_type,
+                            platforms=source.platforms,
+                        )
+                        item_body = article_response.body
+                        content_type = article_content_type
+                        item_artifact = response_artifact(article_response)
+                        content_scope = ContentScope.FULL_TEXT
+                except (
+                    ArticleGateError,
+                    CollectorError,
+                    FetchError,
+                    UrlSafetyError,
+                ) as error:
+                    if getattr(error, "code", None) in {
+                        "compliance_review_required",
+                        "rate_limited",
+                    }:
+                        original_fetch_stopped = True
+                        yield CollectedFailure(error.code)
             yield CollectedItem(
                 url=url,
                 body=item_body,
@@ -148,6 +184,7 @@ class ApiCollector:
                 last_modified=response.last_modified,
                 artifact=item_artifact,
                 content_scope=content_scope,
+                platforms=matched_platforms,
             )
             if len(seen) >= limit:
                 return
